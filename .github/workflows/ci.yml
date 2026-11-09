@@ -14,6 +14,13 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # F06/G1: real Pi npm shim is acceptance coverage; pin the version verified locally.
+      - name: Install real Pi CLI
+        shell: pwsh
+        run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.0
       - name: Full gate (model + integration + WPF + prototype + browser)
         shell: pwsh
         run: ./scripts/test.ps1
