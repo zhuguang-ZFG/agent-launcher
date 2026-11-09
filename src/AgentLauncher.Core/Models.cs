@@ -78,11 +78,11 @@ public static class ResourcePolicy
     public static Admission Check(MemorySnapshot sample, ulong reserved, ulong requested)
     {
         // Conservatively reserve the full budget again. Never subtract paged-out commit from physical headroom.
-        if (!double.IsFinite(sample.CpuPercent) || DateTimeOffset.UtcNow - sample.At > TimeSpan.FromSeconds(3)) return new(false, "资源采样无效，请重新检查。");
-        if (reserved + requested > Math.Min(8 * GiB, sample.Total * 35 / 100)) return new(false, "超过受管内存总预算，请减少启动项。");
-        if (sample.Available < Reserve(sample.Total) + reserved + requested) return new(false, "可用内存不足以保留系统余量和本次预算，请减少启动项或关闭其他应用。");
-        if (sample.CommitAvailable < Math.Max(2 * GiB, sample.CommitLimit / 20) + reserved + requested) return new(false, "系统提交余量不足，暂缓新增任务。");
-        return sample.CpuPercent >= 80 ? new(false, "整机 CPU 繁忙，暂缓新增任务。") : new(true, "资源检查通过");
+        if (!double.IsFinite(sample.CpuPercent) || DateTimeOffset.UtcNow - sample.At > TimeSpan.FromSeconds(3)) return new(false, "资源读数暂时不可信，稍候会自动重新检查。");
+        if (reserved + requested > Math.Min(8 * GiB, sample.Total * 35 / 100)) return new(false, "本次要用的内存超过总预算，请少勾选几个 Agent。");
+        if (sample.Available < Reserve(sample.Total) + reserved + requested) return new(false, "现在可用内存不够：要给系统留余量。请关掉一些应用，或减少启动的 Agent 个数。");
+        if (sample.CommitAvailable < Math.Max(2 * GiB, sample.CommitLimit / 20) + reserved + requested) return new(false, "系统内存余量不足，暂时不能新增任务。");
+        return sample.CpuPercent >= 80 ? new(false, "整机 CPU 正忙，稍等片刻再启动。") : new(true, "资源充足");
     }
 }
 public sealed record CommandSpec(string Executable, string[] Arguments, string Adapter);

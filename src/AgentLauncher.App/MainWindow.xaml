@@ -26,22 +26,22 @@
      <StackPanel>
       <DockPanel Margin="0,0,0,12">
        <Button DockPanel.Dock="Right" Content="选择文件夹" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Margin="12,0,0,0"/>
-       <StackPanel><TextBlock Text="项目" Style="{StaticResource Caption}"/><TextBlock x:Name="ProjectTitle" Text="从一个项目开始" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/></StackPanel>
+       <StackPanel><TextBlock Text="项目" Style="{StaticResource Caption}"/><TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/></StackPanel>
       </DockPanel>
       <TextBox x:Name="ProjectPath" FontFamily="Consolas,Microsoft YaHei" FontSize="13" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" ToolTip="输入本地绝对目录，或拖入文件夹"/>
-      <DockPanel Margin="0,8,0,0"><ComboBox DockPanel.Dock="Right" x:Name="Recent" Width="200" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/><TextBlock Text="将文件夹拖到窗口，或选择本地项目" Style="{StaticResource Caption}" VerticalAlignment="Center"/></DockPanel>
+      <DockPanel Margin="0,8,0,0"><ComboBox DockPanel.Dock="Right" x:Name="Recent" Width="200" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/><TextBlock x:Name="ProjectGuide" Text="三步开始：① 选择或拖入项目文件夹　② 勾选要启动的 Agent　③ 点右下角「启动」" Style="{StaticResource Caption}" VerticalAlignment="Center"/></DockPanel>
      </StackPanel>
     </Border>
     <Grid x:Name="WorkGrid">
      <Grid.ColumnDefinitions><ColumnDefinition x:Name="ConfigColumn" Width="*"/><ColumnDefinition x:Name="SummaryColumn" Width="320"/></Grid.ColumnDefinitions>
      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <StackPanel x:Name="ConfigurationPanel" Margin="0,0,20,0">
-      <DockPanel Margin="0,0,0,12"><TextBlock DockPanel.Dock="Right" x:Name="SelectionSummary" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="本次 Agent" Style="{StaticResource Heading}"/></DockPanel>
+      <DockPanel Margin="0,0,0,12"><TextBlock DockPanel.Dock="Right" x:Name="SelectionSummary" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="要一起启动的 Agent" Style="{StaticResource Heading}"/></DockPanel>
       <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="10">
        <StackPanel>
         <Grid Margin="16,12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
          <ComboBox x:Name="Templates" SelectionChanged="TemplateChanged" AutomationProperties.Name="恢复组合" MaxWidth="260" HorizontalAlignment="Left"/>
-         <Button Grid.Column="1" Content="另存组合" Style="{StaticResource QuietButton}" Click="SaveTemplateClick" Margin="8,0,0,0"/>
+         <Button Grid.Column="1" Content="存为组合" Style="{StaticResource QuietButton}" Click="SaveTemplateClick" Margin="8,0,0,0"/>
         </Grid>
         <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0"><StackPanel x:Name="SlotList"/></Border>
         <Button x:Name="AddButton" Content="＋  添加 Agent" Style="{StaticResource QuietButton}" Click="AddClick" HorizontalAlignment="Left" Margin="12,8,12,12"/>
@@ -53,23 +53,23 @@
       </Expander>
      </StackPanel>
      <StackPanel x:Name="SummaryPanel" Grid.Column="1">
-      <DockPanel Margin="0,0,0,12"><TextBlock DockPanel.Dock="Right" Text="配置示意" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="终端布局" Style="{StaticResource Heading}"/></DockPanel>
+      <DockPanel Margin="0,0,0,12"><TextBlock DockPanel.Dock="Right" Text="实时预览" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="启动后的终端样子" Style="{StaticResource Heading}"/></DockPanel>
       <Border Background="#191B20" BorderBrush="#34373F" BorderThickness="1" CornerRadius="10" Padding="12">
        <StackPanel>
         <DockPanel Margin="4,0,4,12"><TextBlock DockPanel.Dock="Right" x:Name="PaneCount" Text="1 个窗格" Foreground="#A5ABB6" FontSize="12"/><TextBlock Text="Windows Terminal" Foreground="#D7DBE2" FontSize="12"/></DockPanel>
-        <Grid x:Name="Preview" MinHeight="144"/>
+        <Grid x:Name="Preview" MinHeight="128"/>
        </StackPanel>
       </Border>
-      <DockPanel Margin="0,12,0,20"><TextBlock Text="两项排列" Style="{StaticResource Caption}" VerticalAlignment="Center"/><ComboBox x:Name="Layout" Width="128" HorizontalAlignment="Right" SelectionChanged="LayoutChanged" AutomationProperties.Name="两项布局"><ComboBoxItem Content="左右" Tag="vertical"/><ComboBoxItem Content="上下" Tag="horizontal"/></ComboBox></DockPanel>
-      <TextBlock Text="工作目录" FontWeight="SemiBold" Margin="0,0,0,8"/>
-      <ComboBox x:Name="DirectoryMode" SelectionChanged="DirectoryChanged" AutomationProperties.Name="同项目目录策略"><ComboBoxItem Content="各自独立" Tag="isolated"/><ComboBoxItem Content="使用已准备目录" Tag="prepared"/><ComboBoxItem Content="共用原目录" Tag="shared"/></ComboBox>
+      <DockPanel Margin="0,10,0,14"><TextBlock Text="两个窗格的排法" Style="{StaticResource Caption}" VerticalAlignment="Center"/><ComboBox x:Name="Layout" Width="128" HorizontalAlignment="Right" SelectionChanged="LayoutChanged" AutomationProperties.Name="两项布局"><ComboBoxItem Content="左右并排" Tag="vertical"/><ComboBoxItem Content="上下叠放" Tag="horizontal"/></ComboBox></DockPanel>
+      <TextBlock Text="文件夹怎么用" FontWeight="SemiBold" Margin="0,0,0,8"/>
+      <ComboBox x:Name="DirectoryMode" SelectionChanged="DirectoryChanged" AutomationProperties.Name="同项目目录策略"><ComboBoxItem Content="各自独立（互不影响）" Tag="isolated"/><ComboBoxItem Content="用已准备好的目录" Tag="prepared"/><ComboBoxItem Content="共用同一个文件夹" Tag="shared"/></ComboBox>
       <TextBlock x:Name="DirectoryHelp" Style="{StaticResource Caption}" Margin="0,8,0,12"/>
-      <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="0,16,0,0">
+      <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="0,12,0,0">
        <StackPanel>
-        <DockPanel><Button DockPanel.Dock="Right" Content="详情" Style="{StaticResource QuietButton}" Click="ResourceClick" MinHeight="28" Padding="8,2"/><TextBlock Text="资源预算" FontWeight="SemiBold" VerticalAlignment="Center"/></DockPanel>
+        <DockPanel><Button DockPanel.Dock="Right" Content="详情" Style="{StaticResource QuietButton}" Click="ResourceClick" MinHeight="28" Padding="8,2"/><TextBlock Text="电脑资源" FontWeight="SemiBold" VerticalAlignment="Center"/></DockPanel>
         <Grid Margin="0,12,0,0"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
-         <StackPanel><TextBlock Text="可用内存" Style="{StaticResource Caption}"/><TextBlock x:Name="AvailableValue" Text="—" FontFamily="Consolas" FontSize="24" Margin="0,4,0,0"/></StackPanel>
-         <StackPanel Grid.Column="1"><TextBlock Text="本次预算" Style="{StaticResource Caption}"/><TextBlock x:Name="BudgetValue" Text="2 GiB" FontFamily="Consolas" FontSize="24" Margin="0,4,0,0"/></StackPanel>
+         <StackPanel><TextBlock Text="现在可用内存" Style="{StaticResource Caption}"/><TextBlock x:Name="AvailableValue" Text="—" FontFamily="Consolas" FontSize="24" Margin="0,4,0,0"/></StackPanel>
+         <StackPanel Grid.Column="1"><TextBlock Text="本次需要" Style="{StaticResource Caption}"/><TextBlock x:Name="BudgetValue" Text="2 GiB" FontFamily="Consolas" FontSize="24" Margin="0,4,0,0"/></StackPanel>
         </Grid>
         <TextBlock x:Name="ResourceText" Style="{StaticResource Caption}" Margin="0,12,0,0" AutomationProperties.LiveSetting="Polite"/>
        </StackPanel>
