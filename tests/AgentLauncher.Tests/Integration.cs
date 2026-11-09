@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
@@ -68,6 +69,9 @@ internal static class Integration
             for(var i=0;i<25;i++){await Task.Delay(100);var report=await Ipc.SendAsync(new("status",Guid.NewGuid()));if(Store.IsTerminal(report.Entries!.Single(e=>e.Plan.Id==item.Id)))break;}
             var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(Store.IsTerminal(status.Entries!.Single(e=>e.Plan.Id==item.Id)),"unsettled crashed attempt");Assert(File.Exists(output)==(phase=="Started"),"unexpected execution after crash boundary");
         });
+        await Test("Status reliable across idle ticks",async()=>{
+            for(var i=0;i<12;i++){await Task.Delay(500);var report=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(report.Ok,"status failed at iteration "+i+": "+report.Message);}
+        });
         await Test("F09 isolated worktrees from fixed commit",async()=>{
             var repo=Path.Combine(Store.Root,"tiny-repo");Directory.CreateDirectory(repo);var git=Commands.FindExe("git.exe")!;
             async Task Git(params string[] args){var result=await ControlledCommand.RunAsync(new(git,args,"exe"),repo);Assert(result.Code==0,result.Error);}
@@ -78,6 +82,12 @@ internal static class Integration
             Assert(repeated.Select(p=>p.Cwd).SequenceEqual(plans.Select(p=>p.Cwd)),"recovery created duplicate worktrees");Assert(!repeated.Select(p=>p.Id).Intersect(plans.Select(p=>p.Id)).Any(),"reused launch authorization IDs");
             Assert(plans.Count==2&&plans[0].Workspace.Key!=plans[1].Workspace.Key,"worktrees not independent");await File.WriteAllTextAsync(Path.Combine(plans[0].Cwd,"hello.txt"),"only first");Assert(await File.ReadAllTextAsync(Path.Combine(plans[1].Cwd,"hello.txt"))=="baseline","worktrees share modifications");
             var prepPath=Directory.GetFiles(Path.Combine(Store.Root,"preparations"),"*.json").Single();
+            Assert(Store.Read<PreparationRecord>(prepPath)!.Original[0].Cwd==PhysicalDirectory.Resolve(repo).Path,"preparation record Original overwritten with worktree path");
+            var drift=await ControlledCommand.RunAsync(new(git,["-c","user.name=Launcher Test","-c","user.email=test@example.invalid","commit","--allow-empty","-m","drift"],"exe"),plans[0].Cwd);
+            Assert(drift.Code==0,drift.Error);
+            var rejected=false;try{await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);}catch(IOException e){rejected=e.Message.Contains("基线已变化");}
+            Assert(rejected,"changed prepared worktree HEAD was reused");
+            var reset=await ControlledCommand.RunAsync(new(git,["reset","--hard","HEAD~1"],"exe"),plans[0].Cwd);Assert(reset.Code==0,reset.Error);
             var record=Store.Read<PreparationRecord>(prepPath)!;
             record.Original[0]=record.Original[0] with{Command=new(Path.Combine(Store.Root,"missing-node.exe"),record.Original[0].Command.Arguments,"exe")};Store.Save(prepPath,record);
             var healed=await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);
@@ -94,6 +104,55 @@ internal static class Integration
             var unsupported=File.ReadAllBytes(prepPath);
             try{await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);Assert(false,"unsupported preparation record accepted");}catch(IOException e){Assert(e.Message.Contains("版本不支持"),e.Message);}
             Assert(File.ReadAllBytes(prepPath).SequenceEqual(unsupported),"unsupported preparation record was rewritten");
+        });
+        var validationDraft=new Draft{Project=cwd,DirectoryMode="shared"};
+        for(var i=0;i<validationDraft.Slots.Count;i++){var slot=validationDraft.Slots[i];slot.Enabled=i is 1 or 3;slot.Profiles[slot.AgentId]=new(){Executable=Environment.ProcessPath!,Arguments=["--hold","100"]};}
+        var previousRecords=Directory.GetFiles(Store.FilePath("preparations"),"*.json").ToHashSet();
+        var validationPlans=await new WorkspacePreparer().PrepareAsync(validationDraft,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+        var validationPath=Directory.GetFiles(Store.FilePath("preparations"),"*.json").Single(p=>!previousRecords.Contains(p));
+        var validRecordBytes=File.ReadAllBytes(validationPath);
+        var corruptions=new (string Name,Action<PreparationRecord> Apply)[]
+        {
+            ("null executable",r=>r.Original[0]=r.Original[0] with{Command=r.Original[0].Command with{Executable=null!}}),
+            ("null arguments",r=>r.Original[0]=r.Original[0] with{Command=r.Original[0].Command with{Arguments=null!}}),
+            ("null argument",r=>r.Original[0]=r.Original[0] with{Command=r.Original[0].Command with{Arguments=[null!]}}),
+            ("NUL argument",r=>r.Original[0]=r.Original[0] with{Command=r.Original[0].Command with{Arguments=["bad\0arg"]}}),
+            ("null adapter",r=>r.Original[0]=r.Original[0] with{Command=r.Original[0].Command with{Adapter=null!}}),
+            ("null workspace path",r=>r.Original[0]=r.Original[0] with{Workspace=r.Original[0].Workspace with{Path=null!}}),
+            ("null workspace key",r=>r.Original[0]=r.Original[0] with{Workspace=r.Original[0].Workspace with{Key=null!}}),
+            ("null name",r=>r.Original[0]=r.Original[0] with{Name=null!}),
+            ("relative source path",r=>r.Original[0]=r.Original[0] with{Cwd="relative"}),
+            ("zero position before repair",r=>r.Original[0]=r.Original[0] with{Position=0,Command=r.Original[0].Command with{Executable=Store.FilePath("missing-command.exe")}}),
+            ("out of range position before repair",r=>r.Original[0]=r.Original[0] with{Position=5,Command=r.Original[0].Command with{Executable=Store.FilePath("missing-command.exe")}}),
+            ("disabled draft position",r=>r.Original[0]=r.Original[0] with{Position=1}),
+            ("duplicate original ID",r=>r.Original[1]=r.Original[1] with{Id=r.Original[0].Id}),
+            ("duplicate position",r=>r.Original[1]=r.Original[1] with{Position=r.Original[0].Position}),
+            ("missing active slot",r=>r.Original.RemoveAt(1)),
+            ("mixed batch IDs",r=>r.Original[1]=r.Original[1] with{BatchId=Guid.NewGuid()}),
+            ("orphan completed key before repair",r=>r.Completed.Add(Guid.NewGuid(),r.Original[0] with{Command=r.Original[0].Command with{Executable=Store.FilePath("missing-command.exe")}})),
+            ("completed ID mismatch",r=>r.Completed.Add(r.Original[0].Id,r.Original[0] with{Id=Guid.NewGuid()})),
+            ("completed position mismatch",r=>r.Completed.Add(r.Original[0].Id,r.Original[0] with{Position=r.Original[1].Position})),
+            ("completed batch mismatch",r=>r.Completed.Add(r.Original[0].Id,r.Original[0] with{BatchId=Guid.NewGuid()})),
+            ("null completed executable",r=>r.Completed.Add(r.Original[0].Id,r.Original[0] with{Command=r.Original[0].Command with{Executable=null!}})),
+            ("null baseline",r=>r.Baselines.Add(r.Original[0].Workspace.Key,null!)),
+            ("unknown baseline key",r=>r.Baselines.Add("unknown-workspace",new string('a',40)))
+        };
+        foreach(var version in new[]{0,1})
+        foreach(var corruption in corruptions)
+        await Test($"R11 preparation v{version} {corruption.Name} refuses without writes",async()=>{
+            var candidate=JsonSerializer.Deserialize<PreparationRecord>(validRecordBytes,Store.Json)!;corruption.Apply(candidate);
+            if(version==0)Store.Save(validationPath,new{candidate.Digest,candidate.Original,candidate.Completed,candidate.Baselines});else Store.Save(validationPath,candidate);
+            var originalBytes=File.ReadAllBytes(validationPath);var backupBytes=File.ReadAllBytes(validationPath+".bak");Exception? error=null;
+            try{await new WorkspacePreparer().PrepareAsync(validationDraft,_=>{},_=>Task.FromResult(false),CancellationToken.None);}catch(Exception e){error=e;}
+            Assert(File.ReadAllBytes(validationPath).SequenceEqual(originalBytes),"invalid preparation record was rewritten");
+            Assert(File.ReadAllBytes(validationPath+".bak").SequenceEqual(backupBytes),"backup was overwritten on corruption refusal");
+            Assert(error is IOException,"expected corruption IOException, got "+(error?.GetType().Name??"successful replay"));
+        });
+        Store.Save(validationPath,JsonSerializer.Deserialize<PreparationRecord>(validRecordBytes,Store.Json)!);
+        await Test("F09 noncontiguous active positions preserve preparation identity",async()=>{
+            var replay=await new WorkspacePreparer().PrepareAsync(validationDraft,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+            Assert(replay.Select(p=>p.Position).SequenceEqual(new[]{2,4})&&replay.Select(p=>p.Cwd).SequenceEqual(validationPlans.Select(p=>p.Cwd)),"valid active-slot mapping changed");
+            Assert(!replay.Select(p=>p.Id).Intersect(validationPlans.Select(p=>p.Id)).Any(),"reused launch authorization IDs");
         });
         await Test("Terminal two panes exact child cwd and arguments",async()=>{
             await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
