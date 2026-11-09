@@ -64,14 +64,39 @@ public sealed class PreparationRecord
 public sealed class WorkspacePreparer
 {
     private readonly string git=Commands.FindExe("git.exe")??"";
-    private static bool StructurallyValid(PreparationRecord record)
+    private static bool StructurallyValid(PreparationRecord record,IReadOnlyList<LaunchItem> expected)
     {
-        if(string.IsNullOrWhiteSpace(record.Digest)||record.Original is not {Count:>0}||record.Completed==null||record.Baselines==null)return false;
-        foreach(var plan in record.Original)if(!Usable(plan))return false;
-        foreach(var plan in record.Completed.Values)if(!Usable(plan))return false;
+        if(string.IsNullOrWhiteSpace(record.Digest)||record.Original is not {Count:>0}||record.Original.Count!=expected.Count||record.Completed==null||record.Baselines==null)return false;
+        for(var i=0;i<record.Original.Count;i++)
+        {
+            var plan=record.Original[i];var current=expected[i];
+            if(!Usable(plan)||plan.Position!=current.Position||plan.Name!=current.Name||plan.Shared!=current.Shared||plan.Kind!=current.Kind||plan.Budget!=current.Budget)return false;
+            if(plan.Cwd!=current.Cwd||plan.Workspace!=current.Workspace||plan.BatchId!=record.Original[0].BatchId)return false;
+            for(var j=0;j<i;j++)if(record.Original[j].Id==plan.Id)return false;
+        }
+        foreach(var pair in record.Completed)
+        {
+            var plan=pair.Value;if(!Usable(plan)||plan.Id!=pair.Key)return false;
+            var original=record.Original.Find(p=>p.Id==pair.Key);if(original==null)return false;
+            if(plan.Position!=original.Position||plan.BatchId!=original.BatchId||plan.Name!=original.Name||plan.Shared!=original.Shared||plan.Kind!=original.Kind||plan.Budget!=original.Budget)return false;
+        }
+        foreach(var baseline in record.Baselines)
+        {
+            if(baseline.Value is not {Length:40 or 64}||!baseline.Value.All(Uri.IsHexDigit))return false;
+            if(!record.Original.Exists(p=>p.Workspace.Key==baseline.Key))return false;
+        }
         return true;
     }
-    private static bool Usable(LaunchItem? plan)=>plan is{Cwd:not null,Workspace:not null,Command:not null}&&plan.Id!=Guid.Empty&&plan.Command.Executable.Length>0;
+    private static bool Usable(LaunchItem? plan)
+    {
+        if(plan==null||plan.Id==Guid.Empty||plan.BatchId==Guid.Empty||plan.Position is <1 or >4||!ValidText(plan.Name)||!AbsolutePath(plan.Cwd))return false;
+        if(plan.Workspace==null||!AbsolutePath(plan.Workspace.Path)||!ValidText(plan.Workspace.Key)||plan.Command==null)return false;
+        if(!AbsolutePath(plan.Command.Executable)||!plan.Command.Executable.EndsWith(".exe",StringComparison.OrdinalIgnoreCase)||plan.Command.Adapter is not ("exe" or "node-shim")||plan.Command.Arguments==null)return false;
+        foreach(var argument in plan.Command.Arguments)if(argument==null||argument.Contains('\0'))return false;
+        return true;
+    }
+    private static bool ValidText(string? value)=>!string.IsNullOrWhiteSpace(value)&&!value.Contains('\0');
+    private static bool AbsolutePath(string? value)=>ValidText(value)&&Path.IsPathFullyQualified(value!);
     public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct)
     {
         draft.Validate();
@@ -93,7 +118,7 @@ public sealed class WorkspacePreparer
         {
             if(record.SchemaVersion is <0 or >1)throw new IOException($"准备记录版本不支持，未改写文件：{preparationPath}");
             if(record.Digest!=digest)throw new IOException("准备记录摘要不符，禁止重放。");
-            if(!StructurallyValid(record))throw new IOException($"准备记录损坏，禁止重放：{preparationPath}");
+            if(!StructurallyValid(record,plans))throw new IOException($"准备记录损坏，禁止重放：{preparationPath}");
             var repaired=false;
             if(record.Original.Any(p=>!File.Exists(p.Command.Executable))||record.Completed.Values.Any(p=>!File.Exists(p.Command.Executable)))
             {
@@ -106,7 +131,7 @@ public sealed class WorkspacePreparer
             effective=record.Original.Select(p=>record.Completed.GetValueOrDefault(p.Id)??p).ToList();
         }
         if(record==null){record=new(){SchemaVersion=1,Digest=digest,Original=plans};Store.Save(preparationPath,record);}
-        plans=effective??record.Original;batch=record.Original[0].BatchId;
+        plans=effective??record.Original.ToList();batch=record.Original[0].BatchId;
         foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1).ToArray())
         {
             if(draft.DirectoryMode=="shared")continue;
