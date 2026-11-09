@@ -29,6 +29,8 @@
 
 WPF 断言增至 **34 项**（新增：配置加载可写、监控器健康、行编辑焦点恢复、面板行列位置）。全门禁 `scripts/test.ps1` 退出 0（PASS 29 行）；预览包已重建。损坏场景负向冒烟脚本位于 `D:/Temp/User/smoke-corrupt.ps1`（仓库外）。
 
+第四轮：仓库发布到 GitHub（私有，`zhuguang-ZFG/agent-launcher`）并建立 CI（`windows-latest` + .NET 8 + Node 22 + 真实 Pi CLI `@earendil-works/pi-coding-agent@1.5.0`，完整 `scripts/test.ps1`）。修复 CI 暴露的真实缺陷：`Commands.Resolve` 的 npm/Pi shim 模板常量直接以源码内嵌换行比较，CRLF 检出（Windows runner autocrlf）下模板含 `\r\n` 而 shim 文本被归一化，必然失配——现两侧均归一化，并加 `.gitattributes` 锁定 `.cs/.xaml` 为 LF。集成测试「Real Pi version via recognized adapter」失败消息现携带实际解析路径。CI 最终运行 `completed/success`：模型 11/11、集成 0 失败（含真实 Pi PASS）、WPF 34 断言、原型/浏览器 5/5。
+
 未声称完成：人工视觉审美评审、Narrator/高对比度实测、100/150/200% DPI 矩阵。几何与资源断言不冒充视觉验收。
 
 ## 1. 运行入口与架构
