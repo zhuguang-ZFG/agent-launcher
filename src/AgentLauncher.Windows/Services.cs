@@ -78,7 +78,22 @@ public static class Ipc
     {
         using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);timeout.CancelAfter(TimeSpan.FromSeconds(8));
         await using var pipe=new NamedPipeClientStream(".",Store.Pipe,PipeDirection.InOut,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly);
-        await pipe.ConnectAsync(timeout.Token);await WriteAsync(pipe,request,timeout.Token);return await ReadAsync<Response>(pipe,timeout.Token);
+        await pipe.ConnectAsync(timeout.Token);await WriteAsync(pipe,request,timeout.Token);
+#if INTEGRATION_TESTS
+        // Fault injection: the request may already be committed server-side while the client observes a timeout.
+        if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND")=="1"){Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND",null);throw new TimeoutException("模拟客户端超时（请求已发送）。");}
+#endif
+        return await ReadAsync<Response>(pipe,timeout.Token);
+    }
+    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default)
+    {
+        try{return await SendAsync(new("reserve",Guid.NewGuid(),items),ct);}
+        catch(Exception e)when(e is IOException or TimeoutException or OperationCanceledException)
+        {
+            // The server may have committed the reservation before the client saw a failure; revoke best-effort so the workspace is not held.
+            foreach(var item in items){try{await SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));}catch(Exception inner)when(inner is IOException or TimeoutException or OperationCanceledException){}}
+            throw new IOException("预约结果未确认，已尝试撤销全部启动项；请在运行记录中核对。",e);
+        }
     }
     public static async Task WriteAsync<T>(Stream stream,T message,CancellationToken ct)
     {

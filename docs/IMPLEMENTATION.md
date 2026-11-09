@@ -31,6 +31,16 @@ WPF 断言增至 **34 项**（新增：配置加载可写、监控器健康、�
 
 第四轮：仓库发布到 GitHub（私有，`zhuguang-ZFG/agent-launcher`）并建立 CI（`windows-latest` + .NET 8 + Node 22 + 真实 Pi CLI `@earendil-works/pi-coding-agent@1.5.0`，完整 `scripts/test.ps1`）。修复 CI 暴露的真实缺陷：`Commands.Resolve` 的 npm/Pi shim 模板常量直接以源码内嵌换行比较，CRLF 检出（Windows runner autocrlf）下模板含 `\r\n` 而 shim 文本被归一化，必然失配——现两侧均归一化，并加 `.gitattributes` 锁定 `.cs/.xaml` 为 LF。集成测试「Real Pi version via recognized adapter」失败消息现携带实际解析路径。CI 最终运行 `completed/success`：模型 11/11、集成 0 失败（含真实 Pi PASS）、WPF 34 断言、原型/浏览器 5/5。
 
+第五轮：修复开放 P2 缺陷（评审残项）。
+
+- **预约超时自动撤销**：`Ipc.ReserveWithCleanupAsync` 在客户端超时/IO 失败时对所有计划 ID 尽力 revoke（服务端可能已提交）。`INTEGRATION_TESTS` 下新增掉包钩子 `AGENT_LAUNCHER_IPC_DROP_AFTER_SEND` 模拟「已提交但客户端超时」，集成测试断言该授权最终为 `Revoked`。
+- **管道被占用不再击穿监控器**：`NamedPipeServerStream` 创建移入带捕获的循环，失败时写入 blocked 并在 1s 后重试，不再退出。冒烟：外部持有同名管道 → `--screenshot` 显示启动禁用、错误可见、监控器 3 秒后仍存活且 PID 不变（旧行为立即退出并被反复拉起）；释放后下一轮恢复健康、错误清空。
+- **撤销移除不再整快照回滚**：只把被移除项插回原索引且保留其间无关编辑；容量已满（4 项）时拒绝并提示，不触发 `Validate` 异常。同时修复真实崩溃：移除处理器在 `Edit→Render` 之后继续使用 `Window.GetWindow(this)`（控件已被移出树）会抛异常直抵 Dispatcher 导致关停——现在先捕获窗口引用再操作。UiChecks 新增 6 条断言（移除/撤销/满容量拒绝/只读回滚）。
+- **准备记录防护**：`PreparationRecord` 增加 `SchemaVersion`；结构校验（Digest/Original/Completed/Baselines/各计划字段与 Guid）；未知版本 fail-closed 且不改写文件；旧版（无版本字段）记录校验后原地升级、保留 `Original` Id/批次/`Completed`/`Baselines` 身份，不重建 worktree；命令可执行文件缺失时保留 worktree 映射、只按草稿顺序重解析命令并回写 `Completed`。集成 F09 扩展覆盖：陈旧命令修复（Cwd 序列不变）、结构损坏拒绝、旧版记录采纳（Cwd 与 Id 身份保留）、版本 2 拒绝且文件字节不变。
+- **UI 状态一致性**：`Edit` 返回是否被守卫拒绝；只读时复选框/Agent 选择器回滚到原值；`QueueSave` 增加 loading 守卫；启动提示链补齐只读/未启用/监控器未就绪/命令检查中文案，不再在禁用时显示「检查已通过」。
+
+回归：`scripts/test.ps1` 退出 0（PASS 28 行：模型 11、集成 12 含新增超时撤销、浏览器/原型 5/5）；WPF 断言 34→**40 项**。
+
 未声称完成：人工视觉审美评审、Narrator/高对比度实测、100/150/200% DPI 矩阵。几何与资源断言不冒充视觉验收。
 
 ## 1. 运行入口与架构

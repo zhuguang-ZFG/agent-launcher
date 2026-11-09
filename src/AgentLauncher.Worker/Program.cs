@@ -96,20 +96,25 @@ internal sealed class Monitor : IDisposable
             root=new Job(Store.RootJob,root:true);sampler.Sample();Thread.Sleep(250);Refresh();
             while(true)
             {
-                using var pipe=new NamedPipeServerStream(Store.Pipe,PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly);
-                using var wait=new CancellationTokenSource(2000);
-                try{pipe.WaitForConnectionAsync(wait.Token).GetAwaiter().GetResult();}
-                catch(OperationCanceledException){Refresh();if(!ledgerBroken&&ledger.Entries.All(Store.IsTerminal)&&DateTime.UtcNow-lastActivity>TimeSpan.FromSeconds(5))return 0;continue;}
-                lastActivity=DateTime.UtcNow;
-                using var deadline=new CancellationTokenSource(3000);
-                try
+                NamedPipeServerStream pipe;
+                try{pipe=new NamedPipeServerStream(Store.Pipe,PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly);}
+                catch(Exception e)when(e is IOException or UnauthorizedAccessException or System.Security.SecurityException){blocked="命名管道被占用或不可用，正在重试："+e.Message;Thread.Sleep(1000);continue;}
+                using(pipe)
                 {
-                    var request=Ipc.ReadAsync<Request>(pipe,deadline.Token).GetAwaiter().GetResult();Refresh();
-                    Response response;
-                    try{response=Handle(request);}catch(Exception e)when(e is not OutOfMemoryException){response=new(false,e.Message);}
-                    Ipc.WriteAsync(pipe,response,deadline.Token).GetAwaiter().GetResult();
+                    using var wait=new CancellationTokenSource(2000);
+                    try{pipe.WaitForConnectionAsync(wait.Token).GetAwaiter().GetResult();}
+                    catch(OperationCanceledException){Refresh();if(!ledgerBroken&&ledger.Entries.All(Store.IsTerminal)&&DateTime.UtcNow-lastActivity>TimeSpan.FromSeconds(5))return 0;continue;}
+                    lastActivity=DateTime.UtcNow;
+                    using var deadline=new CancellationTokenSource(3000);
+                    try
+                    {
+                        var request=Ipc.ReadAsync<Request>(pipe,deadline.Token).GetAwaiter().GetResult();Refresh();
+                        Response response;
+                        try{response=Handle(request);}catch(Exception e)when(e is not OutOfMemoryException){response=new(false,e.Message);}
+                        Ipc.WriteAsync(pipe,response,deadline.Token).GetAwaiter().GetResult();
+                    }
+                    catch(Exception e)when(e is IOException or OperationCanceledException or JsonException){/* Peer failure never grants additional authorization. */}
                 }
-                catch(Exception e)when(e is IOException or OperationCanceledException or JsonException){/* Peer failure never grants additional authorization. */}
             }
         }
         finally{Dispose();single.ReleaseMutex();}

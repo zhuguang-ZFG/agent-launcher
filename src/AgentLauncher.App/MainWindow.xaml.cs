@@ -77,18 +77,19 @@ public partial class MainWindow : Window
         }
 #endif
     }
-    private void Edit(Action<Draft> change)
+    private bool Edit(Action<Draft> change)
     {
-        if(rendering||loading||busy||readOnly)return;
+        if(rendering||loading||busy||readOnly)return false;
         var focusName=Keyboard.FocusedElement is DependencyObject focused&&Within(focused,SlotList)?AutomationProperties.GetName(focused):null;
         config.Edit(change);validationError="";ErrorText.Text="";QueueSave();Render();
         if(focusName is {Length:>0}&&FindLogical(SlotList).FirstOrDefault(el=>AutomationProperties.GetName(el)==focusName) is IInputElement target)Keyboard.Focus(target);
+        return true;
     }
     private static bool Within(DependencyObject? node,DependencyObject root){while(node!=null){if(node==root)return true;node=LogicalTreeHelper.GetParent(node)??(node is Visual v?VisualTreeHelper.GetParent(v):null);}return false;}
     private static IEnumerable<DependencyObject> FindLogical(DependencyObject root){foreach(var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()){yield return child;foreach(var nested in FindLogical(child))yield return nested;}}
     private void QueueSave()
     {
-        if(readOnly)return;SaveStatus.Text="正在保存…";
+        if(readOnly||loading)return;SaveStatus.Text="正在保存…";
         pendingSave=JsonSerializer.SerializeToUtf8Bytes(config,Store.Json);
         if(saveTask.IsCompleted)saveTask=SaveAsync();
     }
@@ -159,10 +160,10 @@ public partial class MainWindow : Window
         row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});
         var enabled=new CheckBox{IsChecked=slot.Enabled,VerticalAlignment=VerticalAlignment.Center,Margin=new(16,0,8,0),MinWidth=22};
         AutomationProperties.SetName(enabled,$"第 {position} 项本次启动");
-        enabled.Click+=(_,_)=>Edit(d=>d.Slots.Single(s=>s.Id==slot.Id).Enabled=enabled.IsChecked==true);row.Children.Add(enabled);
+        enabled.Click+=(_,_)=>{var value=enabled.IsChecked==true;if(!Edit(d=>d.Slots.Single(s=>s.Id==slot.Id).Enabled=value)){rendering=true;enabled.IsChecked=!value;rendering=false;}};row.Children.Add(enabled);
         var number=new TextBlock{Text=$"{position:00}",Foreground=(Brush)FindResource("Muted"),FontFamily=new FontFamily("Consolas"),VerticalAlignment=VerticalAlignment.Center,Margin=new(0,0,12,0)};Grid.SetColumn(number,1);row.Children.Add(number);
         var choice=new ComboBox{ItemsSource=Agents.All,DisplayMemberPath="Name",SelectedValuePath="Id",SelectedValue=slot.AgentId,VerticalAlignment=VerticalAlignment.Center,MinWidth=150,MaxWidth=220,MinHeight=32,BorderBrush=(Brush)FindResource("Line"),BorderThickness=new(1)};AutomationProperties.SetName(choice,$"第 {position} 项 Agent");
-        choice.SelectionChanged+=(_,_)=>{if(choice.SelectedValue is string id)Edit(d=>d.Slots.Single(s=>s.Id==slot.Id).AgentId=id);};Grid.SetColumn(choice,2);row.Children.Add(choice);
+        choice.SelectionChanged+=(_,_)=>{if(rendering||choice.SelectedValue is not string id)return;if(!Edit(d=>d.Slots.Single(s=>s.Id==slot.Id).AgentId=id)){rendering=true;choice.SelectedValue=slot.AgentId;rendering=false;}};Grid.SetColumn(choice,2);row.Children.Add(choice);
         var command=new TextBlock{Text=slot.Enabled?"正在检查…":"未启用",Foreground=(Brush)FindResource("Muted"),FontSize=12,VerticalAlignment=VerticalAlignment.Center,Margin=new(12,0,4,0),TextWrapping=TextWrapping.NoWrap,TextTrimming=TextTrimming.CharacterEllipsis};commandLabels[slot.Id]=command;Grid.SetColumn(command,3);row.Children.Add(command);
         var detail=new Button{Content="详情",Style=(Style)FindResource("QuietButton"),MinHeight=28,Padding=new(8,2,8,2),VerticalAlignment=VerticalAlignment.Center};AutomationProperties.SetName(detail,$"第 {position} 项详情");
         detail.Click+=(_,_)=>EditSlot(slot.Id);Grid.SetColumn(detail,4);row.Children.Add(detail);
@@ -178,7 +179,7 @@ public partial class MainWindow : Window
             var button=new Button{Content="⋯",Style=(Style)Application.Current.Resources["QuietButton"],Padding=new Thickness(10,4,10,4),MinWidth=40,MinHeight=28};
             AutomationProperties.SetName(button,$"第 {position} 项更多操作");
             var items=new List<(MenuItem Item,Func<bool> Enabled)>();
-            Menu("上移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>0)(d.Slots[i-1],d.Slots[i])=(d.Slots[i],d.Slots[i-1]);}),()=>position>1);Menu("下移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>=0&&i<d.Slots.Count-1)(d.Slots[i+1],d.Slots[i])=(d.Slots[i],d.Slots[i+1]);}),()=>position<Owner.config.Draft.Slots.Count);Menu("移除",()=>{var snapshot=Owner.config.Draft.Copy();Owner.Edit(d=>d.Slots.RemoveAll(s=>s.Id==slot.Id));Owner.ProgressText.Text="已移除配置，不影响现有会话。";var undo=new Button{Content="撤销移除",Style=(Style)Application.Current.Resources["QuietButton"]};undo.Click+=(_,_)=>{Owner.config.Restore(snapshot);Owner.QueueSave();Owner.Render();};Owner.Sessions.Children.Insert(0,undo);},()=>Owner.config.Draft.Slots.Count>1);
+            Menu("上移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>0)(d.Slots[i-1],d.Slots[i])=(d.Slots[i],d.Slots[i-1]);}),()=>position>1);Menu("下移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>=0&&i<d.Slots.Count-1)(d.Slots[i+1],d.Slots[i])=(d.Slots[i],d.Slots[i+1]);}),()=>position<Owner.config.Draft.Slots.Count);Menu("移除",()=>{var owner=Owner;var index=owner.config.Draft.Slots.FindIndex(s=>s.Id==slot.Id);if(index<0)return;var removed=owner.config.Draft.Slots[index];if(!owner.Edit(d=>d.Slots.RemoveAll(s=>s.Id==removed.Id)))return;owner.ProgressText.Text="已移除配置，不影响现有会话。";var undo=new Button{Content="撤销移除",Style=(Style)Application.Current.Resources["QuietButton"]};undo.Click+=(_,_)=>{undo.IsEnabled=false;if(owner.config.Draft.Slots.Count>=4){owner.ProgressText.Text="已有 4 项，无法撤销移除；请先移除其他项。";return;}owner.Edit(d=>{if(d.Slots.Count<4&&d.Slots.All(s=>s.Id!=removed.Id))d.Slots.Insert(Math.Min(index,d.Slots.Count),removed);});};owner.Sessions.Children.Insert(0,undo);},()=>Owner.config.Draft.Slots.Count>1);
             button.Click+=(_,_)=>{foreach(var (item,enabled) in items)item.IsEnabled=enabled();menu.PlacementTarget=button;menu.IsOpen=true;};
             Content=button;
             void Menu(string text,Action action,Func<bool> enabled){var item=new MenuItem{Header=text};item.Click+=(_,_)=>action();menu.Items.Add(item);items.Add((item,enabled));}
@@ -213,7 +214,7 @@ public partial class MainWindow : Window
         var missing=config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         LaunchButton.Content=busy?"正在处理…":$"启动 {count} 个 Agent";
         LaunchButton.IsEnabled=!busy&&!readOnly&&!commandsChecking&&count>0&&!missing&&admission.Allowed&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0;
-        LaunchHint.Text=busy?"正在准备目录并提交终端":submittedAttempts.Length>0?"本次启动等待逐项确认；可在运行记录中撤销未领取项":missing?"先选择项目文件夹":!admission.Allowed?admission.Reason:validationError.Length>0?validationError:"目录、命令和资源检查已通过";
+        LaunchHint.Text=busy?"正在准备目录并提交终端":readOnly?"当前配置只读，已禁止启动与保存":submittedAttempts.Length>0?"本次启动等待逐项确认；可在运行记录中撤销未领取项":missing?"先选择项目文件夹":count==0?"先启用至少一项":!admission.Allowed?admission.Reason:validationError.Length>0?validationError:status?.Ok!=true?"等待监控器就绪，暂不可启动":commandsChecking?"正在检查命令":"目录、命令和资源检查已通过";
         LaunchHint.Foreground=(Brush)FindResource(LaunchButton.IsEnabled?"Ink":"Muted");
         if(status?.Memory is {} m){AvailableValue.Text=$"{GiB(m.Available)} GiB";BudgetValue.Text=$"{count*2} GiB";ResourceText.Text=$"{admission.Reason} · {m.At.LocalDateTime:HH:mm:ss} 采样";}
         else{AvailableValue.Text="—";BudgetValue.Text=$"{count*2} GiB";ResourceText.Text="资源检测不可用，暂缓启动";}
@@ -257,7 +258,7 @@ public partial class MainWindow : Window
             ProgressText.Text="正在核对命令和工作目录…";
             var plans=await Task.Run(()=>new WorkspacePreparer().PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token));
             launchCancellation.Token.ThrowIfCancellationRequested();
-            var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),plans.ToArray()));if(!reserve.Ok)throw new IOException(reserve.Message);
+            var reserve=await Ipc.ReserveWithCleanupAsync(plans.ToArray(),launchCancellation.Token);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();
             try{await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout));}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}

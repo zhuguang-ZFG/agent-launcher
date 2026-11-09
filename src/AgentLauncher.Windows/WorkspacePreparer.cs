@@ -55,6 +55,7 @@ public static class ControlledCommand
 }
 public sealed class PreparationRecord
 {
+    public int SchemaVersion { get; set; }
     public required string Digest { get; set; }
     public required List<LaunchItem> Original { get; set; }
     public Dictionary<Guid,LaunchItem> Completed { get; set; }=[];
@@ -63,6 +64,14 @@ public sealed class PreparationRecord
 public sealed class WorkspacePreparer
 {
     private readonly string git=Commands.FindExe("git.exe")??"";
+    private static bool StructurallyValid(PreparationRecord record)
+    {
+        if(string.IsNullOrWhiteSpace(record.Digest)||record.Original is not {Count:>0}||record.Completed==null||record.Baselines==null)return false;
+        foreach(var plan in record.Original)if(!Usable(plan))return false;
+        foreach(var plan in record.Completed.Values)if(!Usable(plan))return false;
+        return true;
+    }
+    private static bool Usable(LaunchItem? plan)=>plan is{Cwd:not null,Workspace:not null,Command:not null}&&plan.Id!=Guid.Empty&&plan.Command.Executable.Length>0;
     public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct)
     {
         draft.Validate();
@@ -79,10 +88,25 @@ public sealed class WorkspacePreparer
         var canonical=draft.Copy();canonical.Revision=0;
         var digest=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(canonical,Store.Json)));
         var preparationPath=Store.FilePath("preparations/"+digest+".json");
-        var record=Store.Read<PreparationRecord>(preparationPath);
-        if(record==null){record=new(){Digest=digest,Original=plans};Store.Save(preparationPath,record);}
-        else if(record.Digest!=digest)throw new IOException("准备记录摘要不符，禁止重放。");
-        plans=record.Original.Select(p=>record.Completed.GetValueOrDefault(p.Id)??p).ToList();batch=record.Original[0].BatchId;
+        var record=Store.Read<PreparationRecord>(preparationPath);List<LaunchItem>? effective=null;
+        if(record!=null)
+        {
+            if(record.SchemaVersion is <0 or >1)throw new IOException($"准备记录版本不支持，未改写文件：{preparationPath}");
+            if(record.Digest!=digest)throw new IOException("准备记录摘要不符，禁止重放。");
+            if(!StructurallyValid(record))throw new IOException($"准备记录损坏，禁止重放：{preparationPath}");
+            var repaired=false;
+            if(record.Original.Any(p=>!File.Exists(p.Command.Executable))||record.Completed.Values.Any(p=>!File.Exists(p.Command.Executable)))
+            {
+                // The draft digest still matches, so slot order is authoritative; keep worktree mapping and re-resolve only commands.
+                for(var i=0;i<record.Original.Count;i++){var plan=record.Original[i];var slot=draft.Slots[plan.Position-1];record.Original[i]=plan with{Command=Commands.Resolve(slot.AgentId,slot.Current)};}
+                foreach(var id in record.Completed.Keys.ToArray())record.Completed[id]=record.Completed[id] with{Command=record.Original.Single(p=>p.Id==id).Command};
+                repaired=true;
+            }
+            if(record.SchemaVersion!=1||repaired){record.SchemaVersion=1;Store.Save(preparationPath,record);}
+            effective=record.Original.Select(p=>record.Completed.GetValueOrDefault(p.Id)??p).ToList();
+        }
+        if(record==null){record=new(){SchemaVersion=1,Digest=digest,Original=plans};Store.Save(preparationPath,record);}
+        plans=effective??record.Original;batch=record.Original[0].BatchId;
         foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1).ToArray())
         {
             if(draft.DirectoryMode=="shared")continue;

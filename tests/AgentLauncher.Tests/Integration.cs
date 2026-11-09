@@ -40,6 +40,15 @@ internal static class Integration
             CommandSpec command;try{command=Commands.Resolve("pi",new(){Arguments=["--version"]});}catch(Exception e){throw new Exception($"pi resolved path: {found??"<null>"}; {e.Message}");}
             var result=await ControlledCommand.RunAsync(command,cwd);Assert(result.Code==0&&result.Output.Trim().Length>0,result.Error);evidence.Add(new{name="pi-version",output=result.Output.Trim()});
         });
+        await Test("Client timeout after committed reserve auto-revokes",async()=>{
+            var item=Item("cleanup",["--hold","100"]);
+            Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND","1");
+            try{await Ipc.ReserveWithCleanupAsync([item]);Assert(false,"timeout not surfaced");}
+            catch(IOException e){Assert(e.Message.Contains("撤销"),e.Message);}
+            finally{Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND",null);}
+            var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            Assert(status.Entries!.Single(e=>e.Plan.Id==item.Id).State=="Revoked","committed grant not revoked after client timeout");
+        });
         await Test("R13 monitor restart preserves running process and reconciles",async()=>{
             var item=Item("survive",["--hold","4500"]);var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
             using var runner=Start("run",item.Id);
@@ -68,6 +77,23 @@ internal static class Integration
             var repeated=await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);
             Assert(repeated.Select(p=>p.Cwd).SequenceEqual(plans.Select(p=>p.Cwd)),"recovery created duplicate worktrees");Assert(!repeated.Select(p=>p.Id).Intersect(plans.Select(p=>p.Id)).Any(),"reused launch authorization IDs");
             Assert(plans.Count==2&&plans[0].Workspace.Key!=plans[1].Workspace.Key,"worktrees not independent");await File.WriteAllTextAsync(Path.Combine(plans[0].Cwd,"hello.txt"),"only first");Assert(await File.ReadAllTextAsync(Path.Combine(plans[1].Cwd,"hello.txt"))=="baseline","worktrees share modifications");
+            var prepPath=Directory.GetFiles(Path.Combine(Store.Root,"preparations"),"*.json").Single();
+            var record=Store.Read<PreparationRecord>(prepPath)!;
+            record.Original[0]=record.Original[0] with{Command=new(Path.Combine(Store.Root,"missing-node.exe"),record.Original[0].Command.Arguments,"exe")};Store.Save(prepPath,record);
+            var healed=await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+            Assert(healed.Select(p=>p.Cwd).SequenceEqual(plans.Select(p=>p.Cwd)),"stale command recompute lost worktree mapping");
+            var healedRecord=Store.Read<PreparationRecord>(prepPath)!;Assert(healedRecord.SchemaVersion==1&&File.Exists(healedRecord.Original[0].Command.Executable),"stale command not re-resolved in record");
+            var good=Store.Read<PreparationRecord>(prepPath)!;
+            record=Store.Read<PreparationRecord>(prepPath)!;record.Original.Add(null!);Store.Save(prepPath,record);
+            try{await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);Assert(false,"corrupt preparation record replayed");}catch(IOException e){Assert(e.Message.Contains("损坏"),e.Message);}
+            Store.Save(prepPath,new{good.Digest,good.Original,good.Completed,good.Baselines});
+            var legacy=await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+            Assert(legacy.Select(p=>p.Cwd).SequenceEqual(plans.Select(p=>p.Cwd)),"legacy record created duplicate worktrees");
+            var adopted=Store.Read<PreparationRecord>(prepPath)!;Assert(adopted.SchemaVersion==1&&adopted.Original.Select(p=>p.Id).SequenceEqual(good.Original.Select(p=>p.Id))&&adopted.Baselines.Count==good.Baselines.Count,"legacy record identity lost");
+            Store.Save(prepPath,new{SchemaVersion=2,good.Digest,good.Original,good.Completed,good.Baselines});
+            var unsupported=File.ReadAllBytes(prepPath);
+            try{await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);Assert(false,"unsupported preparation record accepted");}catch(IOException e){Assert(e.Message.Contains("版本不支持"),e.Message);}
+            Assert(File.ReadAllBytes(prepPath).SequenceEqual(unsupported),"unsupported preparation record was rewritten");
         });
         await Test("Terminal two panes exact child cwd and arguments",async()=>{
             await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);

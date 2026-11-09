@@ -16,7 +16,7 @@ public partial class MainWindow
     private async Task RunUiChecksAsync(string folder)
     {
         System.IO.Directory.CreateDirectory(folder);var checks=new List<string>();
-        void Check(string name,bool value){if(!value)throw new Exception("UI regression: "+name);checks.Add(name);}
+        void Check(string name,bool value){if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}checks.Add(name);}
         IEnumerable<T> Find<T>(DependencyObject root) where T:DependencyObject
         {
             for(var i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);if(child is T target)yield return target;foreach(var nested in Find<T>(child))yield return nested;}
@@ -32,6 +32,8 @@ public partial class MainWindow
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
         var first=Find<CheckBox>(SlotList).First();Keyboard.Focus(first);first.IsChecked=false;first.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
         Check("row edit restores keyboard focus",Keyboard.FocusedElement is CheckBox focused&&AutomationProperties.GetName(focused)==AutomationProperties.GetName(first));
+        readOnly=true;var roFirst=Find<CheckBox>(SlotList).First();roFirst.IsChecked=true;roFirst.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
+        Check("read-only reverts row edits",!config.Draft.Slots[0].Enabled&&roFirst.IsChecked==false);readOnly=false;Render();
         var fourth=Find<CheckBox>(SlotList).Last();fourth.IsChecked=true;fourth.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
         Check("native checkbox updates Draft",config.Draft.Slots.Count(s=>s.Enabled)==1&&config.Draft.Slots[3].Enabled);
         Check("preview keeps original slot numbers",Find<TextBlock>(Preview).First().Text.StartsWith("4"));
@@ -47,6 +49,18 @@ public partial class MainWindow
         Check("overflow menu keeps move and remove",Find<MenuButton>(SlotList).First().MenuLabels.SequenceEqual(new[]{"上移","下移","移除"}));
         var firstMenu=Find<MenuButton>(SlotList).First();((Button)firstMenu.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         var openItems=firstMenu.menu.Items.OfType<MenuItem>().ToArray();Check("menu enable states at open",openItems[0].IsEnabled==false&&openItems[1].IsEnabled&&openItems[2].IsEnabled);firstMenu.menu.IsOpen=false;
+        var removedId=config.Draft.Slots[0].Id;openItems[2].RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+        Check("remove drops exactly one slot",config.Draft.Slots.Count==3&&config.Draft.Slots.All(s=>s.Id!=removedId));
+        config.Edit(d=>d.Layout="horizontal");Render();
+        var undo=Find<Button>(Sessions).FirstOrDefault(b=>(b.Content as string)=="撤销移除");Check("undo offered after remove",undo!=null);
+        undo!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check("undo restores only removed slot",config.Draft.Slots.Count==4&&config.Draft.Slots[0].Id==removedId&&config.Draft.Layout=="horizontal");config.Edit(d=>d.Layout="vertical");Render();
+        var menu2=Find<MenuButton>(SlotList).First();((Button)menu2.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        var secondRemoved=config.Draft.Slots[0].Id;((MenuItem)menu2.menu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));menu2.menu.IsOpen=false;
+        AddClick(this,new RoutedEventArgs());
+        var undo2=Find<Button>(Sessions).FirstOrDefault(b=>(b.Content as string)=="撤销移除");Check("undo offered after second remove",undo2!=null);
+        undo2!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check("undo refuses when full",config.Draft.Slots.Count==4&&config.Draft.Slots.All(s=>s.Id!=secondRemoved)&&ProgressText.Text.Contains("无法撤销"));
         var settingsDialog=CreateSettingsDialog();
         var settingCombos=FindLogical<ComboBox>(settingsDialog).ToArray();var settingChecks=FindLogical<CheckBox>(settingsDialog).ToArray();
         Check("settings use typed controls",settingCombos.Length==1&&settingCombos[0].Items.Count==3&&(settingCombos[0].SelectedItem as ComboBoxItem)?.Tag as string==config.Theme&&settingChecks.Length==1&&FindLogical<TextBox>(settingsDialog).Count()==1);
