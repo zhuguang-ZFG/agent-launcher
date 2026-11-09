@@ -175,7 +175,25 @@ HTML 仍是示例数据；真实资源读数只在原生应用中显示。
 | 规模与长期记录 | 当前 JSON 控制账本受 8 MiB 读取上限约束，没有历史归档；达到上限需停止新增并保留记录，不能自动删 Unknown；长期门禁尚未完成 |
 | 分发 | 当前 .NET 8 依赖式技术预览；.NET 10 LTS、自包含/AOT 辅助层、签名及发布包验收未完成 |
 
-## 7. 验证命令
+## 7. 第二轮：真实使用驱动与本机 CLI 自主发现
+
+真实使用驱动（pywinauto UIA pattern-only，`artifacts/real-use/drive4.py`）跑完整用户旅程，issues=0。
+
+| 问题 / 需求 | 修复 / 证据 |
+| --- | --- |
+| 弹窗深色主题白底白字 | FormWindow 显式 opt-in 隐式 Window 样式（派生类不自动继承）；`shots4/06-detail.png` 目检 |
+| UIA TogglePattern 勾选不生效（Narrator/自动化用户） | 复选框改挂 Checked/Unchecked（含防重入与拒绝回滚）；UiChecks 回归 2 断言 |
+| 撤销按钮看不见 | 插入撤销前自动展开会话面板；驱动验证「移除→撤销」摘要往返 |
+| 标题/正文窄窗被裁切 | Caption/Heading 显式样式补回 TextWrapping=Wrap |
+| 支持 omp / kimi code / qoder | Agents.All 增 3 预设；文档与原型同步 |
+| 自主搜寻本机 Agent CLI | `Commands.DiscoverInstalls`：PATH + npm/pnpm/yarn/scoop/bun 全局目录，有界不递归；FindExe 同路径集合 |
+| 手动写路径 0 门槛化 | 详情对话框「程序路径」变为可编辑下拉框：列出发现的本机安装，仍可自由输入或「浏览」；驱动实测 pi/codex 均出现下拉并成功写入 cmd 探针 |
+
+测试新增（按政策待评审）：单元 `R-discovery searches install dirs beyond PATH`；UiChecks 4 断言（TogglePattern ×2、发现下拉 ×2，均为行为断言、未弱化既有断言）。
+
+门禁：单元 14/14、集成 0 失败/67 条、WPF 57 断言、原型 5/5；真实使用 issues=0；内存准入在真实紧张时正确拒绝（驱动实测）。
+
+## 8. 验证命令
 
 ```powershell
 # 构建不含测试后门的正常技术预览

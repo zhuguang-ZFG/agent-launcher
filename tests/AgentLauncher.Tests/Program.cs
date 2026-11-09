@@ -87,8 +87,14 @@ Test("R-shim pi shim resolves node through PATH",()=>{
 Test("R-shim npm shim keeps sibling node preference",()=>{
  var dir=Path.Combine(temp,"npm-shim");Directory.CreateDirectory(dir);
  File.WriteAllText(Path.Combine(dir,"tool.cmd"),npmShimTemplate.Replace("{ENTRY}","tool.js").Replace("\r\n","\n"));File.WriteAllText(Path.Combine(dir,"tool.js"),"// stub");File.WriteAllText(Path.Combine(dir,"node.exe"),"stub");
- var spec=Commands.Resolve("pi",new(){Executable=Path.Combine(dir,"tool.cmd")});
- Assert(StringComparer.OrdinalIgnoreCase.Equals(spec.Executable,Path.Combine(dir,"node.exe")),"npm shim lost sibling node preference");
+ var spec=Commands.Resolve("pi",new(){Executable=Path.Combine(dir,"tool.cmd")}); Assert(StringComparer.OrdinalIgnoreCase.Equals(spec.Executable,Path.Combine(dir,"node.exe")),"npm shim lost sibling node preference");
+});
+Test("R-discovery searches install dirs beyond PATH",()=>{
+ var dir=Path.Combine(temp,"discover");Directory.CreateDirectory(dir);
+ var name="cli-"+Guid.NewGuid().ToString("N");File.WriteAllText(Path.Combine(dir,name+".cmd"),"@echo off\r\n");
+ var found=Commands.DiscoverInstalls(name,[dir]);
+ Assert(found.Count==1&&found[0].EndsWith(name+".cmd",StringComparison.OrdinalIgnoreCase),"install dir not searched");
+ Assert(Commands.DiscoverInstalls(name,[Path.Combine(temp,"discover-empty")]).Count==0,"missing CLI reported as found");
 });
 Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");
 Store.Save(Path.Combine(temp,"results.json"),new{passed,failures});return failures.Count==0?0:1;

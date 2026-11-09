@@ -5,7 +5,7 @@ namespace AgentLauncher.Core;
 public sealed record AgentDefinition(string Id, string Name, string Command);
 public static class Agents
 {
-    public static readonly AgentDefinition[] All = [new("pi", "Pi", "pi"), new("codex", "Codex", "codex"), new("claude", "Claude Code", "claude"), new("gemini", "Gemini CLI", "gemini"), new("opencode", "OpenCode", "opencode"), new("hermes", "Hermes", "hermes"), new("custom", "自定义", "")];
+    public static readonly AgentDefinition[] All = [new("pi", "Pi", "pi"), new("codex", "Codex", "codex"), new("claude", "Claude Code", "claude"), new("gemini", "Gemini CLI", "gemini"), new("opencode", "OpenCode", "opencode"), new("hermes", "Hermes", "hermes"), new("omp", "Omp", "omp"), new("kimi", "Kimi", "kimi"), new("qoder", "Qoder", "qoder"), new("custom", "自定义", "")];
     public static AgentDefinition Get(string id) => All.Single(a => a.Id == id);
 }
 public sealed class AgentProfile

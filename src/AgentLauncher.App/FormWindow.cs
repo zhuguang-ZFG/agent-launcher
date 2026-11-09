@@ -9,9 +9,11 @@ namespace AgentLauncher.App;
 public sealed class FormWindow : Window
 {
     public Dictionary<string,string> Values { get; }=[];
-    public FormWindow(Window owner,string title,(string Key,string Label,string Value,bool Multiline)[] fields,string note,Dictionary<string,(string Value,string Label)[]>? choices=null,string[]? bools=null)
+    public FormWindow(Window owner,string title,(string Key,string Label,string Value,bool Multiline)[] fields,string note,Dictionary<string,(string Value,string Label)[]>? choices=null,string[]? bools=null,Dictionary<string,string[]>? suggestions=null)
     {
         Owner=owner;Title=title;Width=Math.Min(660,SystemParameters.WorkArea.Width-32);Height=Math.Min(620,SystemParameters.WorkArea.Height-32);WindowStartupLocation=WindowStartupLocation.CenterOwner;
+        // Implicit styles do not apply to derived Window classes; opt in explicitly or the dialog renders unthemed (white in dark mode).
+        Style=(Style)Application.Current.Resources[typeof(Window)];
         var root=new DockPanel{Margin=new(24)};var footer=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};DockPanel.SetDock(footer,Dock.Bottom);
         var cancel=new Button{Content="取消",IsCancel=true};var apply=new Button{Content="应用",IsDefault=true};footer.Children.Add(cancel);footer.Children.Add(apply);root.Children.Add(footer);
         var panel=new StackPanel();panel.Children.Add(new TextBlock{Text=note,Margin=new(0,0,0,16),Foreground=(Brush)FindResource("Muted")});
@@ -32,6 +34,19 @@ public sealed class FormWindow : Window
             {
                 var check=new CheckBox{Content=f.Label,IsChecked="true".Equals(f.Value,StringComparison.OrdinalIgnoreCase),Margin=new(0,4,0,12)};
                 readers[f.Key]=()=>check.IsChecked==true?"true":"false";panel.Children.Add(check);first??=check;continue;
+            }
+            if(suggestions?.TryGetValue(f.Key,out var found)==true&&found.Length>0)
+            {
+                // Discovered local installs offered as an editable dropdown; typing and 浏览 still work.
+                var suggestLabel=new Label{Content=f.Label,Padding=new(0,4,0,0)};var suggestRow=new DockPanel();
+                var combo=new ComboBox{IsEditable=true,Text=f.Value,Margin=new(0,4,0,12)};
+                foreach(var path in found)combo.Items.Add(path);
+                if(f.Key is "exe" or "terminal" or "cwd")
+                {
+                    var browse=new Button{Content="浏览",VerticalAlignment=VerticalAlignment.Top};DockPanel.SetDock(browse,Dock.Right);suggestRow.Children.Add(browse);
+                    browse.Click+=(_,_)=>{if(f.Key=="cwd"){var picker=new OpenFolderDialog();if(picker.ShowDialog(this)==true)combo.Text=picker.FolderName;}else{var picker=new OpenFileDialog{Filter="程序|*.exe;*.cmd|所有文件|*.*"};if(picker.ShowDialog(this)==true)combo.Text=picker.FileName;}};
+                }
+                AutomationProperties.SetName(combo,f.Label);suggestLabel.Target=combo;readers[f.Key]=()=>combo.Text;panel.Children.Add(suggestLabel);suggestRow.Children.Add(combo);panel.Children.Add(suggestRow);first??=combo;continue;
             }
             var label=new Label{Content=f.Label,Padding=new(0,4,0,0)};var row=new DockPanel();
             var box=new TextBox{Text=f.Value,AcceptsReturn=f.Multiline,MinHeight=f.Multiline?80:36,TextWrapping=f.Multiline?TextWrapping.Wrap:TextWrapping.NoWrap,VerticalScrollBarVisibility=f.Multiline?ScrollBarVisibility.Auto:ScrollBarVisibility.Disabled,Margin=new(0,4,0,12)};

@@ -57,6 +57,13 @@ public partial class MainWindow
         DirectoryMode.SelectedIndex=2;
         Check("read-only rejects and reverts mode change",config.Draft.DirectoryMode=="isolated"&&DirectoryMode.SelectedIndex==0);
         readOnly=false;Render();
+        // Regression: UIA TogglePattern (Narrator/assistive tech) raises Checked/Unchecked without Click; both must drive Edit.
+        var toggle=(System.Windows.Automation.Provider.IToggleProvider)new System.Windows.Automation.Peers.CheckBoxAutomationPeer(Find<CheckBox>(SlotList).First());
+        toggle.Toggle();
+        Check("automation toggle updates Draft and summary",config.Draft.Slots[0].Enabled&&SelectionSummary.Text=="已选 1 个，共 4 个");
+        toggle=(System.Windows.Automation.Provider.IToggleProvider)new System.Windows.Automation.Peers.CheckBoxAutomationPeer(Find<CheckBox>(SlotList).First());
+        toggle.Toggle();
+        Check("automation toggle reverts cleanly",!config.Draft.Slots[0].Enabled&&SelectionSummary.Text=="已选 0 个，共 4 个");
         var fourth=Find<CheckBox>(SlotList).Last();fourth.IsChecked=true;fourth.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
         Check("native checkbox updates Draft",config.Draft.Slots.Count(s=>s.Enabled)==1&&config.Draft.Slots[3].Enabled);
         Check("preview keeps original slot numbers",Find<TextBlock>(Preview).First().Text.StartsWith("4"));
@@ -144,6 +151,11 @@ public partial class MainWindow
         var fakeMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(fakeMonitor>0){try{using var m=Process.GetProcessById(fakeMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
         await RefreshAsync();
         Check("monitor reports healthy",status is{Ok:true});
+        static IEnumerable<object> LogicalTree(DependencyObject root){yield return root;foreach(var child in LogicalTreeHelper.GetChildren(root).Cast<object>())if(child is DependencyObject d)foreach(var nested in LogicalTree(d))yield return nested;}
+        var suggestDialog=new FormWindow(this,"suggestions",[("exe","程序路径","",false)],"n",suggestions:new(){["exe"]=["C:\\Tools\\pi.cmd"]});
+        Check("discovered installs render editable dropdown",LogicalTree(suggestDialog).OfType<ComboBox>().FirstOrDefault() is {IsEditable:true} discovered&&discovered.Items.Count==1);
+        var plainDialog=new FormWindow(this,"plain",[("exe","程序路径","",false)],"n");
+        Check("without discovery stays plain text box",!LogicalTree(plainDialog).OfType<ComboBox>().Any()&&LogicalTree(plainDialog).OfType<TextBox>().Any());
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX,Resource=ResourceText.Text});Close();
     }

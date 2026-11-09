@@ -1,7 +1,7 @@
 'use strict';
 (function(root) {
  const clone = value => structuredClone(value);
- const names = {pi:'Pi',codex:'Codex',claude:'Claude Code',gemini:'Gemini CLI',opencode:'OpenCode',hermes:'Hermes',custom:'自定义 Agent'};
+ const names = {pi:'Pi',codex:'Codex',claude:'Claude Code',gemini:'Gemini CLI',opencode:'OpenCode',hermes:'Hermes',omp:'Omp',kimi:'Kimi',qoder:'Qoder',custom:'自定义 Agent'};
  function initial() {return {schemaVersion:1,revision:0,projectPath:'D:\\Projects\\demo',layout:'vertical',directoryMode:'各自独立',slots:['pi','codex','pi','hermes'].map((agentId,i)=>({id:i+1,agentId,enabled:i===0,profiles:{}}))};}
  class Model {
   constructor(){this.draft=initial();this.lastEdited=null;this.manual=true;this.templates=new Map();}

@@ -121,9 +121,31 @@ public static class Commands
     {
         if(Path.IsPathFullyQualified(name))return File.Exists(name)?name:null;
         if(name.IndexOfAny(['\\','/'])>=0)return null;
-        foreach(var folder in (Environment.GetEnvironmentVariable("PATH")??"").Split(';').Where(Path.IsPathFullyQualified))
+        foreach(var folder in SearchDirs(null))
             foreach(var ext in Path.HasExtension(name)?new[]{""}:new[]{".exe",".cmd"}) {var path=Path.Combine(folder.Trim('"'),name+ext);if(File.Exists(path))return Path.GetFullPath(path);}
         return null;
+    }
+    // PATH plus the well-known per-user CLI install locations (npm/pnpm/yarn/scoop/bun globals). Bounded: fixed dirs, no recursion.
+    public static IReadOnlyList<string> InstallSearchDirs()
+    {
+        var dirs=new List<string>();
+        void Add(string path){if(Directory.Exists(path))dirs.Add(path);}
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),"npm"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"pnpm"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Yarn","bin"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"scoop","shims"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".bun","bin"));
+        return dirs;
+    }
+    private static IEnumerable<string> SearchDirs(IReadOnlyList<string>? extra)=>((Environment.GetEnvironmentVariable("PATH")??"").Split(';').Where(Path.IsPathFullyQualified)).Concat(extra??InstallSearchDirs());
+    // Every existing match for a bare command name across PATH and install dirs, in search order.
+    public static IReadOnlyList<string> DiscoverInstalls(string name,IReadOnlyList<string>? extraDirs=null)
+    {
+        var found=new List<string>();
+        if(string.IsNullOrWhiteSpace(name)||name.IndexOfAny(['\\','/'])>=0)return found;
+        foreach(var folder in SearchDirs(extraDirs))
+            foreach(var ext in Path.HasExtension(name)?new[]{""}:new[]{".exe",".cmd"}) {var path=Path.Combine(folder.Trim('"'),name+ext);if(File.Exists(path)){var full=Path.GetFullPath(path);if(!found.Contains(full))found.Add(full);}}
+        return found;
     }
     public static CommandSpec Resolve(string agentId,AgentProfile profile)
     {
