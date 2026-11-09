@@ -71,6 +71,8 @@ public sealed class PreparationRecord
 public sealed class WorkspacePreparer
 {
     private readonly string git=Commands.FindExe("git.exe")??"";
+    private readonly string? destinationRoot;
+    public WorkspacePreparer(string? destinationRoot=null){this.destinationRoot=string.IsNullOrWhiteSpace(destinationRoot)?null:destinationRoot;}
     private static bool StructurallyValid(PreparationRecord record,IReadOnlyList<LaunchItem> expected)
     {
         if(string.IsNullOrWhiteSpace(record.Digest)||record.Original is not {Count:>0}||record.Original.Count!=expected.Count||record.Completed==null||record.Baselines==null)return false;
@@ -110,15 +112,29 @@ public sealed class WorkspacePreparer
         Directory.CreateDirectory(Store.Root);
         await using var preparationLock=new FileStream(Store.FilePath("preparation.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
         var active=draft.Slots.Where(s=>s.Enabled).ToArray();if(active.Length==0)throw new IOException("先勾选本次启动项。");
+        if(active.Any(s=>s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory)))throw new IOException("通用组合中有需要单独指定的工作目录，请先在对应 Agent 详情中选择文件夹。");
         var batch=Guid.NewGuid();var plans=new List<LaunchItem>();
         foreach(var slot in active)
         {
             ct.ThrowIfCancellationRequested();var cwd=PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(slot.Directory)?draft.Project:slot.Directory).Path;
             var position=draft.Slots.IndexOf(slot)+1;
-            plans.Add(new(Guid.NewGuid(),batch,position,Agents.Get(slot.AgentId).Name,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),ResourcePolicy.AgentBudget));
+            plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),ResourcePolicy.AgentBudget));
+        }
+        var defaultRoot=Store.FilePath("worktrees");var worktreeRoot=defaultRoot;var nondefaultRoot=false;
+        var isolatedGroups=plans.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1&&draft.DirectoryMode=="isolated").ToArray();
+        if(isolatedGroups.Length>0)
+        {
+            var physicalDefault=Directory.Exists(defaultRoot)?PhysicalDirectory.Resolve(defaultRoot):null;
+            worktreeRoot=destinationRoot!=null?PhysicalDirectory.Resolve(destinationRoot).Path:physicalDefault?.Path??Path.Combine(PhysicalDirectory.Resolve(Store.Root).Path,"worktrees");
+            nondefaultRoot=destinationRoot!=null&&!StringComparer.OrdinalIgnoreCase.Equals(physicalDefault?.Path??Path.GetFullPath(defaultRoot),worktreeRoot);
+            foreach(var group in isolatedGroups)
+            {
+                var source=group.First().Workspace.Path.TrimEnd(Path.DirectorySeparatorChar);var target=Path.GetFullPath(worktreeRoot).TrimEnd(Path.DirectorySeparatorChar);
+                if(target.Equals(source,StringComparison.OrdinalIgnoreCase)||target.StartsWith(source+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase))throw new IOException("独立工作目录必须放在源仓库之外，请在设置中选择其他位置。");
+            }
         }
         var canonical=draft.Copy();canonical.Revision=0;
-        var digest=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(canonical,Store.Json)));
+        var digest=Convert.ToHexString(SHA256.HashData(!nondefaultRoot?JsonSerializer.SerializeToUtf8Bytes(canonical,Store.Json):JsonSerializer.SerializeToUtf8Bytes(new{Draft=canonical,WorktreeRoot=worktreeRoot.ToUpperInvariant()},Store.Json)));
         var preparationPath=Store.FilePath("preparations/"+digest+".json");
         var record=Store.Read<PreparationRecord>(preparationPath);List<LaunchItem>? effective=null;
         if(record!=null)
@@ -160,7 +176,7 @@ public sealed class WorkspacePreparer
             if(sizeResult.Code!=0)throw new IOException("无法估算检出大小："+sizeResult.Error);
             foreach(var plan in group)
             {
-                ct.ThrowIfCancellationRequested();var target=Path.Combine(Store.Root,"worktrees",batch.ToString("N"),"agent-"+plan.Position);
+                ct.ThrowIfCancellationRequested();var target=Path.Combine(worktreeRoot,batch.ToString("N"),"agent-"+plan.Position);
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);var drive=new DriveInfo(Path.GetPathRoot(target)!);
                 var reserve=Math.Max(2*ResourcePolicy.GiB,(ulong)drive.TotalSize/20);
                 if((ulong)drive.AvailableFreeSpace<reserve+estimated)throw new IOException("目标盘空间不足以保留余量和检出文件。");

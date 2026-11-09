@@ -86,6 +86,8 @@ Terminal 返回 0 只证明命令提交，不证明全部窗格已打开。10 �
 
 `.exe` 使用结构化参数；`.cmd` 只支持经验证的 npm shim 适配，必须保留其正确调用语义。不能只靠 `ArgumentList` 宣称已经解决 CMD、Windows Terminal 分号和脚本多层解析。任意 `.cmd/.bat/.ps1` 不在首版通用支持范围，不静默用 shell 执行。Node 运行时选择镜像各模板自身语义：npm shim 模板优先相邻 `node.exe`，Pi shim 模板（`SET "node=node"`）走 PATH；适配器不得统一替换其一。
 
+命令发现与可执行适配分开：存在同名文件只显示“找到命令”，启动前仍需 `Resolve` 验证执行类型。PATH 项先去外围引号再判断绝对路径，候选按 Windows 大小写规则去重；不隐式搜索项目当前目录。Terminal 可用当前用户注册包路径补足失效的执行别名，查询不通过 shell 执行。
+
 ### 4. 校验与错误矩阵
 
 | 条件 | 错误 / 结果 | 重试规则 |
@@ -350,6 +352,7 @@ Agent 切换不变量：
 - 保存当前 Agent 的修改到其 profile，再加载目标 Agent 的 profile；无历史配置则用目标默认值，不能继承原 Agent 的覆盖路径/参数。
 - 切回原 Agent 时能恢复其配置。失效/缺失 Agent 定义显式报错，不能自动绑定另一程序。
 - 发布启动计划前验证 selectedAgentId、resolved executable、adapter、arguments 来自同一 profile 修订；验证中途发生编辑，旧结果失效。
+- 参数数组直接由逐项控件读取，不通过 `Join("\n")` / `Split('\n')` 往返；空参数、含换行的单项和顺序均属于执行合同。
 
 TemplateSnapshot 为完整深拷贝，不共享可变 slot/profile 对象；包含选中项、顺序、Agent 配置、目录策略、目录绑定和布局。`directoryBinding=portable` 只把项目默认目录/覆盖目录转成明确的绑定规则，不删除隔离策略；需要显式独立目录却没有 portable 映射时要求补填，不默认为共享目录。`bound` 保存明确路径。模板恢复后仍需重新校验路径、占用、资源和 CLI，不恢复旧授权/PID。
 

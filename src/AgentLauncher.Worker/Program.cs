@@ -41,7 +41,15 @@ internal static class Program
             var resume=Ipc.SendAsync(new("resume",Guid.NewGuid(),Attempt:id,Epoch:grant.Epoch,Digest:entry.Digest)).GetAwaiter().GetResult();
             if(!resume.Ok)throw new IOException(resume.Message);
             Write("ResumeIntent",child.Process.Id,child.CreationTime,null,"准备恢复初始线程");resumeIntent=true;
-            child.Resume();Write("Started",child.Process.Id,child.CreationTime,null,"已启动进程（不代表任务完成）");
+            try
+            {
+#if INTEGRATION_TESTS
+                if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")=="ResumeRejected")throw new System.ComponentModel.Win32Exception(6,"Controlled ResumeThread rejection");
+#endif
+                child.Resume();
+            }
+            catch(System.ComponentModel.Win32Exception){resumeIntent=false;throw;}
+            Write("Started",child.Process.Id,child.CreationTime,null,"已启动进程（不代表任务完成）");
         }
         catch
         {
@@ -187,6 +195,13 @@ internal sealed class Monitor : IDisposable
             foreach(var p in items)
             {
                 if(p.Kind is not ("agent" or "git")||p.Budget!=(p.Kind=="git"?ResourcePolicy.GitBudget:ResourcePolicy.AgentBudget)||!File.Exists(p.Command.Executable)||!p.Command.Executable.EndsWith(".exe",StringComparison.OrdinalIgnoreCase))throw new IOException("执行计划不支持。");
+                if(p.RetryOf is {} sourceId)
+                {
+                    var source=ledger.Entries.SingleOrDefault(e=>e.Plan.Id==sourceId);
+                    if(items.Length!=1||p.Kind!="agent"||source?.State is not ("FailedBeforeStart" or "Revoked"))throw new IOException("只有确认未运行的单项才能重试。");
+                    if(ledger.Entries.Any(e=>e.Plan.RetryOf==sourceId))throw new IOException("该记录已经重试，请查看新尝试；不会重复提交。");
+                    if(Store.Digest(p with{Id=source.Plan.Id,BatchId=source.Plan.BatchId,RetryOf=source.Plan.RetryOf})!=source.Digest)throw new IOException("重试计划与原项不同，请重新配置启动。");
+                }
                 if(PhysicalDirectory.Workspace(p.Cwd).Key!=p.Workspace.Key)throw new IOException("目录身份变化。");
                 if(p.Kind=="git" && active.Any(e=>e.Plan.Kind=="git"))throw new IOException("已有 Git 准备正在运行，请稍后重试。");
                 if(p.Kind=="agent" && active.Any(e=>e.Plan.Kind=="agent"&&PhysicalDirectory.Overlaps(e.Plan.Workspace,p.Workspace)&&(!p.Shared||!e.Plan.Shared)))throw new IOException("工作目录已被独立会话占用，请选择另一个工作目录。");
@@ -208,7 +223,10 @@ internal sealed class Monitor : IDisposable
         {
             if(entry.State!="Pending")throw new IOException("授权已撤销或被领取，不能重复启动。");
             if(blocked!=null)throw new IOException(blocked);
-            if(pressure||sample!.Available<ResourcePolicy.Reserve(sample.Total)||sample.CpuPercent>=80)throw new IOException("资源压力升高，保留预约，暂停创建；可撤销此项。");
+            if(pressure)throw new IOException("资源压力尚未连续恢复，保留预约；可撤销此项。");
+            var reserved=ledger.Entries.Where(e=>!Store.IsTerminal(e)).Aggregate(0UL,(sum,e)=>sum+e.Plan.Budget);
+            var decision=sample==null?new Admission(false,"资源读数不可用，暂停创建。"):ResourcePolicy.Check(sample,reserved,0);
+            if(!decision.Allowed)throw new IOException(decision.Reason+" 已保留预约，可撤销此项。");
             if(PhysicalDirectory.Workspace(entry.Plan.Cwd).Key!=entry.Plan.Workspace.Key)throw new IOException("目录物理身份已变化。");
             jobs[entry.Plan.Id]=new Job(Store.JobName(entry.Plan.Id),entry.Plan.Budget);
             entry.State="Creating";entry.Epoch=epoch;entry.Detail="正在创建进程";Save();return new(true,"单次创建授权",[entry],sample,epoch);

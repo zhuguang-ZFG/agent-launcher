@@ -96,5 +96,26 @@ Test("R-discovery searches install dirs beyond PATH",()=>{
  Assert(found.Count==1&&found[0].EndsWith(name+".cmd",StringComparison.OrdinalIgnoreCase),"install dir not searched");
  Assert(Commands.DiscoverInstalls(name,[Path.Combine(temp,"discover-empty")]).Count==0,"missing CLI reported as found");
 });
+Test("F06 Qoder preset uses CLI rather than IDE dispatcher",()=>{
+ var dir=Path.Combine(temp,"qoder-cli");Directory.CreateDirectory(dir);var exe=Path.Combine(dir,"qodercli.exe");File.WriteAllText(exe,"");File.WriteAllText(Path.Combine(dir,"qoder.cmd"),"@echo off\r\npowershell -File qoder-dispatcher.ps1 %*");
+ var previous=Environment.GetEnvironmentVariable("PATH");
+ try{Environment.SetEnvironmentVariable("PATH",dir);var command=Commands.Resolve("qoder",new(){Arguments=["--help"]});Assert(command.Executable==exe&&command.Adapter=="exe"&&command.Arguments.SequenceEqual(new[]{"--help"}),"Qoder resolved a dispatcher/IDE instead of the CLI");}
+ finally{Environment.SetEnvironmentVariable("PATH",previous);}
+});
+Test("F06 discovery accepts quoted PATH without duplicate candidates",()=>{
+ var dir=Path.Combine(temp,"quoted CLI");Directory.CreateDirectory(dir);var name="agent-"+Guid.NewGuid().ToString("N");var exe=Path.Combine(dir,name+".exe");File.WriteAllText(exe,"");
+ var previous=Environment.GetEnvironmentVariable("PATH");
+ try{Environment.SetEnvironmentVariable("PATH","\""+dir+"\"");Assert(Commands.FindExe(name)==exe,"quoted absolute PATH entry ignored");var found=Commands.DiscoverInstalls(name,[dir.ToUpperInvariant(),dir]);Assert(found.Count==1&&StringComparer.OrdinalIgnoreCase.Equals(found[0],exe),"same installation offered more than once");}
+ finally{Environment.SetEnvironmentVariable("PATH",previous);}
+});
+Test("F12 portable templates inherit new project without weakening directory policy",()=>{
+ var c=new Configuration();c.Edit(d=>{d.Project=Path.Combine(temp,"old-project");d.DirectoryMode="prepared";d.Slots.ForEach(s=>s.Enabled=false);d.Slots[3].Enabled=true;d.Slots[3].Directory=Path.Combine(temp,"old-worktree");d.Slots[3].Profiles["hermes"]=new(){Arguments=["--sample",""]};});
+ c.SaveTemplate("portable",portable:true);c.Edit(d=>{d.Project=Path.Combine(temp,"new-project");d.DirectoryMode="shared";});c.Restore(c.Templates["portable"]);
+ Assert(c.Draft.Project==Path.Combine(temp,"new-project")&&c.Draft.DirectoryMode=="prepared"&&c.Draft.Slots.Count(s=>s.Enabled)==1&&c.Draft.Slots[3].Enabled,"portable restore lost project, isolation or selected slots");
+ Assert(c.Draft.Slots.All(s=>s.Directory=="")&&c.Draft.Slots[3].Current.Arguments.SequenceEqual(new[]{"--sample",""}),"portable template retained old paths or lost arguments");
+ Assert(c.Templates["portable"].Project==""&&c.Templates["portable"].Slots.All(s=>s.Directory==""),"portable snapshot contains machine-specific directories");
+ Assert(c.Draft.Slots[3].RequiresDirectory,"portable restore silently dropped an explicit directory requirement");
+ var restored=JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(c,Store.Json),Store.Json)!;Assert(restored.Templates["portable"].IsPortableTemplate&&restored.Draft.Slots[3].RequiresDirectory,"directory binding lost during persistence");
+});
 Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");
 Store.Save(Path.Combine(temp,"results.json"),new{passed,failures});return failures.Count==0?0:1;

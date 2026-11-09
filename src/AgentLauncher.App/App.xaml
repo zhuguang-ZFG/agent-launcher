@@ -16,6 +16,12 @@
   <SolidColorBrush x:Key="WarningSurface" Color="#FFF5E5"/>
   <SolidColorBrush x:Key="WarningInk" Color="#8A4B08"/>
   <SolidColorBrush x:Key="ErrorInk" Color="#B42318"/>
+  <SolidColorBrush x:Key="SelectionInk" Color="#202124"/>
+  <SolidColorBrush x:Key="PreviewPage" Color="#191B20"/>
+  <SolidColorBrush x:Key="PreviewSurface" Color="#0F1116"/>
+  <SolidColorBrush x:Key="PreviewLine" Color="#34373F"/>
+  <SolidColorBrush x:Key="PreviewInk" Color="#D7DBE2"/>
+  <SolidColorBrush x:Key="PreviewMuted" Color="#A5ABB6"/>
   <Style x:Key="FocusRing" TargetType="Control">
    <Setter Property="Template"><Setter.Value><ControlTemplate><Border Margin="-3" BorderBrush="{DynamicResource Accent}" BorderThickness="2" CornerRadius="8"/></ControlTemplate></Setter.Value></Setter>
   </Style>
@@ -75,7 +81,7 @@
    <Setter Property="Padding" Value="12,8"/><Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="Background" Value="Transparent"/>
    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem"><Border x:Name="Row" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" CornerRadius="4"><ContentPresenter/></Border>
-    <ControlTemplate.Triggers><Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Row" Property="Background" Value="{DynamicResource Raised}"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="Row" Property="Background" Value="{DynamicResource Selected}"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger></ControlTemplate.Triggers>
+    <ControlTemplate.Triggers><Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Row" Property="Background" Value="{DynamicResource Raised}"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="Row" Property="Background" Value="{DynamicResource Selected}"/><Setter Property="Foreground" Value="{DynamicResource SelectionInk}"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger></ControlTemplate.Triggers>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style TargetType="ComboBox">
@@ -90,7 +96,7 @@
       <ToggleButton.Template><ControlTemplate TargetType="ToggleButton"><Border Background="{Binding Background, RelativeSource={RelativeSource AncestorType=ComboBox}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}" BorderThickness="1" CornerRadius="6"><Path Data="M 0 0 L 4 4 L 8 0" Stroke="{DynamicResource Muted}" StrokeThickness="1.5" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0"/></Border></ControlTemplate></ToggleButton.Template>
      </ToggleButton>
      <ContentPresenter x:Name="SelectionBox" Margin="10,6,32,6" IsHitTestVisible="False" VerticalAlignment="Center" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"/>
-     <TextBox x:Name="PART_EditableTextBox" Margin="10,0,32,0" Background="Transparent" BorderThickness="0" VerticalAlignment="Center" Visibility="Collapsed" Foreground="{DynamicResource Ink}" CaretBrush="{DynamicResource Ink}" Panel.ZIndex="1"/>
+     <TextBox x:Name="PART_EditableTextBox" Margin="2,0,28,0" Padding="8,6" Background="Transparent" BorderThickness="0" VerticalAlignment="Center" Visibility="Collapsed" Foreground="{DynamicResource Ink}" CaretBrush="{DynamicResource Ink}" Panel.ZIndex="1" AutomationProperties.Name="{Binding Path=(AutomationProperties.Name), RelativeSource={RelativeSource TemplatedParent}}"/>
      <Popup x:Name="PART_Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="None">
       <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource InputLine}" BorderThickness="1" CornerRadius="6" Padding="4" MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="300">
        <ScrollViewer CanContentScroll="True"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer>

@@ -117,19 +117,13 @@ public static class Ipc
 }
 public static class Commands
 {
-    public static string? FindExe(string name)
-    {
-        if(Path.IsPathFullyQualified(name))return File.Exists(name)?name:null;
-        if(name.IndexOfAny(['\\','/'])>=0)return null;
-        foreach(var folder in SearchDirs(null))
-            foreach(var ext in Path.HasExtension(name)?new[]{""}:new[]{".exe",".cmd"}) {var path=Path.Combine(folder.Trim('"'),name+ext);if(File.Exists(path))return Path.GetFullPath(path);}
-        return null;
-    }
+    private static readonly string[] ExecutableExtensions=[".exe",".cmd"];
+    public static string? FindExe(string name)=>EnumerateInstalls(name,null).FirstOrDefault();
     // PATH plus the well-known per-user CLI install locations (npm/pnpm/yarn/scoop/bun globals). Bounded: fixed dirs, no recursion.
     public static IReadOnlyList<string> InstallSearchDirs()
     {
         var dirs=new List<string>();
-        void Add(string path){if(Directory.Exists(path))dirs.Add(path);}
+        void Add(string path){if(Path.IsPathFullyQualified(path)&&Directory.Exists(path))dirs.Add(path);}
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),"npm"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"pnpm"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Yarn","bin"));
@@ -138,20 +132,33 @@ public static class Commands
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".kimi-code","bin"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".local","bin"));
         var kimiDir=Environment.GetEnvironmentVariable("KIMI_INSTALL_DIR");if(!string.IsNullOrWhiteSpace(kimiDir))Add(Path.Combine(kimiDir,"bin"));
-        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".qoder","entry"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".qoder","bin","qodercli"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".pi","agent","bin"));
         return dirs;
     }
-    private static IEnumerable<string> SearchDirs(IReadOnlyList<string>? extra)=>((Environment.GetEnvironmentVariable("PATH")??"").Split(';').Where(Path.IsPathFullyQualified)).Concat(extra??InstallSearchDirs());
-    // Every existing match for a bare command name across PATH and install dirs, in search order.
-    public static IReadOnlyList<string> DiscoverInstalls(string name,IReadOnlyList<string>? extraDirs=null)
+    private static IEnumerable<string> SearchDirs(IReadOnlyList<string>? extra)
     {
-        var found=new List<string>();
-        if(string.IsNullOrWhiteSpace(name)||name.IndexOfAny(['\\','/'])>=0)return found;
-        foreach(var folder in SearchDirs(extraDirs))
-            foreach(var ext in Path.HasExtension(name)?new[]{""}:new[]{".exe",".cmd"}) {var path=Path.Combine(folder.Trim('"'),name+ext);if(File.Exists(path)){var full=Path.GetFullPath(path);if(!found.Contains(full))found.Add(full);}}
-        return found;
+        foreach(var value in (Environment.GetEnvironmentVariable("PATH")??"").Split(';').Concat(extra??InstallSearchDirs()))
+        {
+            var folder=value.Trim().Trim('"');
+            if(Path.IsPathFullyQualified(folder))yield return folder;
+        }
     }
+    // Resolve only explicit paths or fixed search directories; never search the current project implicitly.
+    private static IEnumerable<string> EnumerateInstalls(string name,IReadOnlyList<string>? extra)
+    {
+        if(string.IsNullOrWhiteSpace(name))yield break;
+        if(Path.IsPathFullyQualified(name)){if(File.Exists(name))yield return Path.GetFullPath(name);yield break;}
+        if(name.IndexOfAny(['\\','/'])>=0)yield break;
+        var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);var hasExtension=Path.HasExtension(name);
+        foreach(var folder in SearchDirs(extra))
+            for(var i=0;i<(hasExtension?1:ExecutableExtensions.Length);i++)
+            {
+                var path=Path.Combine(folder,hasExtension?name:name+ExecutableExtensions[i]);
+                if(File.Exists(path)){var full=Path.GetFullPath(path);if(seen.Add(full))yield return full;}
+            }
+    }
+    public static IReadOnlyList<string> DiscoverInstalls(string name,IReadOnlyList<string>? extraDirs=null)=>EnumerateInstalls(name,extraDirs).ToArray();
     public static CommandSpec Resolve(string agentId,AgentProfile profile)
     {
         var input=string.IsNullOrWhiteSpace(profile.Executable)?Agents.Get(agentId).Command:profile.Executable;
@@ -217,7 +224,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
         if(!string.IsNullOrWhiteSpace(explicitPath)){if(File.Exists(explicitPath))return explicitPath;throw new FileNotFoundException("Terminal 路径不存在。");}
         var alias=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Microsoft","WindowsApps","wt.exe");
         if(File.Exists(alias))return alias;
-        throw new FileNotFoundException("Terminal 执行别名未启用。请在设置中选择已安装的 wt.exe。");
+        return TerminalDiscovery.Installs().FirstOrDefault()??throw new FileNotFoundException("未找到可用的 Terminal 入口。请启用执行别名，或在设置中选择已安装的 WindowsTerminal.exe / wt.exe。");
     }
     public static void SubmitTerminal(string terminal,IReadOnlyList<LaunchItem> items,string layout)
     {
@@ -227,8 +234,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             if(i>0){start.ArgumentList.Add(";");if(items.Count==4&&i>=2){start.ArgumentList.Add("move-focus");start.ArgumentList.Add(i==2?"left":"right");start.ArgumentList.Add(";");}}
             start.ArgumentList.Add(i==0?"new-tab":"split-pane");
             if(i>0)start.ArgumentList.Add(i==1&&(items.Count>2||layout!="horizontal")?"-V":"-H");
-            start.ArgumentList.Add("--title");start.ArgumentList.Add($"{items[i].Position} {items[i].Name}");
-            start.ArgumentList.Add(Store.WorkerPath);start.ArgumentList.Add("pane");start.ArgumentList.Add(items[i].Id.ToString("D"));
+            start.ArgumentList.Add("--title");start.ArgumentList.Add($"{items[i].Position} {items[i].Name}".Replace(";","\\;"));
+            start.ArgumentList.Add(Store.WorkerPath.Replace(";","\\;"));start.ArgumentList.Add("pane");start.ArgumentList.Add(items[i].Id.ToString("D"));
         }
         using var process=Process.Start(start)??throw new IOException("无法提交给 Windows Terminal。");
     }

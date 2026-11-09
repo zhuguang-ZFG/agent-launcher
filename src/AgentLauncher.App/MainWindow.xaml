@@ -6,13 +6,13 @@
  <Grid>
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" Padding="24,12">
-   <DockPanel>
-    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+   <DockPanel x:Name="HeaderPanel">
+    <WrapPanel x:Name="HeaderActions" DockPanel.Dock="Right">
      <Button x:Name="RestoreBackupButton" Content="恢复备份" Click="RestoreBackupClick" Visibility="Collapsed" Margin="0,0,8,0"/>
      <Button Content="工作目录" Style="{StaticResource QuietButton}" Click="WorkspacesClick" Margin="0,0,8,0"/>
      <Button Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="Settings"/>
-    </StackPanel>
-    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+    </WrapPanel>
+    <StackPanel x:Name="Brand" Orientation="Horizontal" VerticalAlignment="Center">
      <Border Width="28" Height="28" Background="{DynamicResource Ink}" CornerRadius="6" Margin="0,0,12,0">
       <Path Data="M 7 8 L 11 12 L 7 16 M 14 16 L 20 16" Stroke="{DynamicResource Surface}" StrokeThickness="1.5"/>
      </Border>
@@ -25,8 +25,8 @@
     <Border x:Name="ProjectPanel" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,20">
      <StackPanel>
       <DockPanel Margin="0,0,0,12">
-       <Button DockPanel.Dock="Right" Content="选择文件夹" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Margin="12,0,0,0"/>
-       <StackPanel><TextBlock Text="项目" Style="{StaticResource Caption}"/><TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/></StackPanel>
+       <Button DockPanel.Dock="Right" Content="选择文件夹" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Margin="12,0,0,0" VerticalAlignment="Top"/>
+       <StackPanel><TextBlock Text="项目" Style="{StaticResource Caption}"/><TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/></StackPanel>
       </DockPanel>
       <TextBox x:Name="ProjectPath" FontFamily="Consolas,Microsoft YaHei" FontSize="13" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" ToolTip="输入本地绝对目录，或拖入文件夹"/>
       <DockPanel Margin="0,8,0,0"><ComboBox DockPanel.Dock="Right" x:Name="Recent" Width="200" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/><TextBlock x:Name="ProjectGuide" Text="三步开始：① 选择或拖入项目文件夹　② 勾选要启动的 Agent　③ 点右下角「启动」" Style="{StaticResource Caption}" VerticalAlignment="Center"/></DockPanel>
@@ -43,8 +43,10 @@
          <ComboBox x:Name="Templates" SelectionChanged="TemplateChanged" AutomationProperties.Name="恢复组合" MaxWidth="260" HorizontalAlignment="Left"/>
          <Button Grid.Column="1" Content="存为组合" Style="{StaticResource QuietButton}" Click="SaveTemplateClick" Margin="8,0,0,0"/>
         </Grid>
+        <DockPanel Margin="16,0,16,12"><Label Content="筛选 Agent" Target="{Binding ElementName=AgentSearch}" VerticalAlignment="Center" Padding="0,0,8,0"/><TextBox x:Name="AgentSearch" AutomationProperties.Name="搜索 Agent 名称" ToolTip="按名称筛选下拉选项；不会改变已选择的 Agent" TextChanged="AgentSearchChanged"/></DockPanel>
         <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0"><StackPanel x:Name="SlotList"/></Border>
-        <Button x:Name="AddButton" Content="＋  添加 Agent" Style="{StaticResource QuietButton}" Click="AddClick" HorizontalAlignment="Left" Margin="12,8,12,12"/>
+        <WrapPanel Margin="12,8,12,12"><Button x:Name="AddButton" Content="＋  添加 Agent" Style="{StaticResource QuietButton}" Click="AddClick"/><Button x:Name="DiscoverButton" Content="重新查找本机 CLI" Style="{StaticResource QuietButton}" Click="DiscoverClick" Margin="8,0,0,0"/></WrapPanel>
+        <TextBlock x:Name="DiscoveryStatus" Text="正在查找本机 CLI…" Style="{StaticResource Caption}" Margin="16,0,16,12" AutomationProperties.LiveSetting="Polite"/>
        </StackPanel>
       </Border>
       <Expander x:Name="SessionExpander" Margin="0,20,0,0" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch">
@@ -54,9 +56,9 @@
      </StackPanel>
      <StackPanel x:Name="SummaryPanel" Grid.Column="1">
       <DockPanel Margin="0,0,0,12"><TextBlock DockPanel.Dock="Right" Text="实时预览" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="启动后的终端样子" Style="{StaticResource Heading}"/></DockPanel>
-      <Border Background="#191B20" BorderBrush="#34373F" BorderThickness="1" CornerRadius="10" Padding="12">
+      <Border Background="{DynamicResource PreviewPage}" BorderBrush="{DynamicResource PreviewLine}" BorderThickness="1" CornerRadius="10" Padding="12">
        <StackPanel>
-        <DockPanel Margin="4,0,4,12"><TextBlock DockPanel.Dock="Right" x:Name="PaneCount" Text="1 个窗格" Foreground="#A5ABB6" FontSize="12"/><TextBlock Text="Windows Terminal" Foreground="#D7DBE2" FontSize="12"/></DockPanel>
+        <DockPanel Margin="4,0,4,12"><TextBlock DockPanel.Dock="Right" x:Name="PaneCount" Text="1 个窗格" Foreground="{DynamicResource PreviewMuted}" FontSize="12"/><TextBlock Text="Windows Terminal" Foreground="{DynamicResource PreviewInk}" FontSize="12"/></DockPanel>
         <Grid x:Name="Preview" MinHeight="128"/>
        </StackPanel>
       </Border>
@@ -84,12 +86,12 @@
      <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Visible"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ErrorText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>
      <ScrollViewer MaxHeight="72" VerticalScrollBarVisibility="Auto"><TextBlock x:Name="ErrorText" Foreground="{DynamicResource WarningInk}" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
     </Border>
-    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0"><TextBlock x:Name="LaunchHint" Text="先选择项目文件夹"/><TextBlock x:Name="SaveStatus" Text="配置自动保存" Style="{StaticResource Caption}" Margin="0,4,0,0"/></StackPanel>
-     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+    <Grid x:Name="FooterGrid"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+     <StackPanel x:Name="FooterMessage" VerticalAlignment="Center" Margin="0,0,16,0"><TextBlock x:Name="LaunchHint" Text="先选择项目文件夹"/><TextBlock x:Name="SaveStatus" Text="配置自动保存" Style="{StaticResource Caption}" Margin="0,4,0,0"/></StackPanel>
+     <WrapPanel x:Name="FooterActions" Grid.Column="1" VerticalAlignment="Center">
       <Button x:Name="CancelButton" Content="停止后续步骤" Style="{StaticResource QuietButton}" IsEnabled="False" Click="CancelClick" Margin="0,0,8,0"><Button.Visibility><Binding Path="IsEnabled" RelativeSource="{RelativeSource Self}" Converter="{StaticResource BooleanVisibility}"/></Button.Visibility></Button>
       <Button x:Name="LaunchButton" Content="启动 1 个 Agent" Style="{StaticResource PrimaryButton}" MinWidth="168" Click="LaunchClick" AutomationProperties.AutomationId="Launch"/>
-     </StackPanel>
+     </WrapPanel>
     </Grid>
    </StackPanel>
   </Border>
