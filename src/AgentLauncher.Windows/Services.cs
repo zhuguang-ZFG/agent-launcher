@@ -156,12 +156,12 @@ IF EXIST "%dp0%\node.exe" (
 
 endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTRY}" %*
 """;
-        if(Path.GetFileName(path).Equals("pi.cmd",StringComparison.OrdinalIgnoreCase)&&text==piShim)script=Path.Combine(folder,"pi-launcher.js");
+        if(Path.GetFileName(path).Equals("pi.cmd",StringComparison.OrdinalIgnoreCase)&&text==piShim.Replace("\r\n","\n"))script=Path.Combine(folder,"pi-launcher.js");
         else
         {
             var matches=System.Text.RegularExpressions.Regex.Matches(text,"\"%dp0%\\\\([^\"]+\\.(?:js|cjs|mjs))\"");
             var candidates=matches.Select(m=>m.Groups[1].Value).Distinct().ToArray();
-            if(candidates.Length==1&&text==npmShim.Replace("{ENTRY}",candidates[0]))script=Path.GetFullPath(Path.Combine(folder,candidates[0]));
+            if(candidates.Length==1&&text==npmShim.Replace("{ENTRY}",candidates[0]).Replace("\r\n","\n"))script=Path.GetFullPath(Path.Combine(folder,candidates[0]));
         }
         if(script==null||!File.Exists(script))throw new IOException("脚本适配未识别。请选择实际 exe，或选择 Node.exe 并逐项填写入口脚本与参数。");
         var node=File.Exists(Path.Combine(folder,"node.exe"))?Path.Combine(folder,"node.exe"):FindExe("node.exe")??throw new FileNotFoundException("未找到 Node.js。");
