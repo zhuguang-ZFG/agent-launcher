@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>多 Agent 启动器 · 交互设计稿</title>
+<style>
+:root{color-scheme:light;--bg:#f5f5f5;--surface:#fff;--raised:#eaeaea;--text:#202020;--secondary:#5f6368;--line:#7a7a7a;--divider:#dedede;--accent:#0067c0;--accent-text:#fff;--error:#b42318;--focus:#0067c0;--radius:4px}
+[data-theme=dark]{color-scheme:dark;--bg:#202020;--surface:#2b2b2b;--raised:#343434;--text:#f5f5f5;--secondary:#c5c5c5;--line:#8a8a8a;--divider:#484848;--accent:#60cdff;--accent-text:#002b40;--error:#ffb4ab;--focus:#60cdff}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 'Segoe UI Variable','Segoe UI','Microsoft YaHei',sans-serif}button,input,select{font:inherit;color:inherit}button,select,input{min-height:36px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:6px 12px}button{cursor:pointer}button:hover{background:var(--raised)}button:active{filter:brightness(.96)}button:disabled{cursor:not-allowed;opacity:.55}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:3px}.primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent);min-height:40px}.primary:hover{background:var(--accent);filter:brightness(.94)}.quiet{background:transparent;border-color:transparent}.danger{color:var(--error)}.secondary{color:var(--secondary)}.mono{font-family:'Cascadia Mono',Consolas,monospace}.small{font-size:12px}.design-bar{border-bottom:1px solid var(--divider);padding:12px 24px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}.design-bar strong{font-size:14px;font-weight:600}.design-controls{display:flex;gap:8px;align-items:center;margin-left:auto;flex-wrap:wrap}.design-controls label{display:flex;gap:8px;align-items:center}.shell{max-width:1280px;margin:24px auto;border:1px solid var(--divider);border-radius:8px;background:var(--surface);overflow:hidden;min-height:650px}.titlebar{padding:16px 24px;display:flex;gap:24px;align-items:center;border-bottom:1px solid var(--divider)}h1{font-size:20px;font-weight:600;margin:0}.titlebar .template{display:flex;gap:8px;align-items:center}.titlebar .settings{margin-left:auto}.workspace{display:grid;grid-template-columns:200px 1fr;min-height:500px}.sidebar{background:var(--bg);padding:24px 16px;border-right:1px solid var(--divider)}h2{font-size:16px;font-weight:600;margin:0 0 12px}h3{font-size:14px;font-weight:600;margin:0 0 8px}.sidebar input{width:100%;margin-bottom:12px}.project{display:block;text-align:left;width:100%;border-color:transparent;margin-bottom:4px;background:transparent}.project[aria-pressed=true]{background:var(--raised);border-color:var(--line)}.project span{display:block;color:var(--secondary);font-size:12px}.content{min-width:0;padding:24px;display:grid;gap:24px;align-content:start}.drop{border:1px dashed var(--line);border-radius:8px;padding:16px;display:flex;justify-content:space-between;gap:16px;align-items:center;background:var(--bg)}.drop p{margin:0}.drop small{display:block;color:var(--secondary);margin-top:4px}.drop[data-drag=true]{outline:2px solid var(--focus)}.project-path{display:flex;gap:8px;align-items:center;margin-top:8px;color:var(--secondary)}.project-path code{overflow-wrap:anywhere;flex:1;font-size:12px}.section-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.section-top h2{margin:0}.slots{display:grid;gap:8px}.slot{border:1px solid var(--divider);border-radius:4px;padding:12px;display:grid;grid-template-columns:52px 32px 180px minmax(130px,1fr) auto;gap:12px;align-items:center}.slot[data-enabled=false]{background:var(--bg)}.slot-check{display:flex;align-items:center;gap:8px}.slot-check input{width:18px;height:18px;min-height:0;margin:0;accent-color:var(--accent)}.slot-index{color:var(--secondary);font-family:Consolas,monospace}.slot select{width:100%;min-width:0}.slot-dir{font-size:12px;color:var(--secondary);overflow-wrap:anywhere}.slot-dir strong{display:block;font-weight:400;color:var(--text);font-size:14px}.slot .more{min-width:44px}.preview-area{display:grid;grid-template-columns:180px 1fr;gap:16px}.preview-caption label{display:block;margin-bottom:8px}.preview-caption p{margin:8px 0 0;font-size:12px;color:var(--secondary)}.preview{min-height:144px;border:1px solid var(--line);border-radius:4px;display:grid;gap:1px;background:var(--line);overflow:hidden}.preview[data-count='1']{grid-template-columns:1fr}.preview[data-count='2']{grid-template-columns:1fr 1fr}.preview[data-count='2'][data-direction='horizontal']{grid-template-columns:1fr;grid-template-rows:1fr 1fr}.preview[data-count='3'],.preview[data-count='4']{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}.preview[data-count='3'] .pane:first-child{grid-row:span 2}.pane{background:var(--bg);padding:12px;display:flex;flex-direction:column;justify-content:center;gap:2px}.pane span{font-size:12px;color:var(--secondary)}.empty-preview{padding:16px;background:var(--bg)}.directory-rule{display:flex;align-items:center;gap:12px;padding-top:12px;border-top:1px solid var(--divider);flex-wrap:wrap}.directory-rule p{margin:0;flex:1}.footer{border-top:1px solid var(--divider);padding:16px 24px;display:grid;gap:12px;background:var(--bg)}.resource-line{display:flex;align-items:center;gap:12px}.resource-line button{margin-left:auto}.resource-mark{width:8px;height:8px;background:var(--accent);flex:none;border-radius:50%}.resource-line[data-state=low] .resource-mark{background:var(--error)}.resource-line p{margin:0}.actions{display:flex;gap:12px;align-items:center}.actions .secondary{margin-right:auto}.help-note{max-width:1280px;margin:16px auto 32px;padding:0 4px;color:var(--secondary);font-size:12px}.help-note a{color:var(--accent)}.notice{padding:12px 16px;background:var(--bg);border-left:3px solid var(--accent);margin:12px 0}.notice.error{border-color:var(--error)}dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:24px;width:min(600px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto}dialog::backdrop{background:rgb(0 0 0 / .32)}dialog h2{margin-right:32px}dialog .close{position:absolute;right:16px;top:16px;min-width:36px}dialog p{margin:12px 0}.dialog-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:24px}.form-row{display:grid;gap:8px;margin:16px 0}.form-row input,.form-row select{width:100%}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}.metrics div{border-bottom:1px solid var(--divider);padding-bottom:12px}.metrics dt{color:var(--secondary);font-size:12px}.metrics dd{margin:4px 0 0;font-size:20px;font-variant-numeric:tabular-nums}.result-row{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--divider)}.result-row p{margin:0}.result-row .result-state{color:var(--secondary);text-align:right}.checks{display:grid;gap:12px}.checks label{display:flex;gap:12px;align-items:start}.checks input{min-height:0;margin-top:4px}#status-message:empty{display:none}#status-message{padding:12px 16px;background:var(--bg);border-left:3px solid var(--accent);margin:0}.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 32px);padding:12px 16px;background:var(--text);color:var(--surface);border-radius:4px;z-index:5}.toast[hidden]{display:none}@media(max-width:1100px){.shell{margin:16px}.slot{grid-template-columns:48px 24px 150px 1fr auto;gap:8px}.help-note{margin:16px}}@media(max-width:840px){.workspace{grid-template-columns:1fr}.sidebar{display:none}.titlebar{flex-wrap:wrap;gap:12px}.titlebar .settings{margin-left:auto}.content{padding:16px}.slot{grid-template-columns:40px 24px 1fr auto}.slot-dir{grid-column:3;grid-row:2}.slot .more{grid-column:4;grid-row:1}.preview-area{grid-template-columns:1fr}.shell{min-height:0}.footer{padding:16px}.design-bar{padding:12px 16px}.design-controls{margin-left:0}.actions{flex-wrap:wrap}.actions .secondary{width:100%}}@media(forced-colors:active){.resource-mark{background:CanvasText}.primary{border:2px solid ButtonText}.drop{border-color:CanvasText}.notice{border-color:CanvasText}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<div class="design-bar"><strong>交互设计稿 v0.6</strong><span class="secondary">示例数据 · 不会运行 Agent 或读取本机资源</span><div class="design-controls"><label>主题 <select id="theme"><option value="light">浅色</option><option value="dark">深色</option></select></label><label>演示场景 <select id="scenario"><option value="ready">资源充足</option><option value="low">内存不足</option><option value="partial">部分启动失败</option><option value="unknown">启动结果未确认</option></select></label></div></div>
+<main class="shell">
+<header class="titlebar"><h1>多 Agent 启动器</h1><label class="template">组合 <select id="template"><option value="last" id="last-template" disabled>上次组合（尚无快照）</option><option value="single" selected>单个 Pi</option><option value="pair">Pi + Codex</option></select></label><button class="settings quiet" id="settings-button">设置</button></header>
+<div class="workspace"><aside class="sidebar" aria-label="最近项目"><h2>最近项目</h2><input id="project-search" type="search" placeholder="搜索项目" aria-label="搜索最近项目"><button class="project" data-project="demo" aria-pressed="true">demo<span>D:\Projects\demo</span></button><button class="project" data-project="website" aria-pressed="false">website<span>D:\Projects\website</span></button><button class="project" data-project="tools" aria-pressed="false">tools<span>D:\Projects\tools</span></button></aside>
+<div class="content"><section aria-labelledby="project-title"><h2 id="project-title">项目</h2><div class="drop" id="drop-area"><div><p>将项目文件夹拖到这里</p><small>设计稿固定展示 4 项；可编辑示例路径，真实拖拽由原生应用实现</small></div><button id="choose-project">选择文件夹</button></div><div class="project-path"><code id="project-path">D:\Projects\demo</code><button class="quiet" id="edit-project">更换</button></div></section>
+<section aria-labelledby="agents-title"><div class="section-top"><h2 id="agents-title">Agent 配置</h2><span class="secondary small">勾选的项才会启动</span></div><div class="slots" id="slots"></div></section>
+<section aria-label="本次布局"><div class="preview-area"><div class="preview-caption"><label for="layout">本次布局</label><select id="layout"><option value="vertical">左右排列</option><option value="horizontal">上下排列</option></select><p id="layout-count"></p></div><div class="preview" id="preview" aria-label="有效窗格预览"></div></div></section>
+<div class="directory-rule"><p>同项目目录：<strong id="directory-label">各自独立</strong></p><button class="quiet" id="directory-button">调整目录策略</button></div><p id="status-message" role="status"></p></div></div>
+<footer class="footer"><div class="resource-line" id="resource-line"><span class="resource-mark" aria-hidden="true"></span><p id="resource-status" aria-live="polite"></p><button class="quiet" id="resource-button">资源详情</button></div><div class="actions"><span class="secondary small">演示配置仅在本页内存中保留</span><button id="save-button">保存组合</button><button class="primary" id="launch-button">预览启动 1 个 Agent</button></div></footer>
+</main>
+<p class="help-note">这是交互说明，不代表原生 WPF 视觉验收已通过。设计语言：Windows Fluent 原则；实现计划：C# + WPF/XAML。<a href="UI-DESIGN.md">详细设计</a> · <a href="ACCEPTANCE.md">验收矩阵</a> · 视觉审查方法参考 <a href="https://heydamir.design/unslop">unslop / Damir Sokolovsky</a>（CC BY 4.0，原生界面适配）</p>
+<dialog id="project-dialog" aria-labelledby="project-heading"><button class="close quiet" data-close aria-label="关闭目录对话框">×</button><h2 id="project-heading">选择项目</h2><p class="secondary">设计稿用示例路径表达交互。正式应用使用 Windows 文件夹选择器和原生拖拽。</p><label class="form-row">示例项目路径<input id="project-input" value="D:\Projects\demo" spellcheck="false"></label><div class="dialog-actions"><button data-close>取消</button><button class="primary" id="apply-project">应用示例路径</button></div></dialog>
+<dialog id="resource-dialog" aria-labelledby="resource-heading"><button class="close quiet" data-close aria-label="关闭资源详情">×</button><h2 id="resource-heading">资源详情</h2><p class="secondary">以下均为场景示例，没有采样你的电脑</p><dl class="metrics"><div><dt>可用物理内存</dt><dd id="metric-available">10.0 GiB</dd></div><div><dt>系统保留余量</dt><dd>3.2 GiB</dd></div><div><dt>本次内存预算</dt><dd id="metric-budget">2.0 GiB</dd></div><div><dt>受管任务总 CPU 上限</dt><dd>35%</dd></div></dl><p class="notice" id="resource-detail"></p><p class="secondary">内存硬上限可能使工具分配失败。退出后可以重新评估；不会自动结束正在写文件的 Agent。外部程序不在本应用的完整控制范围内。</p><div class="dialog-actions"><button id="recheck">重新检查示例</button><button class="primary" data-close>返回配置</button></div></dialog>
+<dialog id="directory-dialog" aria-labelledby="directory-heading"><button class="close quiet" data-close aria-label="关闭目录策略">×</button><h2 id="directory-heading">同项目工作目录</h2><div class="checks"><label><input type="radio" name="directory-mode" value="各自独立" checked><span>各自独立<span class="secondary small" style="display:block">同一个 Git 项目，每个 Agent 使用自己的目录和分支</span></span></label><label><input type="radio" name="directory-mode" value="使用已准备目录"><span>使用已准备目录<span class="secondary small" style="display:block">选择你已经创建好的工作目录</span></span></label><label><input type="radio" name="directory-mode" value="共用原目录"><span>共用原目录<span class="secondary small" style="display:block">修改相互可见，也可能相互覆盖</span></span></label></div><p class="notice">独立目录不会自动包含原项目未提交的修改，也不会自动安装依赖。完成后需要审阅、合并并测试。</p><div class="dialog-actions"><button data-close>取消</button><button class="primary" id="apply-directory">使用此策略</button></div></dialog>
+<dialog id="agent-dialog" aria-labelledby="agent-heading"><button class="close quiet" data-close aria-label="关闭 Agent 设置">×</button><h2 id="agent-heading">Agent 设置</h2><p class="secondary" id="agent-context"></p><label class="form-row">程序路径<input id="agent-path" spellcheck="false" placeholder="例如 C:\Tools\agent.exe"></label><label class="form-row">示例参数（此处仅展示一个参数）<input id="agent-arg" placeholder="例如 --verbose"></label><p class="notice">正式应用逐项编辑参数，并区分“找到命令”和“已验证兼容”。不会自动执行未知脚本。</p><div class="dialog-actions"><button data-close>取消</button><button class="primary" id="apply-agent">保存示例</button></div></dialog>
+<dialog id="result-dialog" aria-labelledby="result-heading"><button class="close quiet" data-close aria-label="关闭启动结果">×</button><h2 id="result-heading">启动结果预览</h2><p class="secondary">没有创建终端或 Agent 进程</p><div id="result-list"></div><p class="notice" id="result-note"></p><div class="dialog-actions"><button id="result-check">重新检查示例</button><button class="primary" data-close>返回配置</button></div></dialog>
+<dialog id="save-dialog" aria-labelledby="save-heading"><button class="close quiet" data-close aria-label="关闭保存组合">×</button><h2 id="save-heading">保存组合</h2><label class="form-row">组合名称<input id="template-name" placeholder="例如 前端与启动逻辑"></label><p class="secondary">会完整保存选中项、各 Agent 的程序和参数、布局、项目与目录策略。仅在当前页面保留，不写入文件。</p><div class="dialog-actions"><button data-close>取消</button><button class="primary" id="apply-save">保存到本页</button></div></dialog>
+<dialog id="settings-dialog" aria-labelledby="settings-heading"><button class="close quiet" data-close aria-label="关闭设置">×</button><h2 id="settings-heading">设置</h2><div class="checks"><label><input type="checkbox" checked><span>启动确认后最小化配置窗口</span></label></div><p class="notice">关闭配置窗口后，受管会话继续运行；轻量资源监控跟随会话存活。关闭终端可能结束其中的 Agent。</p><p class="secondary">正式设置还包含系统主题、文字缩放、Terminal 位置、工作目录位置和可预览诊断。首版不放复杂资源滑块。</p><div class="dialog-actions"><button class="primary" data-close>完成</button></div></dialog>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="prototype-state.js"></script>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const {Model,names} = PrototypeState;
+const model = new Model();
+let slots = model.draft.slots;
+let projectPath = model.draft.projectPath;
+let editedSlot = null;
+let toastTimer;
+let templateCounter = 0;
+let directoryRevision;
+function sync(){slots=model.draft.slots;projectPath=model.draft.projectPath;$('project-path').textContent=projectPath;$('project-input').value=projectPath;$('layout').value=model.draft.layout;$('directory-label').textContent=model.draft.directoryMode;$('last-template').disabled=!model.lastEdited;$('last-template').textContent=model.lastEdited?'上次组合':'上次组合（尚无快照）';renderSlots();renderState();}
+function openDialog(id){if(id==='directory-dialog'){directoryRevision=model.draft.revision;document.querySelectorAll('input[name=directory-mode]').forEach(input=>input.checked=input.value===model.draft.directoryMode);}$(id).showModal();}
+function closeDialog(node){node.closest('dialog').close();}
+function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{$('toast').hidden=true;},3500);}
+function enabled(){return slots.filter(s=>s.enabled);}
+function isBlocked(){return $('scenario').value==='low'||enabled().length>2||enabled().length===0;}
+function renderSlots(){
+ $('slots').replaceChildren();
+ for(const slot of slots){
+  const row=document.createElement('div');row.className='slot';row.dataset.enabled=String(slot.enabled);
+  const label=document.createElement('label');label.className='slot-check';
+  const check=document.createElement('input');check.type='checkbox';check.checked=slot.enabled;check.setAttribute('aria-label',`本次启动第 ${slot.id} 项 ${names[slot.agentId]}`);
+  check.addEventListener('change',()=>{model.edit(d=>d.slots.find(s=>s.id===slot.id).enabled=check.checked);slots=model.draft.slots;row.dataset.enabled=String(check.checked);renderState();});label.append(check);
+  const index=document.createElement('span');index.className='slot-index';index.textContent=String(slot.id).padStart(2,'0');
+  const select=document.createElement('select');select.setAttribute('aria-label',`第 ${slot.id} 项 Agent`);
+  for(const [id,name] of Object.entries(names)){const option=document.createElement('option');option.value=id;option.textContent=name;select.append(option);}select.value=slot.agentId;
+  select.addEventListener('change',()=>{model.switchAgent(slot.id,select.value);sync();});
+  const dir=document.createElement('div');dir.className='slot-dir';const title=document.createElement('strong');title.textContent='使用项目目录';dir.append(title,document.createTextNode('命令状态：设计示例'));
+  const more=document.createElement('button');more.className='more quiet';more.textContent='参数';more.setAttribute('aria-label',`编辑第 ${slot.id} 项参数`);
+  more.addEventListener('click',()=>{editedSlot=model.beginEdit(slot.id);$('agent-context').textContent=`第 ${slot.id} 项 · ${names[editedSlot.agentId]}`;$('agent-path').value=editedSlot.profile.path;$('agent-arg').value=editedSlot.profile.arg;openDialog('agent-dialog');});
+  row.append(label,index,select,dir,more);$('slots').append(row);
+ }
+}
+function renderState(){
+ const active=enabled();const count=active.length;const low=$('scenario').value==='low';const over=count>2;
+ $('preview').dataset.count=String(count);$('preview').dataset.direction=$('layout').value;$('preview').replaceChildren();
+ if(count===0){const empty=document.createElement('div');empty.className='empty-preview';empty.textContent='选择至少一个 Agent';$('preview').append(empty);}
+ active.forEach(slot=>{const pane=document.createElement('div');pane.className='pane';const name=document.createElement('strong');name.textContent=`${slot.id} ${names[slot.agentId]}`;const detail=document.createElement('span');detail.textContent='启动位置预览';pane.append(name,detail);$('preview').append(pane);});
+ $('layout').disabled=count!==2;
+ $('layout-count').textContent=`保存 4 项 · 本次 ${count} 项`;
+ $('launch-button').textContent=`预览启动 ${count} 个 Agent`;$('launch-button').disabled=isBlocked();
+ $('resource-line').dataset.state=low||over?'low':'ready';
+ let resourceStatus = '资源检查通过 · 示例数据';
+ let resourceDetail = '本示例符合准入规则。实际产品需要在提交前重新采样并预约预算。';
+ if (count === 0) {
+  resourceStatus = '先勾选本次启动项';
+  resourceDetail = '尚未选择启动项，不会创建 Agent 进程。';
+ } else if (low) {
+  resourceStatus = '内存不足，暂缓启动 · 示例可用 1.2 GiB';
+  resourceDetail = '本示例的可用内存低于系统保留余量，暂缓新增 Agent。';
+ } else if (over) {
+  resourceStatus = '超过本示例受管内存预算 · 减少到 1～2 项';
+  resourceDetail = '本示例总内存为 16 GiB，受管预算上限约 5.6 GiB。当前选中项超过预算，不会通过减少系统保留来强行启动。';
+ }
+ $('resource-status').textContent = resourceStatus;
+ $('metric-available').textContent=low?'1.2 GiB':'10.0 GiB';$('metric-budget').textContent=(count*2).toFixed(1)+' GiB';
+ $('resource-detail').textContent = resourceDetail;
+ $('resource-detail').className=low||over?'notice error':'notice';
+}
+function applyProject(path){const next=path.trim();if(!next){toast('请输入示例路径');return false;}model.edit(d=>d.projectPath=next);sync();document.querySelectorAll('.project').forEach(b=>b.setAttribute('aria-pressed',String(projectPath.endsWith('\\'+b.dataset.project))));return true;}
+$('theme').addEventListener('change',()=>{document.documentElement.dataset.theme=$('theme').value;});
+$('scenario').addEventListener('change',renderState);$('layout').addEventListener('change',()=>{model.edit(d=>d.layout=$('layout').value);sync();});
+$('choose-project').addEventListener('click',()=>openDialog('project-dialog'));$('edit-project').addEventListener('click',()=>openDialog('project-dialog'));
+$('apply-project').addEventListener('click',()=>{if(applyProject($('project-input').value))$('project-dialog').close();});
+$('project-search').addEventListener('input',()=>{const query=$('project-search').value.toLowerCase();document.querySelectorAll('.project').forEach(b=>b.hidden=!b.dataset.project.includes(query));});
+document.querySelectorAll('.project').forEach(button=>button.addEventListener('click',()=>applyProject('D:\\Projects\\'+button.dataset.project)));
+$('resource-button').addEventListener('click',()=>openDialog('resource-dialog'));$('recheck').addEventListener('click',()=>toast('场景数据未变；设计稿不读取本机资源'));
+$('directory-button').addEventListener('click',()=>openDialog('directory-dialog'));$('apply-directory').addEventListener('click',()=>{if(directoryRevision!==model.draft.revision){toast('配置已变化，请重新打开目录设置');return;}model.edit(d=>d.directoryMode=document.querySelector('input[name=directory-mode]:checked').value);sync();$('directory-dialog').close();});
+$('apply-agent').addEventListener('click',()=>{try{if(editedSlot)model.applyEdit(editedSlot,{path:$('agent-path').value,arg:$('agent-arg').value});sync();$('agent-dialog').close();toast('已在本页保存示例设置');}catch(error){toast(error.message);}});
+$('save-button').addEventListener('click',()=>openDialog('save-dialog'));$('apply-save').addEventListener('click',()=>{const name=$('template-name').value.trim();if(!name){$('template-name').focus();return;}const key='saved-'+(++templateCounter);model.save(key);const option=document.createElement('option');option.value=key;option.textContent=name;$('template').append(option);$('template').value=key;$('save-dialog').close();toast('已保存到本页，刷新后不会保留');});
+$('template').addEventListener('change',()=>{try{model.restore($('template').value);sync();}catch(error){toast(error.message);}});
+$('settings-button').addEventListener('click',()=>openDialog('settings-dialog'));
+$('launch-button').addEventListener('click', () => {
+ if (isBlocked()) return;
+ const scene = $('scenario').value;
+ const active = enabled();
+ $('result-list').replaceChildren();
+ active.forEach((slot, index) => {
+  const row = document.createElement('div');
+  row.className = 'result-row';
+  const label = document.createElement('p');
+  label.textContent = `${slot.id} ${names[slot.agentId]}`;
+  const state = document.createElement('span');
+  state.className = 'result-state';
+  state.textContent = '已启动进程（模拟）';
+  if (scene === 'unknown') {
+   state.textContent = '结果未确认';
+  } else if (scene === 'partial' && index === active.length - 1) {
+   state.textContent = '明确启动前失败';
+  }
+  row.append(label, state);
+  $('result-list').append(row);
+ });
+ let note = '进程已启动不表示 Agent 完成初始化，更不表示代码任务完成。';
+ if (scene === 'unknown') {
+  note = '没有可靠回执不等于没有启动。正式应用会先核对，不能自动再次提交。';
+ } else if (scene === 'partial') {
+  note = '只允许重试已证明没有创建进程的失败项。若有成功项，保持运行，不重新提交整组。';
+ }
+ $('result-note').textContent = note;
+ openDialog('result-dialog');
+});
+$('result-check').addEventListener('click',()=>toast('这是状态演示，不执行重试或创建进程'));
+document.querySelectorAll('[data-close]').forEach(button=>button.addEventListener('click',()=>closeDialog(button)));
+const drop=$('drop-area');drop.addEventListener('dragover',event=>{event.preventDefault();drop.dataset.drag='true';});drop.addEventListener('dragleave',()=>{drop.dataset.drag='false';});drop.addEventListener('drop',event=>{event.preventDefault();drop.dataset.drag='false';toast('浏览器设计稿不读取目录。用“选择文件夹”编辑示例路径');});
+document.addEventListener('keydown',event=>{if(document.querySelector('dialog[open]'))return;if(event.ctrlKey&&event.key==='Enter'){event.preventDefault();if(!isBlocked())$('launch-button').click();}if(event.ctrlKey&&event.key.toLowerCase()==='o'){event.preventDefault();openDialog('project-dialog');}});
+renderSlots();renderState();
+</script>
+</body>
+</html>
