@@ -169,15 +169,15 @@ HTML 仍是示例数据；真实资源读数只在原生应用中显示。
 | 原生交互与视觉 | 尚未完整测试 Pi 中文输入/确认、所有 CLI、所有分屏布局、100/150/200% DPI、Narrator、高对比度全控件与独立可用性 |
 | 极端恢复 | ResumeIntent 写完而 Resume 未执行时保守保留 Unknown；monitor/Runner 同时丢失全部 Job 句柄仍需人工/重启核对。不能宣称所有崩溃窗口均无挂起残留 |
 | 工作目录 | 创建前/后有身份核对，但恶意路径替换的竞态和外部编辑器不在强制防护内；bare/复杂子模块/网络盘不提供自动准备 |
-| 配置与 UI 完整性 | 暂无拖动重排、portable 模板绑定、独立参数行按钮、文字缩放设置、全部诊断导出流程；部分失败通过保留成功项并修改启用项重试，尚无专用单项重试按钮 |
+| 配置与 UI 完整性 | 已补逐项参数、通用组合、搜索/最近 CLI、名称、拖动/单项目录、文字缩放、诊断导出和管理入口；单项重试只允许确认未运行的记录，具备持久去重。物理拖动/完整读屏和极端小屏仍需独立桌面验证 |
 | Git 大负载 | 全局准备锁、受控 Job、流式估算已实现；filters/LFS 展开、磁盘保留线运行中监测及受控重负载仍待验证 |
 | 资源策略 | 实现采用更保守的完整预算预留，尚不使用每 Job 实测驻留/提交量抵扣；可能比公式版本更早拒绝，不会因此扩大预算 |
 | 规模与长期记录 | 当前 JSON 控制账本受 8 MiB 读取上限约束，没有历史归档；达到上限需停止新增并保留记录，不能自动删 Unknown；长期门禁尚未完成 |
-| 分发 | 当前 .NET 8 依赖式技术预览；.NET 10 LTS、自包含/AOT 辅助层、签名及发布包验收未完成 |
+| 分发 | 已生成 .NET 8 win-x64 自包含候选目录与普通预览，Worker 启动 smoke 和测试标记缺失检查通过；候选 GUI 未在干净用户环境运行。.NET 10 LTS、签名、AOT 辅助层及完整发布包验收仍未完成 |
 
 ## 7. 第二轮：真实使用驱动与本机 CLI 自主发现
 
-真实使用驱动（pywinauto UIA pattern-only，`artifacts/real-use/drive4.py`）跑完整用户旅程，issues=0。
+历史真实使用驱动（pywinauto UIA pattern-only，`artifacts/real-use/drive4.py`）跑过配置旅程，issues=0；其启动阶段因准入拒绝未执行，不能称为完整启动旅程或分屏可见性通过。
 
 | 问题 / 需求 | 修复 / 证据 |
 | --- | --- |
@@ -191,9 +191,42 @@ HTML 仍是示例数据；真实资源读数只在原生应用中显示。
 
 测试新增（按政策待评审）：单元 `R-discovery searches install dirs beyond PATH`；UiChecks 4 断言（TogglePattern ×2、发现下拉 ×2，均为行为断言、未弱化既有断言）。
 
-门禁：单元 14/14、集成 0 失败/67 条、WPF 57 断言、原型 5/5；真实使用 issues=0；内存准入在真实紧张时正确拒绝（驱动实测）。
+历史门禁：单元 14/14、集成 64 测试通过（67 条含 3 条信息记录）、WPF 57 断言、原型 5/5。真实资源拒绝已观察；没有因此证明可见分屏或实际双 Agent 工作负载通过。
 
-## 8. 验证命令
+## 8. 多轮 spec 补齐与边界修正（2026-11-10）
+
+目标仍为完整 SPEC/UI/CONTRACTS/ACCEPTANCE，不将下表子场景提升为 51 项完整验收。以下为当前源码和实际执行记录；新增测试、测试输入与 `INTEGRATION_TESTS` 钩子依用户要求保持待评审。
+
+| 范围 | 当前实现与证据 |
+| --- | --- |
+| 本机 CLI | Qoder 从通用 `qoder` 分发脚本改为 `qodercli`；真实 `Commands.Resolve` 验证 pi/codex/omp/kimi/qoder 的 exe/入口存在，不执行任意版本命令。带引号 PATH 正确解析，候选大小写去重 |
+| 参数与手动路径 | 参数数组直接读写，新增/移除/排序；空项、单项换行、中文空格和尾部反斜杠实机打开→应用保持一致。旧 Join/Split 的实际 RED 与修后 GREEN 已留证。手动路径始终为可编辑下拉，合并当前配置与发现候选 |
+| 主界面 | 已找到/未找到的目录级发现状态、名称搜索、最近选择排序；未勾选项不参与启动阻塞检查。自定义名称进入预览与计划；Terminal 标题和 Worker 路径的分号按 WT 解析规则转义 |
+| 组合 | 通用组合继承新项目但保留目录策略/参数/勾选；需明确目录的项以 `RequiresDirectory` 阻止静默继承。命名/管理取消是事务；用户名称 `none`/`last` 与内部动作使用不同类型，回归 RED→GREEN |
+| 可访问性与视觉 | 100/125/150% 应用文字/控件大小，窄屏操作换行；主题资源、输入边框/焦点和高对比度映射。`artifacts/ui/native-text-125.png`、`native-text-150.png` 为 120 DPI 下 WPF 原生内部渲染，不是 OS 全 DPI/读屏验收 |
+| 目录操作 | 单项拖入只改对应目录，混入文件整次拒绝，输入/草稿改版废弃迟到结果；菜单重排之外提供拖动，明确继承按钮及复制分工。工作目录位置可设置，只在实际自动创建时验证；源仓库内目标拒绝，显式默认物理根复用原准备记录 |
+| 诊断与管理 | 诊断先预览、默认隐藏路径，始终省略对话/参数/环境；最近项目删除只删记录，组合可重命名/移除。UIA 已验证取消/应用不丢当前草稿 |
+| Terminal | 当前用户注册包通过 Win32 API 查询，不运行 PowerShell；本机发现执行别名及 `WindowsTerminal_1.24.12741.0_x64__8wekyb3d8bbwe/WindowsTerminal.exe` |
+| 创建资源边界 | `begin` 对全部已预约预算再次使用完整策略；提交余量/物理余量不足、NaN CPU、过期样本由旧 Creating 改为拒绝并保留 Pending，四类隔离 RED→GREEN；不是实际压力负载验收 |
+| 恢复与重试 | 同步 ResumeThread Win32 失败仅回收可证明未恢复的自有进程（故障注入 RED→GREEN）。崩溃不确定窗口仍保留 Unknown。仅 FailedBeforeStart/Revoked 可单项重试，RetryOf 校验不可变原计划且一个旧记录只能派生一次新尝试 |
+
+当前完整仓库命令 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test.ps1`（未跳过阶段）执行成功：**17 单元、72 集成、66 WPF、5 原型、5 Edge 浏览器检查**。集成仍使用既定隔离/fake-sample 协议环境，不能充当实际资源压力结论。当前 Pi 版本输出 **1.5.0**。JSON：`artifacts/integration-results.json`、`artifacts/ui/ui-checks.json`、`artifacts/prototype-browser-results.json`。
+
+60 秒空闲子场景（30 个样本）：GUI Private Bytes 峰值 **99.453125 MiB**，整机口径 CPU 平均 **0.155127%**；原始数据 `artifacts/spec-smoke/AgentLauncher-tests-performance-a0b1b5ef59cd40c4b2d53860e786afa7/idle.json`。这是当前机器测试构建的子场景，非自包含包完整 P02，也非双 Agent/2 小时测试。
+
+最新实际 UIA 旅程 **17 项通过**：发现/手动路径、参数取消与往返、150% 深色、诊断路径 opt-in、通过原生“另存为”导出且内容等于脱敏预览、最近项目取消/应用、组合重命名、通用组合跨项目恢复以及 `none` 名称恢复。证据 `artifacts/spec-smoke/AgentLauncher-tests-journey-48324892918641f19229a4f9d3e28aeb/journey-result.json`；全程 Agent 槽禁用。外部驱动读取配置改用生产 `Store.Read`，避免自建不完整共享/锁协议。
+
+普通预览入口 `artifacts/preview/AgentLauncher.App.exe`；自包含候选入口 `artifacts/spec-candidate/AgentLauncher.App.exe`，内含 .NETCore/WindowsDesktop 8.0.25。`artifacts/spec-candidate-evidence.json` 记录四个自有程序集 SHA-256、测试标记未发现、Worker 无参数用法 smoke（预期 exit 2）。未在用户真实配置下试跑候选 GUI，不将此称为干净环境分发验收。
+
+独立源码审阅来自 `ReviewUiIteration` / `ReviewRuntimeIteration` 两个只读代理，不是人类可用性验收；有效问题已加入修正/回归：模板名称冲突、settings 重入、drop 覆盖待提交输入、disabled 探测阻塞、workspace 缩放、Terminal 分号与 worktree 根三条边界。
+
+**测试变更待评审**：单元新增 Qoder/PATH/通用组合三项；集成新增创建再准入、ResumeRejected、单项重试、worktree 根四类、Terminal 标题共八项；UI 新增参数/设置应用/脱敏/缩放/目录事务/模板名称行为。删除了固定控件数量/列号/“无发现必须 TextBox”等实现细节断言，改为实际输入输出和保留数据行为；没有改测试运行脚本、资源阈值、跳过策略或既有协议断言。新增 ResumeRejected 仅编入测试构建。
+
+`task_verify run`：**unverified / project-or-git-baseline-unavailable，checks=[]**。手动仓库门禁成功不替代 operator-configured 验证；这些测试改动需用户评审并在后续回合建立新基线。
+
+**完整目标未关闭**：F01 的真实 Pi 中文流式/交互、F03 所有布局实机可见性、V05/V06/V07 系统 DPI/高对比度/Narrator 全矩阵、独立可用性、P01/P03/P05～P09（包括真实双 Agent、磁盘压力、2 小时）与签名/.NET10 仍缺完整证据。当前桌面锁屏；外部 pywinauto 截图为锁屏，已弃用为视觉证据。未关闭用户应用、未绕过准入、未向真实 Agent 发送任务。
+
+## 9. 验证命令
 
 ```powershell
 # 构建不含测试后门的正常技术预览

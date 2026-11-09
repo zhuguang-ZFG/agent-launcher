@@ -18,6 +18,48 @@ internal static class Integration
         async Task Test(string name,Func<Task> action){try{await action();Console.WriteLine("PASS "+name);evidence.Add(new{name,passed=true});}catch(Exception e){Console.WriteLine("FAIL "+name+": "+e.Message);evidence.Add(new{name,passed=false,error=e.ToString()});}}
         LaunchItem Item(string name,string[] args,string kind="agent")=>new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),false,new(Environment.ProcessPath!,args,"exe"),kind=="git"?ResourcePolicy.GitBudget:ResourcePolicy.AgentBudget,kind);
         var initial=await Ipc.EnsureMonitorAsync();Assert(initial.Ok,initial.Message);
+        await Test("P04 begin rechecks complete resource policy without consuming grant",async()=>{
+            var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
+            const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            var healthySample=new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow);
+            foreach(var sample in new[]{healthySample with{CommitAvailable=ResourcePolicy.GiB},healthySample with{Available=4*ResourcePolicy.GiB},healthySample with{CpuPercent=double.NaN},healthySample with{At=DateTimeOffset.UtcNow.AddSeconds(-10)}})
+            {
+                using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;var item=Item("recheck",["--hold","1"]);var entry=new ControlEntry{Plan=item,Digest=Store.Digest(item)};
+                type.GetField("sample",flags)!.SetValue(monitor,sample);type.GetField("ledger",flags)!.SetValue(monitor,new Ledger{Entries=[entry]});
+                type.GetField("ledgerPath",flags)!.SetValue(monitor,Path.Combine(Store.Root,"recheck-"+Guid.NewGuid().ToString("N")+".json"));
+                var denied=false;try{type.GetMethod("Handle",flags)!.Invoke(monitor,[new Request("begin",Guid.NewGuid(),Attempt:item.Id)]);}catch(System.Reflection.TargetInvocationException ex)when(ex.InnerException is IOException){denied=true;}
+                Assert(denied&&entry.State=="Pending","begin consumed a grant with invalid resource evidence");
+            }
+            await Task.CompletedTask;
+        });
+        await Test("R13 synchronous ResumeThread rejection reclaims never-run child",async()=>{
+            var output=Path.Combine(Store.Root,"resume-rejection-must-not-exist.json");var item=Item("resume-rejected",["--echo",output]);var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserved.Ok,reserved.Message);
+            try
+            {
+                var info=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};info.ArgumentList.Add("run");info.ArgumentList.Add(item.Id.ToString());info.Environment["AGENT_LAUNCHER_FAIL_AT"]="ResumeRejected";
+                using var runner=Process.Start(info)!;runner.StandardInput.Close();await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(8));
+                var receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id));Assert(runner.ExitCode!=0&&!File.Exists(output)&&receipt?.Phase=="FailedBeforeStart","known resume rejection did not settle as never-run");
+                var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(status.Entries!.Single(e=>e.Plan.Id==item.Id).State=="FailedBeforeStart","known non-running child retained occupancy");
+            }
+            finally
+            {
+                if(Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase=="ResumeIntent")
+                {
+                    using var ownedJob=new Job(Store.JobName(item.Id),openOnly:true);
+                    foreach(var pid in ownedJob.Members()){using var child=Process.GetProcessById(pid);Native.Check(Native.IsProcessInJob(child.Handle,ownedJob.Handle,out var member));Assert(member,"fixture process identity changed");Native.Check(Native.TerminateProcess(child.Handle,1));child.WaitForExit(5000);}
+                    Store.Save(Store.ReceiptPath(item.Id),new Receipt("FailedBeforeStart",0,0,null,"Isolated fixture cleaned never-resumed child",DateTimeOffset.UtcNow));await Ipc.SendAsync(new("status",Guid.NewGuid()));
+                }
+            }
+        });
+        await Test("R05 single-item retry is immutable and cannot replay an older record",async()=>{
+            var original=Item("retry-source",["--hold","1"]) with{Shared=true};var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[original]));Assert(reserve.Ok,reserve.Message);
+            var retry=original with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=original.Id};
+            var unsafeRetry=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[retry]));Assert(!unsafeRetry.Ok,"pending source allowed a duplicate retry");
+            await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:original.Id));
+            var changed=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[retry with{Command=retry.Command with{Arguments=["--hold","2"]}}]));Assert(!changed.Ok,"modified command accepted as original retry");
+            var allowed=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[retry]));Assert(allowed.Ok,allowed.Message);await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:retry.Id));
+            var replay=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[retry with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()}]));Assert(!replay.Ok,"old source record retried twice");
+        });
         await Test("R14 revoked grant rejects late Runner",async()=>{
             var output=Path.Combine(Store.Root,"must-not-exist.json");var item=Item("late",["--echo",output]);var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
             var revoke=await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));Assert(revoke.Ok,revoke.Message);
@@ -218,6 +260,37 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             var replay=await new WorkspacePreparer().PrepareAsync(validationDraft,_=>{},_=>Task.FromResult(false),CancellationToken.None);
             Assert(replay.Select(p=>p.Position).SequenceEqual(new[]{2,4})&&replay.Select(p=>p.Cwd).SequenceEqual(validationPlans.Select(p=>p.Cwd)),"valid active-slot mapping changed");
             Assert(!replay.Select(p=>p.Id).Intersect(validationPlans.Select(p=>p.Id)).Any(),"reused launch authorization IDs");
+        });
+        await Test("F09 custom worktree location isolates and reuses prepared directories",async()=>{
+            var destination=Path.Combine(Store.Root,"custom-worktrees");Directory.CreateDirectory(destination);var draft=validationDraft.Copy();draft.Project=Path.Combine(Store.Root,"tiny-repo");draft.DirectoryMode="isolated";draft.Slots[0].Enabled=true;
+            foreach(var slot in draft.Slots.Where(s=>s.Enabled))slot.Profiles[slot.AgentId]=new(){Executable=Environment.ProcessPath!,Arguments=["--hold","1"]};
+            var plans=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+            Assert(plans.All(p=>p.Cwd.StartsWith(PhysicalDirectory.Resolve(destination).Path+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)),"custom location ignored");
+            var replay=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+            Assert(replay.Select(p=>p.Cwd).SequenceEqual(plans.Select(p=>p.Cwd))&&!replay.Select(p=>p.Id).Intersect(plans.Select(p=>p.Id)).Any(),"custom location replay duplicated worktrees or authorization");
+        });
+        await Test("F09 default destination alias reuses existing preparation",async()=>{
+            var draft=validationDraft.Copy();draft.Project=Path.Combine(Store.Root,"tiny-repo");draft.DirectoryMode="isolated";
+            var implicitPlans=await new WorkspacePreparer().PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+            var explicitPlans=await new WorkspacePreparer(Store.FilePath("worktrees")).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+            Assert(implicitPlans.Select(p=>p.Cwd).SequenceEqual(explicitPlans.Select(p=>p.Cwd)),"explicit default destination duplicated worktrees");
+        });
+        await Test("F09 worktree destination inside source is rejected before creation",async()=>{
+            var repo=Path.Combine(Store.Root,"tiny-repo");var nested=Path.Combine(repo,"nested-destination");Directory.CreateDirectory(nested);
+            var draft=validationDraft.Copy();draft.Project=repo;draft.DirectoryMode="isolated";
+            foreach(var destination in new[]{repo,nested}){var before=Directory.GetFileSystemEntries(destination).Order().ToArray();var rejected=false;try{await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None);}catch(IOException){rejected=true;}Assert(rejected&&Directory.GetFileSystemEntries(destination).Order().SequenceEqual(before),"nested worktree destination accepted or mutated");}
+        });
+        await Test("F09 unused missing destination does not block direct or shared launch",async()=>{
+            var missing=Path.Combine(Store.Root,"unused-missing-destination");var draft=validationDraft.Copy();
+            foreach(var mode in new[]{"shared","isolated"}){draft.DirectoryMode=mode;if(mode=="isolated")draft.Slots.ForEach(s=>s.Enabled=s==draft.Slots[0]);var plans=await new WorkspacePreparer(missing).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None);Assert(plans.All(p=>p.Cwd==PhysicalDirectory.Resolve(cwd).Path),"unused destination changed direct launch");}
+        });
+        await Test("F05 custom title semicolons remain literal Terminal data",async()=>{
+            await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
+            var output=Path.Combine(Store.Root,"literal-title.json");var item=Item("review;literal-title-tail\\;中文",["--echo",output,"title-is-data"]) with{Shared=true};
+            var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserved.Ok,reserved.Message);
+            Commands.SubmitTerminal(Commands.Terminal(""),[item],"vertical");
+            for(var i=0;i<100&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase!="Finished";i++)await Task.Delay(100);
+            Assert(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0}&&File.Exists(output),"literal title changed Terminal command parsing");await Ipc.SendAsync(new("status",Guid.NewGuid()));
         });
         await Test("Terminal two panes exact child cwd and arguments",async()=>{
             await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);

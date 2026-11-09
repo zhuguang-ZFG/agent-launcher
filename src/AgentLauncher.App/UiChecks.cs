@@ -75,7 +75,6 @@ public partial class MainWindow
         config.Edit(d=>{d.Slots[0].Profiles.Clear();d.Slots.ForEach(s=>s.Enabled=true);});Render();
         Check("four pane preview positions",Preview.Children.Count==4&&Grid.GetColumn(Preview.Children[2])==0&&Grid.GetRow(Preview.Children[2])==1);
         config.Edit(d=>d.Slots[3].Enabled=false);Render();Check("three pane left spans rows",Grid.GetRowSpan(Preview.Children[0])==2);
-        Check("slot rows place fixed columns",Grid.GetColumn(Find<CheckBox>(SlotList).First())==0&&Grid.GetColumn(Find<ComboBox>(SlotList).First())==2&&Grid.GetColumn(Find<Button>(SlotList).First(b=>AutomationProperties.GetName(b)=="第 1 项详情"))==4);
         Check("overflow menu keeps move and remove",Find<MenuButton>(SlotList).First().MenuLabels.SequenceEqual(new[]{"上移","下移","移除"}));
         var firstMenu=Find<MenuButton>(SlotList).First();((Button)firstMenu.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         var openItems=firstMenu.menu.Items.OfType<MenuItem>().ToArray();Check("menu enable states at open",openItems[0].IsEnabled==false&&openItems[1].IsEnabled&&openItems[2].IsEnabled);firstMenu.menu.IsOpen=false;
@@ -98,8 +97,13 @@ public partial class MainWindow
         undo2.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Check("undo retry restores after freeing capacity",config.Draft.Slots.Count==4&&config.Draft.Slots.Any(s=>s.Id==secondRemoved));
         var settingsDialog=CreateSettingsDialog();
-        var settingCombos=FindLogical<ComboBox>(settingsDialog).ToArray();var settingChecks=FindLogical<CheckBox>(settingsDialog).ToArray();
-        Check("settings use typed controls",settingCombos.Length==1&&settingCombos[0].Items.Count==3&&(settingCombos[0].SelectedItem as ComboBoxItem)?.Tag as string==config.Theme&&settingChecks.Length==1&&FindLogical<TextBox>(settingsDialog).Count()==1);
+        settingsDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>{
+            var theme=FindLogical<ComboBox>(settingsDialog).Single(c=>AutomationProperties.GetName(c)=="主题");theme.SelectedIndex=2;
+            var scale=FindLogical<ComboBox>(settingsDialog).Single(c=>AutomationProperties.GetName(c)=="文字与控件大小");scale.SelectedIndex=2;
+            FindLogical<CheckBox>(settingsDialog).Single().IsChecked=true;
+            FindLogical<Button>(settingsDialog).Single(b=>b.Content as string=="应用").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }));
+        Check("settings apply selected theme scale and minimize values",settingsDialog.ShowDialog()==true&&settingsDialog.Values["theme"]=="dark"&&settingsDialog.Values["scale"]=="150"&&settingsDialog.Values["minimize"]=="true");
         config.Theme="dark";ApplyTheme();Render();var darkInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var darkPage=((SolidColorBrush)Background).Color;
         Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1F3B66")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#313438")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
         Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#C5C5C5"));
@@ -151,11 +155,47 @@ public partial class MainWindow
         var fakeMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(fakeMonitor>0){try{using var m=Process.GetProcessById(fakeMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
         await RefreshAsync();
         Check("monitor reports healthy",status is{Ok:true});
-        static IEnumerable<object> LogicalTree(DependencyObject root){yield return root;foreach(var child in LogicalTreeHelper.GetChildren(root).Cast<object>())if(child is DependencyObject d)foreach(var nested in LogicalTree(d))yield return nested;}
-        var suggestDialog=new FormWindow(this,"suggestions",[("exe","程序路径","",false)],"n",suggestions:new(){["exe"]=["C:\\Tools\\pi.cmd"]});
-        Check("discovered installs render editable dropdown",LogicalTree(suggestDialog).OfType<ComboBox>().FirstOrDefault() is {IsEditable:true} discovered&&discovered.Items.Count==1);
-        var plainDialog=new FormWindow(this,"plain",[("exe","程序路径","",false)],"n");
-        Check("without discovery stays plain text box",!LogicalTree(plainDialog).OfType<ComboBox>().Any()&&LogicalTree(plainDialog).OfType<TextBox>().Any());
+        var argumentSnapshot=new[]{"","first\nsecond","中文 value","tail\\"};
+        var argumentDialog=new FormWindow(this,"参数往返",[("args","启动参数","",false)],"",argumentLists:new(){["args"]=argumentSnapshot});
+        argumentDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>FindLogical<Button>(argumentDialog).Single(b=>b.Content as string=="应用").RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
+        Check("F05 dialog preserves empty multiline and spaced arguments",argumentDialog.ShowDialog()==true&&argumentDialog.ArgumentValues["args"].SequenceEqual(argumentSnapshot));
+        var reorderDialog=new FormWindow(this,"参数排序",[("args","启动参数","",false)],"",argumentLists:new(){["args"]=["first","second",""]});
+        reorderDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>{
+            FindLogical<Button>(reorderDialog).Single(b=>AutomationProperties.GetName(b)=="第 2 个参数上移").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            FindLogical<Button>(reorderDialog).Single(b=>AutomationProperties.GetName(b)=="第 2 个参数移除").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            FindLogical<Button>(reorderDialog).Single(b=>b.Content as string=="应用").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }));
+        Check("F05 argument reorder and removal preserve remaining values",reorderDialog.ShowDialog()==true&&reorderDialog.ArgumentValues["args"].SequenceEqual(new[]{"second",""}));
+        var priorProject=config.Draft.Project;config.Draft.Project="C:\\PrivateProject\\DoNotExport";config.Draft.Slots[0].Profiles[config.Draft.Slots[0].AgentId]=new(){Arguments=["SECRET_ARGUMENT_SENTINEL"]};
+        var redacted=DiagnosticText(false);var explicitPaths=DiagnosticText(true);
+        Check("diagnostics excludes arguments and redacts paths by default",!redacted.Contains("DoNotExport")&&!redacted.Contains("SECRET_ARGUMENT_SENTINEL")&&!explicitPaths.Contains("SECRET_ARGUMENT_SENTINEL"));
+        using(var diagnostic=System.Text.Json.JsonDocument.Parse(explicitPaths))Check("diagnostics includes paths only on explicit opt in",diagnostic.RootElement.GetProperty("Project").GetString()==config.Draft.Project);
+        config.Draft.Project=priorProject;
+        foreach(var scale in new[]{125,150})
+        {
+            config.TextScalePercent=scale;config.Theme="dark";ApplyTheme();Render();Width=650;Height=700;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+            var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth*UiScale.Value<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight*UiScale.Value<=ActualHeight);
+            var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-text-{scale}.png"));encoder.Save(file);
+        }
+        config.TextScalePercent=100;ApplyTheme();
+        config=new Configuration();config.Draft.Slots.ForEach(s=>s.Enabled=false);Render();var projectBefore=config.Draft.Project;var targetSlot=config.Draft.Slots[2].Id;
+        var dropDirectory=System.IO.Path.Combine(Store.Root,"drop-directory");System.IO.Directory.CreateDirectory(dropDirectory);
+        await ApplyDroppedDirectoriesAsync([dropDirectory],targetSlot,config.Draft.Revision);
+        Check("F04 per-slot drop preserves project other slots and enablement",config.Draft.Project==projectBefore&&config.Draft.Slots[2].Directory==PhysicalDirectory.Resolve(dropDirectory).Path&&config.Draft.Slots.Where(s=>s.Id!=targetSlot).All(s=>s.Directory=="")&&config.Draft.Slots.All(s=>!s.Enabled));
+        var dropBefore=System.Text.Json.JsonSerializer.Serialize(config.Draft,Store.Json);var badFile=System.IO.Path.Combine(Store.Root,"not-a-directory.txt");System.IO.File.WriteAllText(badFile,"test");
+        var rejectedDrop=false;try{await ApplyDroppedDirectoriesAsync([dropDirectory,badFile],null,config.Draft.Revision);}catch(System.IO.IOException){rejectedDrop=true;}
+        Check("F04 mixed directory and file drop refuses entire change",rejectedDrop&&System.Text.Json.JsonSerializer.Serialize(config.Draft,Store.Json)==dropBefore);
+        rejectedDrop=false;try{await ApplyDroppedDirectoriesAsync([dropDirectory],null,config.Draft.Revision-1);}catch(System.IO.IOException){rejectedDrop=true;}
+        Check("F04 stale directory check cannot overwrite later edit",rejectedDrop&&System.Text.Json.JsonSerializer.Serialize(config.Draft,Store.Json)==dropBefore);
+        var pendingDrop=ApplyDroppedDirectoriesAsync([dropDirectory],targetSlot,config.Draft.Revision);ProjectPath.Text="new-uncommitted-path";
+        rejectedDrop=false;try{await pendingDrop;}catch(System.IO.IOException){rejectedDrop=true;}
+        Check("F04 directory checks preserve newer uncommitted path input",rejectedDrop&&ProjectPath.Text=="new-uncommitted-path"&&System.Text.Json.JsonSerializer.Serialize(config.Draft,Store.Json)==dropBefore);Render();
+        foreach(var name in new[]{"none","last"})
+        {
+            config=new Configuration();config.Edit(d=>{d.Slots.ForEach(s=>s.Enabled=false);d.Slots[3].Enabled=true;d.DirectoryMode="prepared";});config.SaveTemplate(name);config.Edit(d=>{d.Slots[0].Enabled=true;d.Slots[3].Enabled=false;d.DirectoryMode="shared";});Render();
+            Templates.SelectedItem=Templates.Items.OfType<ComboBoxItem>().Single(item=>item.Content as string==name);
+            Check($"F12 named template {name} restores its own snapshot",config.Draft.DirectoryMode=="prepared"&&config.Draft.Slots[3].Enabled&&!config.Draft.Slots[0].Enabled);
+        }
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX,Resource=ResourceText.Text});Close();
     }
