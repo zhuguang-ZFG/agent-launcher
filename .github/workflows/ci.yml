@@ -21,13 +21,6 @@ jobs:
       - name: Install real Pi CLI
         shell: pwsh
         run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.0
-      - name: Diagnose pi shim
-        shell: pwsh
-        run: |
-          $cmd="$env:NPM_CONFIG_PREFIX\pi.cmd"; if(-not(Test-Path $cmd)){$cmd="C:\npm\prefix\pi.cmd"}; "pi.cmd=$cmd exists=$(Test-Path $cmd)"
-          Get-Content $cmd -Raw
-          $entry=Join-Path (Split-Path $cmd) 'node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js';"entryExists=$(Test-Path $entry)"
-          $env:PATH -split ';' | Where-Object {$_ -and (Test-Path (Join-Path $_.Trim('"') 'pi.cmd'))} | ForEach-Object {"pi.cmd also in: $_"}
       - name: Full gate (model + integration + WPF + prototype + browser)
         shell: pwsh
         run: ./scripts/test.ps1
