@@ -53,6 +53,19 @@ WPF 断言增至 **34 项**（新增：配置加载可写、监控器健康、�
 - **预览隔离**：串行重建正常预览后，对 App/Windows/Worker 三个程序集同时检查 ASCII 与 UTF-16 标识；7 个测试入口/环境标识在对应预览程序集均不存在，而对应测试程序集均存在作为阳性对照。证据：[程序集标识与 SHA-256](../artifacts/validation/preview-hooks.json)。该检查不等同于完整安全审计。
 - **operator 验证状态**：已调用 `task_verify run`，返回 `unverified`，原因 `project-or-git-baseline-unavailable`；没有执行 operator 配置检查。仓库现在有 Git，这个返回不能解释为“仓库没有 Git”。本次新增测试矩阵与正常映射回归待用户审阅，实际测试通过不替代固定基线审批。工作流、现有断言及阈值未放宽。
 
+第七轮：深度评审（评审基线 HEAD `5b6b41d`）确认的 10 个缺陷全部修复，公共契约与既有断言未放宽。
+
+- **启动授权泄漏闭环（F1/F2）**：`ControlledCommand` 预约改走 `Ipc.ReserveWithCleanupAsync`；Runner 退出后条目仍为 `Pending`（begin 被拒或从未发送）时尽力 revoke 并抛 `IOException("准备命令未运行：…")`，区分「从未启动」与子命令退出码，`config --bool` 的启动失败不再被误读为键不存在。集成回归：掉包后自动撤销；新增 `AGENT_LAUNCHER_FAIL_AT=BeforeBegin` 故障注入验证 begin 失败释放全局 Git 槽。
+- **准备重放命令刷新（F3）**：重放不再仅在可执行文件缺失时修复；每次按草稿重解析并比较 Executable/Arguments/Adapter，漂移即更新记录，仍保留 worktree 映射与 Id/批次身份。集成回归：shim 入口脚本改写后重放产出新 argv。此条取代第五轮「仅缺失时重解析」的行为描述。
+- **status 帧字节上限（F4）**：历史由固定 40 条改为 active 全保留、terminal 从新到旧累计 ≤768 KiB，保证响应帧低于 1 MiB 写上限。集成回归：40×28000 字符参数后 status 仍可读且 terminal 条目数受字节约束。
+- **启动闸门语义（F5）**：`RefreshAsync` 逐项过滤，只保留仍为 `Pending` 的提交 ID；已确认运行/终态自动放行，清空时重置 `submittedRevision=-1`。修复「已运行会话永久阻塞后续批次」。UiChecks 回归：Pending 保持闸门、Runner 到 Started 后闸门释放、条目最终 Settled。
+- **配置 fail-closed（F6/F8）**：`LoadAsync` 结构检查补 `Templates` 值 null（此前 NRE 逃逸）；恢复备份补 null 模板值与 `LastEdited.Validate()`，校验在确认对话框之前，拒绝时主文件字节不变（此前会把损坏主文件轮转入 `.bak`）。UiChecks 回归：null 模板值进入只读阻止态且启动禁用、坏备份恢复被拒且主文件不变。
+- **UI 动作生命周期（F7/F10）**：撤销移除在容量已满/条目已存在/`Edit` 被拒时不再消耗按钮，释放容量后重试成功；`Edit` 在 readOnly 拒绝后重渲染，显示与模型重新对齐。UiChecks 回归：拒绝后按钮保持可用、释放容量后恢复成功、只读模式切换被拒且显示回弹。
+- **shim node 选择（F9）**：npm shim 保留模板自身的相邻 `node.exe` 优先；pi shim 按其自身 `SET "node=node"` 语义走 PATH，不再绑定相邻 stub。单元回归覆盖两个方向。
+- **测试基建新增（待评审）**：Worker 故障注入取值 `BeforeBegin`；`--ui-check` 加重入守卫（检查内调用 `LoadAsync` 不再递归执行整套检查）；F5 UI 回归先把监控器重启到 `AGENT_LAUNCHER_FAKE_SAMPLE` 确定采样（本机可用内存 3.6 GiB 低于 2 GiB 准入门槛，真实采样下预约被正确拒绝），结束后恢复真实采样跑最终健康断言。
+- **RED/GREEN 证据**：stash 四个产品修复文件后新回归全部失败（单元 1、集成 4；UI 旧行为证据即评审探针 `artifacts/review/ui-results.json`）；恢复后全门禁退出 0。探针断言已反转为修复后行为并复跑通过（exit 0，6/6）：[ui-results-fixed.json](../artifacts/review/ui-results-fixed.json)。**按轮次锁定政策，本轮全部新增测试标记 unverified，待评审后方可计入基线。**
+- **本机完整门禁**：`powershell -NoProfile -File scripts/test.ps1 -SkipBrowser` 退出 0；模型/Win32 13、隔离集成 64（0 失败）、WPF 53 断言、HTML 原型 5/5；浏览器步骤本次跳过，未重验。
+
 未声称完成：人工视觉审美评审、Narrator/高对比度实测、100/150/200% DPI 矩阵。几何与资源断言不冒充视觉验收。
 
 ## 1. 运行入口与架构

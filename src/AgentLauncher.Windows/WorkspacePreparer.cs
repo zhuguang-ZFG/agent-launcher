@@ -12,7 +12,7 @@ public static class ControlledCommand
     {
         ct.ThrowIfCancellationRequested();
         var item=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"Git 准备",cwd,PhysicalDirectory.Workspace(cwd),false,command,ResourcePolicy.GitBudget,"git");
-        var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]),ct);if(!reserve.Ok)throw new IOException(reserve.Message);
+        var reserve=await Ipc.ReserveWithCleanupAsync([item],ct);if(!reserve.Ok)throw new IOException(reserve.Message);
         Process? process=null;
         try
         {
@@ -21,7 +21,14 @@ public static class ControlledCommand
             var output=outputLine==null?ReadBoundedAsync(process.StandardOutput):ReadLinesAsync(process.StandardOutput,outputLine);var error=ReadBoundedAsync(process.StandardError);
             // Cancellation stops subsequent operations. An in-progress Git write is allowed to finish.
             await process.WaitForExitAsync();var result=new CommandResult(process.ExitCode,await output,await error);
-            await Ipc.SendAsync(new("status",Guid.NewGuid()));ct.ThrowIfCancellationRequested();return result;
+            var after=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            if(after.Entries?.Any(e=>e.Plan.Id==item.Id&&e.State=="Pending")==true)
+            {
+                // The Runner exited while the reservation is still Pending: begin was rejected and the command never ran. Release the global Git slot instead of returning a fake exit code.
+                try{await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));}catch(IOException){}catch(TimeoutException){}
+                throw new IOException("准备命令未运行："+(result.Error.Trim().Length>0?result.Error.Trim():"启动授权未领取。"));
+            }
+            ct.ThrowIfCancellationRequested();return result;
         }
         catch
         {
@@ -120,13 +127,13 @@ public sealed class WorkspacePreparer
             if(record.Digest!=digest)throw new IOException("准备记录摘要不符，禁止重放。");
             if(!StructurallyValid(record,plans))throw new IOException($"准备记录损坏，禁止重放：{preparationPath}");
             var repaired=false;
-            if(record.Original.Any(p=>!File.Exists(p.Command.Executable))||record.Completed.Values.Any(p=>!File.Exists(p.Command.Executable)))
+            // The draft digest still matches, so slot order is authoritative; keep worktree mapping but re-resolve commands so shim/entry updates are honored.
+            for(var i=0;i<record.Original.Count;i++)
             {
-                // The draft digest still matches, so slot order is authoritative; keep worktree mapping and re-resolve only commands.
-                for(var i=0;i<record.Original.Count;i++){var plan=record.Original[i];var slot=draft.Slots[plan.Position-1];record.Original[i]=plan with{Command=Commands.Resolve(slot.AgentId,slot.Current)};}
-                foreach(var id in record.Completed.Keys.ToArray())record.Completed[id]=record.Completed[id] with{Command=record.Original.Single(p=>p.Id==id).Command};
-                repaired=true;
+                var plan=record.Original[i];var slot=draft.Slots[plan.Position-1];var fresh=Commands.Resolve(slot.AgentId,slot.Current);
+                if(plan.Command.Executable!=fresh.Executable||!plan.Command.Arguments.SequenceEqual(fresh.Arguments)||plan.Command.Adapter!=fresh.Adapter){record.Original[i]=plan with{Command=fresh};repaired=true;}
             }
+            foreach(var id in record.Completed.Keys.ToArray()){var mapped=record.Original.Single(p=>p.Id==id).Command;if(record.Completed[id].Command.Executable!=mapped.Executable||!record.Completed[id].Command.Arguments.SequenceEqual(mapped.Arguments)||record.Completed[id].Command.Adapter!=mapped.Adapter){record.Completed[id]=record.Completed[id] with{Command=mapped};repaired=true;}}
             if(record.SchemaVersion!=1||repaired){record.SchemaVersion=1;Store.Save(preparationPath,record);}
             effective=record.Original.Select(p=>record.Completed.GetValueOrDefault(p.Id)??p).ToList();
         }

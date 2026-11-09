@@ -27,6 +27,9 @@ internal static class Program
         {
             var claim=Path.Combine(Store.Root,"attempts",id.ToString("N"),"claim");Directory.CreateDirectory(Path.GetDirectoryName(claim)!);
             using(var file=new FileStream(claim,FileMode.CreateNew,FileAccess.Write,FileShare.Read)){file.WriteByte(1);file.Flush(true);}
+#if INTEGRATION_TESTS
+            if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")=="BeforeBegin")Environment.Exit(97);
+#endif
             var grant=Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:id)).GetAwaiter().GetResult();
             if(!grant.Ok||grant.Entries is not {Length:1})throw new IOException(grant.Message);
             var entry=grant.Entries[0];var plan=entry.Plan;
@@ -217,6 +220,13 @@ internal sealed class Monitor : IDisposable
         }
         throw new IOException("未知协议操作。");
     }
-    private Response Status()=>new(blocked==null,blocked??"监控器已核对",ledger.Entries.Where(e=>!Store.IsTerminal(e)).Concat(ledger.Entries.Where(Store.IsTerminal).TakeLast(40)).ToArray(),sample,epoch);
+    private Response Status()
+    {
+        var active=ledger.Entries.Where(e=>!Store.IsTerminal(e));
+        // The 1-MiB IPC frame caps the response; keep the newest terminal entries that fit rather than a fixed count.
+        var terminal=ledger.Entries.Where(Store.IsTerminal).TakeLast(40).Reverse().ToList();var kept=new List<ControlEntry>();long bytes=0;
+        foreach(var e in terminal){var size=JsonSerializer.SerializeToUtf8Bytes(e,Store.Json).LongLength;if(bytes+size>768*1024)break;kept.Add(e);bytes+=size;}
+        kept.Reverse();return new(blocked==null,blocked??"监控器已核对",active.Concat(kept).ToArray(),sample,epoch);
+    }
     public void Dispose(){foreach(var j in jobs.Values)j.Dispose();root?.Dispose();}
 }

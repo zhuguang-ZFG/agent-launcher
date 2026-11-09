@@ -84,7 +84,7 @@ Terminal 返回 0 只证明命令提交，不证明全部窗格已打开。10 �
 
 选择器解析只检查受控 PATH/PATHEXT 与显式程序位置，排除将项目当前目录当作隐式命令来源。PowerShell 函数/别名不属于可执行程序支持范围。
 
-`.exe` 使用结构化参数；`.cmd` 只支持经验证的 npm shim 适配，必须保留其正确调用语义。不能只靠 `ArgumentList` 宣称已经解决 CMD、Windows Terminal 分号和脚本多层解析。任意 `.cmd/.bat/.ps1` 不在首版通用支持范围，不静默用 shell 执行。
+`.exe` 使用结构化参数；`.cmd` 只支持经验证的 npm shim 适配，必须保留其正确调用语义。不能只靠 `ArgumentList` 宣称已经解决 CMD、Windows Terminal 分号和脚本多层解析。任意 `.cmd/.bat/.ps1` 不在首版通用支持范围，不静默用 shell 执行。Node 运行时选择镜像各模板自身语义：npm shim 模板优先相邻 `node.exe`，Pi shim 模板（`SET "node=node"`）走 PATH；适配器不得统一替换其一。
 
 ### 4. 校验与错误矩阵
 

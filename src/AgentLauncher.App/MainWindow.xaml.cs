@@ -31,6 +31,9 @@ public partial class MainWindow : Window
     private readonly Dictionary<Guid,TextBlock> commandLabels=[];
     private readonly string configPath=Store.FilePath("configuration.json");
     private bool commandsChecking,commandsRunning;
+#if INTEGRATION_TESTS
+    private bool uiChecksStarted;
+#endif
     private Draft? pendingCommandCheck;
     private string validationError="";
     public MainWindow(string[] args)
@@ -53,7 +56,7 @@ public partial class MainWindow : Window
         try
         {
             config=await Task.Run(()=>Store.Read<Configuration>(configPath))??new();
-            if(config.SchemaVersion!=1||config.Draft==null||config.Templates==null||config.RecentProjects==null||config.TerminalPath==null)throw new InvalidDataException("配置版本或结构不支持，禁止覆盖。");config.Draft.Validate();foreach(var template in config.Templates.Values)template.Validate();config.LastEdited?.Validate();
+            if(config.SchemaVersion!=1||config.Draft==null||config.Templates==null||config.Templates.Values.Any(t=>t==null)||config.RecentProjects==null||config.TerminalPath==null)throw new InvalidDataException("配置版本或结构不支持，禁止覆盖。");config.Draft.Validate();foreach(var template in config.Templates.Values)template.Validate();config.LastEdited?.Validate();
         }
         catch(Exception e)when(e is IOException or JsonException or InvalidOperationException or UnauthorizedAccessException or InvalidDataException)
         {readOnly=true;config=new Configuration();ErrorText.Text="配置无法读取，已禁止覆盖和启动。请在设置中检查配置文件及 .bak 备份。\n"+e.Message;}
@@ -67,7 +70,7 @@ public partial class MainWindow : Window
             var percent=(process.TotalProcessorTime-cpu).TotalSeconds/(DateTime.UtcNow-started).TotalSeconds/Environment.ProcessorCount*100;
             Store.Save(reportPath,new{Samples=samples,CpuPercent=percent,LogicalProcessors=Environment.ProcessorCount});Close();return;
         }
-        if(arguments is ["--ui-check",var folder]){await RunUiChecksAsync(folder);return;}
+        if(arguments is ["--ui-check",var folder]&&!uiChecksStarted){uiChecksStarted=true;await RunUiChecksAsync(folder);return;}
         if(arguments is ["--screenshot",var path])
         {
             await Task.Delay(500);UpdateLayout();var dpi=VisualTreeHelper.GetDpi(this);var bitmap=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);bitmap.Render(this);
@@ -79,7 +82,8 @@ public partial class MainWindow : Window
     }
     private bool Edit(Action<Draft> change)
     {
-        if(rendering||loading||busy||readOnly)return false;
+        if(rendering||loading||busy)return false;
+        if(readOnly){Render();return false;}
         var focusName=Keyboard.FocusedElement is DependencyObject focused&&Within(focused,SlotList)?AutomationProperties.GetName(focused):null;
         config.Edit(change);validationError="";ErrorText.Text="";QueueSave();Render();
         if(focusName is {Length:>0}&&FindLogical(SlotList).FirstOrDefault(el=>AutomationProperties.GetName(el)==focusName) is IInputElement target)Keyboard.Focus(target);
@@ -179,7 +183,7 @@ public partial class MainWindow : Window
             var button=new Button{Content="⋯",Style=(Style)Application.Current.Resources["QuietButton"],Padding=new Thickness(10,4,10,4),MinWidth=40,MinHeight=28};
             AutomationProperties.SetName(button,$"第 {position} 项更多操作");
             var items=new List<(MenuItem Item,Func<bool> Enabled)>();
-            Menu("上移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>0)(d.Slots[i-1],d.Slots[i])=(d.Slots[i],d.Slots[i-1]);}),()=>position>1);Menu("下移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>=0&&i<d.Slots.Count-1)(d.Slots[i+1],d.Slots[i])=(d.Slots[i],d.Slots[i+1]);}),()=>position<Owner.config.Draft.Slots.Count);Menu("移除",()=>{var owner=Owner;var index=owner.config.Draft.Slots.FindIndex(s=>s.Id==slot.Id);if(index<0)return;var removed=owner.config.Draft.Slots[index];if(!owner.Edit(d=>d.Slots.RemoveAll(s=>s.Id==removed.Id)))return;owner.ProgressText.Text="已移除配置，不影响现有会话。";var undo=new Button{Content="撤销移除",Style=(Style)Application.Current.Resources["QuietButton"]};undo.Click+=(_,_)=>{undo.IsEnabled=false;if(owner.config.Draft.Slots.Count>=4){owner.ProgressText.Text="已有 4 项，无法撤销移除；请先移除其他项。";return;}owner.Edit(d=>{if(d.Slots.Count<4&&d.Slots.All(s=>s.Id!=removed.Id))d.Slots.Insert(Math.Min(index,d.Slots.Count),removed);});};owner.Sessions.Children.Insert(0,undo);},()=>Owner.config.Draft.Slots.Count>1);
+            Menu("上移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>0)(d.Slots[i-1],d.Slots[i])=(d.Slots[i],d.Slots[i-1]);}),()=>position>1);Menu("下移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>=0&&i<d.Slots.Count-1)(d.Slots[i+1],d.Slots[i])=(d.Slots[i],d.Slots[i+1]);}),()=>position<Owner.config.Draft.Slots.Count);Menu("移除",()=>{var owner=Owner;var index=owner.config.Draft.Slots.FindIndex(s=>s.Id==slot.Id);if(index<0)return;var removed=owner.config.Draft.Slots[index];if(!owner.Edit(d=>d.Slots.RemoveAll(s=>s.Id==removed.Id)))return;owner.ProgressText.Text="已移除配置，不影响现有会话。";var undo=new Button{Content="撤销移除",Style=(Style)Application.Current.Resources["QuietButton"]};undo.Click+=(_,_)=>{if(owner.config.Draft.Slots.Count>=4){owner.ProgressText.Text="已有 4 项，无法撤销移除；请先移除其他项。";return;}if(owner.config.Draft.Slots.Any(s=>s.Id==removed.Id)){undo.IsEnabled=false;return;}if(owner.Edit(d=>d.Slots.Insert(Math.Min(index,d.Slots.Count),removed)))undo.IsEnabled=false;};owner.Sessions.Children.Insert(0,undo);},()=>Owner.config.Draft.Slots.Count>1);
             button.Click+=(_,_)=>{foreach(var (item,enabled) in items)item.IsEnabled=enabled();menu.PlacementTarget=button;menu.IsOpen=true;};
             Content=button;
             void Menu(string text,Action action,Func<bool> enabled){var item=new MenuItem{Header=text};item.Click+=(_,_)=>action();menu.Items.Add(item);items.Add((item,enabled));}
@@ -225,7 +229,7 @@ public partial class MainWindow : Window
     private async Task RefreshAsync()
     {
         if(refreshing)return;refreshing=true;
-        try{status=await Ipc.EnsureMonitorAsync();if(submittedAttempts.Length>0&&submittedAttempts.All(id=>status.Entries?.Any(e=>e.Plan.Id==id&&Store.IsTerminal(e))==true)){submittedRevision=-1;submittedAttempts=[];}RenderSessions();UpdateLaunch();
+        try{status=await Ipc.EnsureMonitorAsync();if(submittedAttempts.Length>0){submittedAttempts=submittedAttempts.Where(id=>status.Entries?.Any(e=>e.Plan.Id==id&&e.State=="Pending")==true).ToArray();if(submittedAttempts.Length==0)submittedRevision=-1;}RenderSessions();UpdateLaunch();
             var err=status.Ok?null:status.Message;if(commError!=null&&ErrorText.Text==commError)ErrorText.Text="";commError=err;if(err!=null)ErrorText.Text=err;}
         catch(Exception e)when(e is IOException or OperationCanceledException or TimeoutException){status=null;commError="监控器不可用 · "+e.Message;ErrorText.Text=commError;UpdateLaunch();}
         finally{refreshing=false;}
@@ -301,7 +305,7 @@ public partial class MainWindow : Window
     private async void RestoreBackupClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
     {
         var recovered=await Task.Run(()=>Store.Read<Configuration>(configPath+".bak"))??throw new IOException("没有可恢复备份。");
-        if(recovered.SchemaVersion!=1||recovered.Draft==null||recovered.Templates==null||recovered.RecentProjects==null||recovered.TerminalPath==null)throw new IOException("备份版本或结构不支持，未恢复。");recovered.Draft.Validate();foreach(var t in recovered.Templates.Values)t.Validate();
+        if(recovered.SchemaVersion!=1||recovered.Draft==null||recovered.Templates==null||recovered.Templates.Values.Any(t=>t==null)||recovered.RecentProjects==null||recovered.TerminalPath==null)throw new IOException("备份版本或结构不支持，未恢复。");recovered.Draft.Validate();foreach(var t in recovered.Templates.Values)t.Validate();recovered.LastEdited?.Validate();
         if(MessageBox.Show(this,"将用上一个有效备份恢复配置。当前损坏文件会另存保留。", "恢复配置",MessageBoxButton.OKCancel)!=MessageBoxResult.OK)return;
         await Task.Run(()=>{if(File.Exists(configPath))File.Copy(configPath,configPath+".corrupt-"+DateTime.UtcNow.ToString("yyyyMMddHHmmss"));Store.Save(configPath,recovered);});
         config=recovered;readOnly=false;RestoreBackupButton.Visibility=Visibility.Collapsed;ErrorText.Text="";SaveStatus.Text="已从备份恢复";ApplyTheme();Render();

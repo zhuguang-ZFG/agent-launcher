@@ -171,15 +171,18 @@ IF EXIST "%dp0%\node.exe" (
 
 endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTRY}" %*
 """;
+        var npmStyle=false;
         if(Path.GetFileName(path).Equals("pi.cmd",StringComparison.OrdinalIgnoreCase)&&text==piShim.Replace("\r\n","\n"))script=Path.Combine(folder,"pi-launcher.js");
         else
         {
+            npmStyle=true;
             var matches=System.Text.RegularExpressions.Regex.Matches(text,"\"%dp0%\\\\([^\"]+\\.(?:js|cjs|mjs))\"");
             var candidates=matches.Select(m=>m.Groups[1].Value).Distinct().ToArray();
             if(candidates.Length==1&&text==npmShim.Replace("{ENTRY}",candidates[0]).Replace("\r\n","\n"))script=Path.GetFullPath(Path.Combine(folder,candidates[0]));
         }
         if(script==null||!File.Exists(script))throw new IOException("脚本适配未识别。请选择实际 exe，或选择 Node.exe 并逐项填写入口脚本与参数。");
-        var node=File.Exists(Path.Combine(folder,"node.exe"))?Path.Combine(folder,"node.exe"):FindExe("node.exe")??throw new FileNotFoundException("未找到 Node.js。");
+        // The npm shim itself prefers a sibling node.exe; the Pi shim always resolves node through PATH. Mirror each template's own selection semantics.
+        var node=npmStyle&&File.Exists(Path.Combine(folder,"node.exe"))?Path.Combine(folder,"node.exe"):FindExe("node.exe")??throw new FileNotFoundException("未找到 Node.js。");
         return new(node,[script,..profile.Arguments],"node-shim");
     }
     public static string Terminal(string explicitPath)

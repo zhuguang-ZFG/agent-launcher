@@ -39,5 +39,56 @@ Test("G1 Job survives monitor handle close while runner retains ownership",()=>{
  using var p=new ProtectedProcess(new(Environment.ProcessPath!,["--hold","1200"],"exe"),temp,root,job);p.Resume();job.Dispose();using var reopened=new Job(name,openOnly:true);Assert(reopened.Members().Contains(p.Process.Id),"Job lost after monitor close");Assert(p.Process.WaitForExit(4000),"child timeout");
 });
 Test("G1 CPU cap configured at aggregate root",()=>{using var root=new Job(@"Local\AL-cap-"+Guid.NewGuid(),root:true);var size=Marshal.SizeOf<Native.CpuRate>();var buffer=Marshal.AllocHGlobal(size);try{Native.Check(Native.QueryInformationJobObject(root.Handle,15,buffer,(uint)size,IntPtr.Zero));var rate=Marshal.PtrToStructure<Native.CpuRate>(buffer);Assert(rate.Rate==3500&&(rate.Flags&4)!=0,"CPU cap not configured");}finally{Marshal.FreeHGlobal(buffer);}});
+// F9 regression: each shim template's own node-selection semantics. Template text mirrors the private consts in Commands.Resolve; drift here means the adapter contract changed.
+const string piShimTemplate="""
+@ECHO off
+SETLOCAL
+SET "node=node"
+"%node%" "%~dp0pi-launcher.js" %*
+SET "pi_exit_code=%ERRORLEVEL%"
+IF "%pi_exit_code%"=="9009" (
+  IF "%node%"=="node" (
+    "%SystemRoot%\System32\where.exe" /Q node
+    IF ERRORLEVEL 1 GOTO node_missing
+  ) ELSE IF NOT EXIST "%node%" GOTO node_missing
+)
+EXIT /B %pi_exit_code%
+:node_missing
+ECHO Pi could not find Node.js. Install Node.js 22.19.0 or newer, or rerun the installer at https://pi.dev. 1>&2
+EXIT /B %pi_exit_code%
+""";
+const string npmShimTemplate="""
+@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\node.exe" (
+  SET "_prog=%dp0%\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTRY}" %*
+""";
+Test("R-shim pi shim resolves node through PATH",()=>{
+ var dir=Path.Combine(temp,"pi-shim");Directory.CreateDirectory(dir);
+ File.WriteAllText(Path.Combine(dir,"pi.cmd"),piShimTemplate.Replace("\r\n","\n"));File.WriteAllText(Path.Combine(dir,"pi-launcher.js"),"// stub");File.WriteAllText(Path.Combine(dir,"node.exe"),"stub");
+ var pathNode=Commands.FindExe("node.exe");Assert(pathNode!=null,"node missing from PATH");
+ var spec=Commands.Resolve("pi",new(){Executable=Path.Combine(dir,"pi.cmd")});
+ Assert(StringComparer.OrdinalIgnoreCase.Equals(spec.Executable,pathNode),"pi shim must mirror its own PATH-node semantics, got: "+spec.Executable);
+ Assert(spec.Adapter=="node-shim"&&spec.Arguments[0].EndsWith("pi-launcher.js"),"pi shim entry not translated");
+});
+Test("R-shim npm shim keeps sibling node preference",()=>{
+ var dir=Path.Combine(temp,"npm-shim");Directory.CreateDirectory(dir);
+ File.WriteAllText(Path.Combine(dir,"tool.cmd"),npmShimTemplate.Replace("{ENTRY}","tool.js").Replace("\r\n","\n"));File.WriteAllText(Path.Combine(dir,"tool.js"),"// stub");File.WriteAllText(Path.Combine(dir,"node.exe"),"stub");
+ var spec=Commands.Resolve("pi",new(){Executable=Path.Combine(dir,"tool.cmd")});
+ Assert(StringComparer.OrdinalIgnoreCase.Equals(spec.Executable,Path.Combine(dir,"node.exe")),"npm shim lost sibling node preference");
+});
 Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");
 Store.Save(Path.Combine(temp,"results.json"),new{passed,failures});return failures.Count==0?0:1;

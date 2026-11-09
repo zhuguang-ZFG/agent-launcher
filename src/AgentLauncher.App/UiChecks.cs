@@ -26,6 +26,25 @@ public partial class MainWindow
             foreach(var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()){if(child is T target)yield return target;foreach(var nested in FindLogical<T>(child))yield return nested;}
         }
         Check("config load is writable",!readOnly);
+        // F6/F8 regressions: null template values and unsupported LastEdited must fail closed. Both use the real configPath in the isolated test root.
+        await saveTask;
+        var healthyConfig=System.IO.File.Exists(configPath)?System.IO.File.ReadAllBytes(configPath):null;
+        System.IO.File.WriteAllText(configPath,"{\"SchemaVersion\":1,\"Draft\":{\"SchemaVersion\":1,\"DirectoryMode\":\"isolated\",\"Layout\":\"vertical\",\"Slots\":[{\"AgentId\":\"pi\",\"Profiles\":{}}]},\"Templates\":{\"broken\":null},\"TerminalPath\":\"\",\"RecentProjects\":[]}");
+        await LoadAsync();
+        Check("null template value enters fail-closed read-only",readOnly&&RestoreBackupButton.Visibility==Visibility.Visible&&!LaunchButton.IsEnabled);
+        if(healthyConfig!=null)System.IO.File.WriteAllBytes(configPath,healthyConfig);else System.IO.File.Delete(configPath);
+        readOnly=false;// white-box: exit the fail-closed state that production only clears via 恢复备份
+        await LoadAsync();ErrorText.Text="";
+        Check("healthy configuration reloads writable",!readOnly);
+        var primaryBefore=System.IO.File.Exists(configPath)?System.IO.File.ReadAllBytes(configPath):null;
+        var badBackup=new Configuration();badBackup.LastEdited=badBackup.Draft.Copy();badBackup.LastEdited.SchemaVersion=2;
+        Store.Save(configPath+".bak",badBackup);
+        RestoreBackupClick(this,new RoutedEventArgs());
+        for(var i=0;i<50&&ErrorText.Text.Length==0;i++)await Task.Delay(100);
+        Check("restore rejects backup startup would reject",ErrorText.Text.Contains("结构不支持"));
+        var primaryAfter=System.IO.File.Exists(configPath)?System.IO.File.ReadAllBytes(configPath):null;
+        Check("rejected restore leaves primary untouched",(primaryBefore==null)==(primaryAfter==null)&&(primaryBefore==null||primaryAfter!.SequenceEqual(primaryBefore)));
+        System.IO.File.Delete(configPath+".bak");ErrorText.Text="";
         config=new Configuration();Render();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
         Check("empty state shows guidance not error",ErrorBanner.Visibility==Visibility.Collapsed&&LaunchHint.Text.Contains("项目")&&!LaunchButton.IsEnabled);
         ErrorText.Text="模拟错误";await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);Check("error state shows banner",ErrorBanner.Visibility==Visibility.Visible);ErrorText.Text="";
@@ -33,7 +52,11 @@ public partial class MainWindow
         var first=Find<CheckBox>(SlotList).First();Keyboard.Focus(first);first.IsChecked=false;first.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
         Check("row edit restores keyboard focus",Keyboard.FocusedElement is CheckBox focused&&AutomationProperties.GetName(focused)==AutomationProperties.GetName(first));
         readOnly=true;var roFirst=Find<CheckBox>(SlotList).First();roFirst.IsChecked=true;roFirst.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
-        Check("read-only reverts row edits",!config.Draft.Slots[0].Enabled&&roFirst.IsChecked==false);readOnly=false;Render();
+        Check("read-only reverts row edits",!config.Draft.Slots[0].Enabled&&roFirst.IsChecked==false);
+        // F10 regression: a readOnly-refused edit must re-render so display and model stay aligned.
+        DirectoryMode.SelectedIndex=2;
+        Check("read-only rejects and reverts mode change",config.Draft.DirectoryMode=="isolated"&&DirectoryMode.SelectedIndex==0);
+        readOnly=false;Render();
         var fourth=Find<CheckBox>(SlotList).Last();fourth.IsChecked=true;fourth.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
         Check("native checkbox updates Draft",config.Draft.Slots.Count(s=>s.Enabled)==1&&config.Draft.Slots[3].Enabled);
         Check("preview keeps original slot numbers",Find<TextBlock>(Preview).First().Text.StartsWith("4"));
@@ -61,6 +84,12 @@ public partial class MainWindow
         var undo2=Find<Button>(Sessions).FirstOrDefault(b=>(b.Content as string)=="撤销移除");Check("undo offered after second remove",undo2!=null);
         undo2!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Check("undo refuses when full",config.Draft.Slots.Count==4&&config.Draft.Slots.All(s=>s.Id!=secondRemoved)&&ProgressText.Text.Contains("无法撤销"));
+        // F7 regression: a refused undo must stay retryable; freeing capacity then clicking must restore the slot.
+        Check("undo stays enabled after capacity refusal",undo2.IsEnabled);
+        var thirdMenu=Find<MenuButton>(SlotList).First();((Button)thirdMenu.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        ((MenuItem)thirdMenu.menu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));thirdMenu.menu.IsOpen=false;
+        undo2.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check("undo retry restores after freeing capacity",config.Draft.Slots.Count==4&&config.Draft.Slots.Any(s=>s.Id==secondRemoved));
         var settingsDialog=CreateSettingsDialog();
         var settingCombos=FindLogical<ComboBox>(settingsDialog).ToArray();var settingChecks=FindLogical<CheckBox>(settingsDialog).ToArray();
         Check("settings use typed controls",settingCombos.Length==1&&settingCombos[0].Items.Count==3&&(settingCombos[0].SelectedItem as ComboBoxItem)?.Tag as string==config.Theme&&settingChecks.Length==1&&FindLogical<TextBox>(settingsDialog).Count()==1);
@@ -88,6 +117,32 @@ public partial class MainWindow
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-{variant.Item1}-{variant.Item2}.png"));encoder.Save(file);
         }
+        // F5 regression: the submission gate must hold only while attempts are still Pending; a confirmed running attempt must release it for the next batch.
+        // Reserve admission depends on real free memory, which is environment-dependent; restart the monitor under the sanctioned FAKE_SAMPLE hook for determinism, then restore real sampling for the final health check.
+        System.IO.Directory.CreateDirectory(Store.Root);
+        var realMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(realMonitor>0){try{using var m=Process.GetProcessById(realMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
+        Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE","1");
+        await RefreshAsync();Check("fake-sample monitor healthy",status is{Ok:true});
+        var gateItem=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"ui-gate",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new(Commands.FindExe("node.exe")!,["-e","setTimeout(()=>{},1500)"],"exe"),ResourcePolicy.AgentBudget);
+        var gateReserve=await Ipc.ReserveWithCleanupAsync([gateItem]);Check("gate reserve admitted ("+gateReserve.Message+")",gateReserve.Ok);
+        submittedAttempts=[gateItem.Id];submittedRevision=config.Draft.Revision;
+        await RefreshAsync();
+        Check("pending attempt keeps launch gate",submittedAttempts.Length==1&&submittedRevision==config.Draft.Revision);
+        var gateStart=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};gateStart.ArgumentList.Add("run");gateStart.ArgumentList.Add(gateItem.Id.ToString());
+        using(var gateRunner=Process.Start(gateStart)!)
+        {
+            gateRunner.StandardInput.Close();
+            Receipt? gateReceipt=null;for(var i=0;i<50;i++){await Task.Delay(100);gateReceipt=Store.Read<Receipt>(Store.ReceiptPath(gateItem.Id));if(gateReceipt?.Phase=="Started")break;}
+            Check("gate runner started",gateReceipt?.Phase=="Started");
+            await RefreshAsync();
+            Check("confirmed running attempt releases launch gate",submittedAttempts.Length==0&&submittedRevision==-1);
+            await gateRunner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        for(var i=0;i<50;i++){await RefreshAsync();if(status?.Entries?.Any(e=>e.Plan.Id==gateItem.Id&&Store.IsTerminal(e))==true)break;await Task.Delay(100);}
+        Check("gate attempt settled",status?.Entries?.Any(e=>e.Plan.Id==gateItem.Id&&Store.IsTerminal(e))==true);
+        Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE",null);
+        var fakeMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(fakeMonitor>0){try{using var m=Process.GetProcessById(fakeMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
+        await RefreshAsync();
         Check("monitor reports healthy",status is{Ok:true});
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX,Resource=ResourceText.Text});Close();

@@ -50,6 +50,71 @@ internal static class Integration
             var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));
             Assert(status.Entries!.Single(e=>e.Plan.Id==item.Id).State=="Revoked","committed grant not revoked after client timeout");
         });
+        // F1 regression: ControlledCommand must route its reserve through the cleanup wrapper; a lost reserve response must not leave a Pending git grant holding the global slot.
+        await Test("ControlledCommand lost reserve response auto-revokes",async()=>{
+            var git=Commands.FindExe("git.exe")!;
+            Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND","1");
+            try{await ControlledCommand.RunAsync(new(git,["--version"],"exe"),cwd);Assert(false,"lost reserve response not surfaced");}
+            catch(IOException e){Assert(e.Message.Contains("撤销"),e.Message);}
+            finally{Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND",null);}
+            var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            Assert(!status.Entries!.Any(e=>!Store.IsTerminal(e)&&e.Plan.Kind=="git"),"unclaimed git grant leaked after lost reserve response");
+        });
+        // F2 regression: a Runner that exits while its grant is still Pending (begin rejected/never sent) must surface "never ran" distinctly and release the global git slot. Uses the new AGENT_LAUNCHER_FAIL_AT=BeforeBegin hook (test-infra addition, flagged for review).
+        await Test("ControlledCommand begin rejection releases git slot",async()=>{
+            var git=Commands.FindExe("git.exe")!;
+            Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT","BeforeBegin");
+            IOException? failure=null;
+            try{await ControlledCommand.RunAsync(new(git,["--version"],"exe"),cwd);}catch(IOException e){failure=e;}
+            finally{Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT",null);}
+            Assert(failure!=null&&failure.Message.Contains("未运行"),"begin rejection not surfaced distinctly: "+(failure?.Message??"no error"));
+            var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            Assert(!status.Entries!.Any(e=>!Store.IsTerminal(e)&&e.Plan.Kind=="git"),"begin-rejected git grant leaked");
+        });
+        // F3 regression: replay must re-resolve commands each time so a rewritten npm-style shim (new entry script) is reflected; the old repair only triggered when the executable was missing.
+        await Test("Preparation replay refreshes changed shim argv",async()=>{
+            const string npmShim="""
+@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\node.exe" (
+  SET "_prog=%dp0%\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTRY}" %*
+""";
+            var shim=Path.Combine(Store.Root,"shim-refresh");Directory.CreateDirectory(shim);
+            File.WriteAllText(Path.Combine(shim,"node.exe"),"stub");
+            var beforeRecords=Directory.CreateDirectory(Store.FilePath("preparations")).GetFiles("*.json").Select(f=>f.FullName).ToHashSet();
+            await File.WriteAllTextAsync(Path.Combine(shim,"tool.cmd"),npmShim.Replace("{ENTRY}","old.js").Replace("\r\n","\n"));await File.WriteAllTextAsync(Path.Combine(shim,"old.js"),"// 1");
+            var d=new Draft{Project=cwd,DirectoryMode="shared"};d.Slots.ForEach(s=>s.Enabled=false);d.Slots[0].Enabled=true;d.Slots[0].Profiles["pi"]=new(){Executable=Path.Combine(shim,"tool.cmd")};
+            try
+            {
+                var first=await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+                Assert(first[0].Command.Arguments[0].EndsWith("old.js"),"initial shim resolution wrong: "+first[0].Command.Arguments[0]);
+                await File.WriteAllTextAsync(Path.Combine(shim,"tool.cmd"),npmShim.Replace("{ENTRY}","new.js").Replace("\r\n","\n"));await File.WriteAllTextAsync(Path.Combine(shim,"new.js"),"// 2");File.Delete(Path.Combine(shim,"old.js"));
+                var second=await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);
+                Assert(second[0].Command.Arguments[0].EndsWith("new.js"),"changed shim argv not reflected on replay: "+second[0].Command.Arguments[0]);
+            }
+            finally{if(Directory.Exists(Store.FilePath("preparations")))foreach(var extra in Directory.GetFiles(Store.FilePath("preparations"),"*.json").Where(path=>!beforeRecords.Contains(path)))File.Delete(extra);}
+        });
+        // F4 regression: status history is byte-bounded (768 KiB terminal window) so the 1-MiB IPC frame stays writable with large arguments.
+        await Test("Status frame stays readable with large argument history",async()=>{
+            var big=new string('a',28000);
+            for(var i=0;i<40;i++){var item=Item("bulk-"+i,["--hold","1",big]);var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);var revoke=await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));Assert(revoke.Ok,revoke.Message);}
+            var report=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            Assert(report.Ok,"status unreadable with large terminal history: "+report.Message);
+            Assert(report.Entries!.Count(e=>Store.IsTerminal(e))<40,"terminal history not byte-bounded");
+        });
         await Test("R13 monitor restart preserves running process and reconciles",async()=>{
             var item=Item("survive",["--hold","4500"]);var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
             using var runner=Start("run",item.Id);
