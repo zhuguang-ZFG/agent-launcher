@@ -135,6 +135,11 @@ public static class Commands
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Yarn","bin"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"scoop","shims"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".bun","bin"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".kimi-code","bin"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".local","bin"));
+        var kimiDir=Environment.GetEnvironmentVariable("KIMI_INSTALL_DIR");if(!string.IsNullOrWhiteSpace(kimiDir))Add(Path.Combine(kimiDir,"bin"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".qoder","entry"));
+        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".pi","agent","bin"));
         return dirs;
     }
     private static IEnumerable<string> SearchDirs(IReadOnlyList<string>? extra)=>((Environment.GetEnvironmentVariable("PATH")??"").Split(';').Where(Path.IsPathFullyQualified)).Concat(extra??InstallSearchDirs());
