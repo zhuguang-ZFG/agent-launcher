@@ -101,9 +101,14 @@ internal sealed class Monitor : IDisposable
                 catch(Exception e)when(e is IOException or UnauthorizedAccessException or System.Security.SecurityException){blocked="命名管道被占用或不可用，正在重试："+e.Message;Thread.Sleep(1000);continue;}
                 using(pipe)
                 {
-                    using var wait=new CancellationTokenSource(2000);
-                    try{pipe.WaitForConnectionAsync(wait.Token).GetAwaiter().GetResult();}
-                    catch(OperationCanceledException){Refresh();if(!ledgerBroken&&ledger.Entries.All(Store.IsTerminal)&&DateTime.UtcNow-lastActivity>TimeSpan.FromSeconds(5))return 0;continue;}
+                    var accept=pipe.WaitForConnectionAsync();var connected=false;
+                    while(!connected)
+                    {
+                        // The accept task stays pending across ticks: a client that connects at a tick boundary is never stranded by disposal.
+                        var tick=Task.WhenAny(accept,Task.Delay(2000)).GetAwaiter().GetResult();
+                        if(tick==accept){connected=true;break;}
+                        Refresh();if(!ledgerBroken&&ledger.Entries.All(Store.IsTerminal)&&DateTime.UtcNow-lastActivity>TimeSpan.FromSeconds(30)){if(accept.IsCompleted){connected=true;break;}return 0;}
+                    }
                     lastActivity=DateTime.UtcNow;
                     using var deadline=new CancellationTokenSource(3000);
                     try

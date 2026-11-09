@@ -25,7 +25,7 @@
 - **A4**：恢复备份补上与加载一致的 null/结构校验。
 - **A5**：行内编辑后按 AutomationProperties.Name 恢复键盘焦点（仅限 SlotList 内，项目输入框不抢焦点）；新增断言「row edit restores keyboard focus」。
 - P2 批量：系统主题注册表读取加防护；`RefreshAsync` 失败改走 `UpdateLaunch` 统一状态并跟踪 `commError` 避免状态不一致；命令检查失败兜底（非 OOM 均归一为可见错误而非卡死）；选择/拖放补 `readOnly` 门禁；`FormWindow` 未知选项回退追加当前值项、布尔解析忽略大小写、移除无效 Ctrl+Enter 处理器；TextBox 模板 ScrollViewer 透传滚动条可见性；资源管理器 `Process.Start` 句柄释放；UiChecks 移除死代码并强化面板堆叠断言（列/行位置）。
-- 评审驳回项：C3「计划摘要未与账本基线比对」不成立（begin/resume 用账本内 Plan 与 Digest 双重核对）；「shim 空白绕过」不成立（整串相等比较）。C5 回收竞态、C6 wt 四分屏焦点与 §6 既有记录一致，维持未声称。
+- 评审驳回项：C3「计划摘要未与账本基线比对」及「shim 空白绕过」不成立；C5「误杀已恢复进程」指控撤回：Runner 在持有 AttemptLock 时先持久化 ResumeIntent 再 Resume，Refresh 获取同锁后重读回执，仅回收 SpawnIntent/CreatedSuspended。仍保留 §6 的 ResumeIntent 已写但 Resume 未执行时暂停进程保留限制；四分屏焦点仍属于未完整验证项。
 
 WPF 断言增至 **34 项**（新增：配置加载可写、监控器健康、行编辑焦点恢复、面板行列位置）。全门禁 `scripts/test.ps1` 退出 0（PASS 29 行）；预览包已重建。损坏场景负向冒烟脚本位于 `D:/Temp/User/smoke-corrupt.ps1`（仓库外）。
 
@@ -39,7 +39,19 @@ WPF 断言增至 **34 项**（新增：配置加载可写、监控器健康、�
 - **准备记录防护**：`PreparationRecord` 增加 `SchemaVersion`；结构校验（Digest/Original/Completed/Baselines/各计划字段与 Guid）；未知版本 fail-closed 且不改写文件；旧版（无版本字段）记录校验后原地升级、保留 `Original` Id/批次/`Completed`/`Baselines` 身份，不重建 worktree；命令可执行文件缺失时保留 worktree 映射、只按草稿顺序重解析命令并回写 `Completed`。集成 F09 扩展覆盖：陈旧命令修复（Cwd 序列不变）、结构损坏拒绝、旧版记录采纳（Cwd 与 Id 身份保留）、版本 2 拒绝且文件字节不变。
 - **UI 状态一致性**：`Edit` 返回是否被守卫拒绝；只读时复选框/Agent 选择器回滚到原值；`QueueSave` 增加 loading 守卫；启动提示链补齐只读/未启用/监控器未就绪/命令检查中文案，不再在禁用时显示「检查已通过」。
 
+- **准备记录别名回归**：新建记录时 `plans` 曾直接别名 `record.Original`，worktree 循环回写会把 `Original` 的源目录改写成 worktree 身份，重试时分组消失并跳过基线/分支核对。现 `Original` 保持源路径（`.ToList()`），并新增回归：记录改写检测、已准备 worktree 的 HEAD 漂移必须拒绝、`reset` 后恢复可复用。
+- **监控器接受连接生命周期**：待接受连接任务改为跨 2s 采样 tick 保留，避免每次采样都取消并释放监听实例；空闲退出窗口为 30s。曾观察到客户端写入 `Pipe is broken`，但没有故障当时的 PID/存活时序证据，不能断言是空闲退出导致。现有 12 次间隔 500ms 的 status 测试属于基本连通性回归，不保证命中 2s 无连接边界，也不证明所有退出竞态已消除。
+
 回归：`scripts/test.ps1` 退出 0（PASS 28 行：模型 11、集成 12 含新增超时撤销、浏览器/原型 5/5）；WPF 断言 34→**40 项**。
+
+第六轮：准备记录损坏校验闭环（本次继续修复）。
+
+- **根因（隐含假设 / 跨层合同）**：C# 非空类型声明不禁止 JSON 显式 null。旧 `Usable` 直接读取 `Command.Executable.Length`，未核对 Position、Original ID 与 Completed key；后续升级、数组索引及 `Single` 先于完整校验，导致 NRE/越界/关联异常，或把坏旧记录升级写回。
+- **校验顺序**：先验证嵌套命令/参数/目录/工作区字段与基线 OID，再对照当前草稿生成的有效计划核对启用项数量、顺序、Position、源目录/物理身份、名称/模式/预算、共同批次和唯一 ID；Completed 的 key、计划 ID、Position、BatchId 必须关联同一 Original。通过后才允许旧记录升级或修复可执行路径。公开 DTO 和 `PrepareAsync` 签名未改变；不把缺失的可执行文件视为结构损坏，仍保留已测的命令重解析路径。
+- **失败前 / 修复后**：23 种坏记录分别以无版本字段旧形态及 v1 序列化，共 46 个场景。修改生产代码前运行时全部失败，出现 NRE、越界、`Single` 异常、成功重放或旧记录被改写；同一组场景修复后全部通过，要求抛 `IOException` 且主文件与 `.bak` 字节都不变。另加正常启用第 2/4 项的复用回归，避免把 Position 错当连续下标。证据：[RED](../artifacts/validation/preparation-red.json)、[GREEN](../artifacts/validation/preparation-green.json)。
+- **本机完整门禁**：`powershell -NoProfile -File scripts/test.ps1` 退出 0；模型/Win32 11、隔离集成 60、WPF 40、HTML 模型 5、Edge DOM 5，未跳过。集成实际执行 Worker/Job、真实 Pi 版本、临时 Git worktree 准备/重用/HEAD 漂移拒绝。没有覆盖率工具，不声称覆盖率数字。
+- **预览隔离**：串行重建正常预览后，对 App/Windows/Worker 三个程序集同时检查 ASCII 与 UTF-16 标识；7 个测试入口/环境标识在对应预览程序集均不存在，而对应测试程序集均存在作为阳性对照。证据：[程序集标识与 SHA-256](../artifacts/validation/preview-hooks.json)。该检查不等同于完整安全审计。
+- **operator 验证状态**：已调用 `task_verify run`，返回 `unverified`，原因 `project-or-git-baseline-unavailable`；没有执行 operator 配置检查。仓库现在有 Git，这个返回不能解释为“仓库没有 Git”。本次新增测试矩阵与正常映射回归待用户审阅，实际测试通过不替代固定基线审批。工作流、现有断言及阈值未放宽。
 
 未声称完成：人工视觉审美评审、Narrator/高对比度实测、100/150/200% DPI 矩阵。几何与资源断言不冒充视觉验收。
 
