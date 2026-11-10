@@ -10,29 +10,29 @@ public static class Agents
 }
 public sealed class AgentProfile
 {
-    public string Executable { get; set; } = "";
-    public string[] Arguments { get; set; } = [];
+    [JsonRequired] public string Executable { get; set; } = "";
+    [JsonRequired] public string[] Arguments { get; set; } = [];
     public AgentProfile Copy() => new() { Executable = Executable, Arguments = [.. Arguments] };
 }
 public sealed class Slot
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public bool Enabled { get; set; }
-    public string AgentId { get; set; } = "pi";
+    [JsonRequired] public Guid Id { get; set; } = Guid.NewGuid();
+    [JsonRequired] public bool Enabled { get; set; }
+    [JsonRequired] public string AgentId { get; set; } = "pi";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? CustomName { get; set; }
     [JsonIgnore] public string DisplayName=>AgentId=="custom"&&!string.IsNullOrWhiteSpace(CustomName)?CustomName:Agents.Get(AgentId).Name;
-    public string Directory { get; set; } = "";
+    [JsonRequired] public string Directory { get; set; } = "";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] public bool RequiresDirectory { get; set; }
     public string Note { get; set; } = "";
-    public Dictionary<string, AgentProfile> Profiles { get; set; } = [];
+    [JsonRequired] public Dictionary<string, AgentProfile> Profiles { get; set; } = [];
     [JsonIgnore] public AgentProfile Current => Profiles.GetValueOrDefault(AgentId) ?? new();
     public Slot Copy() => new() { Id = Id, Enabled = Enabled, AgentId = AgentId, CustomName = CustomName, Directory = Directory, RequiresDirectory = RequiresDirectory, Note = Note, Profiles = Profiles.ToDictionary(p => p.Key, p => p.Value.Copy()) };
 }
 public sealed class Draft
 {
     [JsonRequired] public int SchemaVersion { get; set; } = 1;
-    public long Revision { get; set; }
-    public string Project { get; set; } = "";
+    [JsonRequired] public long Revision { get; set; }
+    [JsonRequired] public string Project { get; set; } = "";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] public bool IsPortableTemplate { get; set; }
     [JsonRequired] public string DirectoryMode { get; set; } = "isolated";
     [JsonRequired] public string Layout { get; set; } = "vertical";
@@ -117,4 +117,4 @@ public sealed class ControlEntry
 public sealed class Ledger { public int SchemaVersion { get; set; } = 1; public string BootId { get; set; } = ""; public List<ControlEntry> Entries { get; set; } = []; }
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At);
 public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null);
-public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null);
+public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false);

@@ -240,3 +240,50 @@ powershell -NoProfile -File scripts/test.ps1
 ```
 
 测试只操作新建临时目录；没有修改用户项目、关闭用户应用或发送任何消息。测试夹具及未确认记录保留以便复核，不自动删除。
+
+## 10. 合并后评审修复（2026-11-10）
+
+本轮获准修复 CR01～CR12，仍保持技术预览和完整 spec 未验收状态。测试、runner、阈值在回合开始时固定；新增回归单列待评审，手动执行结果不代表 operator 验证通过。
+
+### CR01：持久化执行快照的字段存在性
+
+- 预期：缺失执行字段应拒绝读取，不修改损坏文件或有效备份；显式空值/default 与新建配置仍可使用。实际旧行为：单独移除 `Id`、`Enabled`、`AgentId`、`Directory`、`Profiles`、`Executable`、`Arguments`、`Project`、`Revision` 都被接受。
+- 首个分歧在 JSON 反序列化：默认初始化值掩盖缺失字段；不是 `Restore` 才开始丢数据。保留新建对象的默认值，仅用既有 `[JsonRequired]` 约束持久化边界，不引入新 schema 或隐式迁移。
+- 新增 `ConfigurationReviewChecks`，覆盖当前草稿、LastEdited、命名组合，以及完整默认/portable 快照往返。相同测试对旧程序集返回 exit 1（`Draft.Id silently accepted`），对修正后 Core 返回 exit 0、两项通过；原文件与 `.bak` 不变断言保留。
+- 证据：`artifacts/review-config-red.txt`、`artifacts/review-config-green.txt`；隔离配置根 `artifacts/AgentLauncher-tests-review-402438ff50a74b8bb83d552deee4f36f`。旧三项目录冲突也已运行确认，原始结果为 `artifacts/AgentLauncher-tests-review-0b5cd4d73fb649f9a082192c54659dfa/boundary-result.json`；该问题的修后证据见下表。
+
+根因类别：跨层合同和隐式假设。防复发边界是逐字段的真实反序列化回归，而非仅检查空对象/顶层 schema。新增测试文件和 `Program.cs` 调用均待评审；未改 runner、阈值或既有断言。
+
+### CR02～CR12：恢复、协议与交互边界
+
+| 评审项 | 修复边界 | 当前直接证据 |
+| --- | --- | --- |
+| CR02 准备目录替换 | 重用前比较保存的物理 key/cwd，核对 intent、common Git dir 及 worktree 登记；不同目录不覆盖旧身份 | 同一永久回归在旧版接受替换而失败，修后拒绝且原记录/备份不变；正常复用、命令刷新、Intent 崩溃恢复均通过 |
+| CR03 停止请求 | 停止经监控器持久撤销冻结批次 Pending；提交前后和确认等待检查取消，保留已领取项；只锁配置控件，不锁会话撤销入口 | 同源 UI 探针旧版 Pending 不变、修后 Revoked，迟到 begin 被拒绝；WPF 新回归覆盖忙时可访问性 |
+| CR04 撤销落盘失败 | State 与 Detail 在同一个异常分支恢复原值，失败不宣称已撤销 | 文件共享冲突旧版留下成功详情，修后原状态/详情保留；后续 begin 仍可正常领取 |
+| CR05 活动记录 | 所有活动/未确认项可见，仅历史取最近 12 条 | 旧 Pending 被 12/13 条新历史挤出的同源探针旧失败/新通过 |
+| CR06 超长状态 | 同一管道事务发送有界多帧，完整收到最终帧才返回；各帧上限仍为 1 MiB，单条不可表示的计划在持久化前拒绝 | >1 MiB 整体状态保留全部活动 ID/参数；旧版断流、新版通过；截断、代次混合均拒绝 |
+| CR07 前端准入 | 有效工作目录参与异步检查；未应用文本/过期检查不能放行；`AdmissionBlockedReason` 独立于 `Ok` 核对健康状态 | 不存在目录、压力恢复锁存加健康样本均旧失败/新通过；恢复后清除原因，完整 WPF 原有空项目提示不退化 |
+| CR08 保存恢复 | 保存失败保留最新草稿与待写快照，提供「重试保存」，确认成功前不启用启动 | 文件锁释放后明确重试保存最新版本，清除失败；只读配置仍拒绝写入 |
+| CR09 撤销移除 | 撤销记录独立保存，任何会话重绘重建入口；支持多条与容量不足后的重试 | 旧版会话变化使入口消失，修后保留；空会话签名使用 null 无效值避免缓存误命中 |
+| CR10 空闲退出 | 无活动义务/Job/核对阻塞且无轮询时约 4 秒退休；预约只在发送任何请求字节之前连接失败时启动监控器，不重放未知请求 | 同源运行时回归旧版 5 秒仍活跃，修后 4.293848 秒退出；轮询、Pending 保活通过 |
+| CR11 目录说明 | 单项明确使用原项目/指定目录，不承诺副本；多项按同一工作区分组策略说明 | `artifacts/ui/native-dark-1040.png` 原生渲染显示单项原目录说明；现有单项准备回归保持原 cwd |
+| CR12 全批次冲突 | Git/准备记录写入前比较最终目标与全批直接目录；不误拒绝同一存放根下的不重叠兄弟目录 | 同一永久回归旧版先成功准备而失败；修后无新增记录/分支/工作树；兄弟目录通过 |
+
+协议实现说明：`Response.More` 仅表示同一请求、同一管道内的连续帧，调用者收到完整 `Response` 后才更新状态。客户端校验所有帧的健康状态/消息/采样/epoch/准入原因一致，最多 64 帧、16 MiB；这些是传输防护，不增加原 1 MiB 单帧限制，也不删除活动计划。所有二进制需整目录一起更新。
+
+### 运行证据与失败修正
+
+- 最终原命令 `powershell -NoProfile -File scripts/test.ps1`（bg_74，exit 0，156.61 秒）：**19 模型/原生、83 集成、94 WPF、5 原型、5 浏览器检查通过**。未使用 SkipUi/SkipBrowser；runner、30 秒 WPF 超时、资源预算及既有断言未变。证据：`artifacts/integration-results.json`、`artifacts/ui/ui-checks.json`、`artifacts/prototype-browser-results.json`；完整集成根 `D:/temp/User/AgentLauncher-tests-integration-4e20931d33e548048759d5f828bc69cb`。
+- 同源六项 UI 边界探针：旧版根 `artifacts/AgentLauncher-tests-review-a050a9c8c4284293b13918f4915c31f9/ui-boundary-result.json` 全部预期失败；修后根 `artifacts/AgentLauncher-tests-review-8ba6862288fc412ba8d972da0a7ae895/ui-boundary-result.json` 全通过。运行时三项同源对照：旧根 `D:/temp/User/AgentLauncher-tests-review-f31b1580c9544d67a17b9005ae265d76`，新根 `D:/temp/User/AgentLauncher-tests-review-eaa45a580a1f410e8dc869a00a4544f4`，均有 `runtime-boundary-result.json`。
+- WorkspaceReviewChecks 对旧程序集：`D:/temp/User/AgentLauncher-tests-review-44ac0a5b3b014780a183639e6e813b9f/workspace-boundary-result.json`，目录替换/全批次冲突两项预期失败，另三项通过；修后五项均在完整集成通过。首次更深 artifacts 根触发 Git `$GIT_DIR too big`，该环境失败不计 RED，改用正常测试根深度后取得上述有效结果。
+- 第一轮 WPF 超时并非门禁太短：只读采样发现 `commandsRunning=true`、任务已完成、Dispatcher 心跳停止。等待者循环饿死完成者；改为单消费者返回共享任务，并由 worker finally 清运行标志。后续依次修正空项目提示优先级、空会话撤销缓存失效值。新 readiness 夹具补上「等待保存完成」前置条件；没有削弱 launch-ready 断言。最终原 30 秒内 WPF 94 项通过。
+- 本轮外部 UIA 在当前桌面不可访问，调试器无 netcoredbg；未继续重复不可用操作。原生图是 120 DPI 的 WPF 内部渲染/局部布局证据，不是 OS DPI、Narrator 或人工完整验收。
+
+### 待评审测试和未验证范围
+
+- 新增 `ConfigurationReviewChecks.cs`（两项、九字段 × 三种快照）、`WorkspaceReviewChecks.cs`（五项）、`RuntimeReviewChecks.cs`（六项）、`UiReviewChecks.cs`（28 项），并在现有 Program/Integration/UiChecks 中各接入调用。未添加运行时故障注入 hook；沿用隔离 root/fake sample。新夹具清理只针对自己的进程/目录，Monitor 清理核对测试根、PID 和启动时间。
+- 根因防复发：持久化字段必须区分「缺失」与显式默认；路径/提交/分支名不能代替物理仓库身份；恢复操作必须同时验证状态、持久化与用户可达入口；多消费者等待共享任务不能用尚未复位的标志自旋。
+- `task_verify run` 当前仍为 **unverified / project-or-git-baseline-unavailable，checks=[]**；没有 operator-configured passed/failed 项。上述手动通过结果与新测试待评审状态分别报告。请评审新增回归和调用接入，在后续用户回合建立新基线。
+- 完整 spec 目标未关闭：第 6、8 节中真实 Pi 交互、所有分屏布局、系统 DPI/Narrator、高对比度全矩阵、真实压力/长时稳定性和正式签名/.NET10 分发仍未完整验收。本轮没有补做命令超时、结构化错误码、终端定位等额外功能，不将 12 项修复当作全部 spec 完成。
+

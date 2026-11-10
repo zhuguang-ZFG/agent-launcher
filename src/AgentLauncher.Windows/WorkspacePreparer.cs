@@ -142,6 +142,9 @@ public sealed class WorkspacePreparer
             if(record.SchemaVersion is <0 or >1)throw new IOException($"准备记录版本不支持，未改写文件：{preparationPath}");
             if(record.Digest!=digest)throw new IOException("准备记录摘要不符，禁止重放。");
             if(!StructurallyValid(record,plans))throw new IOException($"准备记录损坏，禁止重放：{preparationPath}");
+            // Reject batch target collisions and changed prepared-directory identities before the repair/baseline/completed writes below.
+            EnsureBatchTargetsDistinct(plans,record.Original[0].BatchId,worktreeRoot,draft.DirectoryMode);
+            EnsureExistingTargetsStable(record,worktreeRoot,record.Original[0].BatchId,draft.DirectoryMode);
             var repaired=false;
             // The draft digest still matches, so slot order is authoritative; keep worktree mapping but re-resolve commands so shim/entry updates are honored.
             for(var i=0;i<record.Original.Count;i++)
@@ -153,7 +156,7 @@ public sealed class WorkspacePreparer
             if(record.SchemaVersion!=1||repaired){record.SchemaVersion=1;Store.Save(preparationPath,record);}
             effective=record.Original.Select(p=>record.Completed.GetValueOrDefault(p.Id)??p).ToList();
         }
-        if(record==null){record=new(){SchemaVersion=1,Digest=digest,Original=plans};Store.Save(preparationPath,record);}
+        if(record==null){EnsureBatchTargetsDistinct(plans,batch,worktreeRoot,draft.DirectoryMode);record=new(){SchemaVersion=1,Digest=digest,Original=plans};Store.Save(preparationPath,record);}
         plans=effective??record.Original.ToList();batch=record.Original[0].BatchId;
         foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1).ToArray())
         {
@@ -177,23 +180,28 @@ public sealed class WorkspacePreparer
             foreach(var plan in group)
             {
                 ct.ThrowIfCancellationRequested();var target=Path.Combine(worktreeRoot,batch.ToString("N"),"agent-"+plan.Position);
+                var branch=$"launcher/{batch:N}/{plan.Position}";
+                var workspacePath=Store.FilePath($"workspaces/{plan.Id:N}.json");
+                var known=File.Exists(workspacePath);var targetExists=Directory.Exists(target);var completed=record.Completed.GetValueOrDefault(plan.Id);
+                // Never adopt a replacement directory: compare the stored physical identity before any intent/completed/progress/record write.
+                if(targetExists&&known)ValidateIntentRecord(workspacePath,root,target,branch,oid);
+                if(!targetExists&&known)throw new IOException("上次准备已中断且目录未找到。请核对工作目录记录；不会自动重复创建或删除分支。");
+                if(!targetExists&&completed!=null)throw new IOException("已准备目录缺失，禁止自动重放；请核对工作目录记录。");
+                if(targetExists&&completed!=null)EnsureCompletedTargetIdentity(completed,target);
+                else if(targetExists&&!known)throw new IOException("目标目录已存在但没有准备意图记录，禁止复用或删除。");
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);var drive=new DriveInfo(Path.GetPathRoot(target)!);
                 var reserve=Math.Max(2*ResourcePolicy.GiB,(ulong)drive.TotalSize/20);
                 if((ulong)drive.AvailableFreeSpace<reserve+estimated)throw new IOException("目标盘空间不足以保留余量和检出文件。");
-                var branch=$"launcher/{batch:N}/{plan.Position}";
-                var workspacePath=Store.FilePath($"workspaces/{plan.Id:N}.json");
-                var known=File.Exists(workspacePath);
-                if(!known)Store.Save(workspacePath,new{State="Intent",Root=root,Target=target,Branch=branch,Oid=oid});
+                if(!known&&!targetExists)Store.Save(workspacePath,new{State="Intent",Root=root,Target=target,Branch=branch,Oid=oid});
                 progress($"正在准备/核对第 {plan.Position} 项独立目录 · {oid[..8]}。取消只停止后续步骤，已创建目录保留。");
-                if(!Directory.Exists(target))
-                {
-                    if(known)throw new IOException("上次准备已中断且目录未找到。请核对工作目录记录；不会自动重复创建或删除分支。");
-                    await Git(root,["worktree","add","-b",branch,target,oid],ct);
-                }
+                if(!targetExists)await Git(root,["worktree","add","-b",branch,target,oid],ct);
                 var actual=(await Git(target,["rev-parse","HEAD"],ct)).Trim();if(actual!=oid)throw new IOException("已有准备目录基线已变化，请改用“使用已准备目录”。");
                 var actualBranch=(await Git(target,["symbolic-ref","--short","HEAD"],ct)).Trim();if(actualBranch!=branch)throw new IOException("已有目录分支不匹配，禁止复用。");
+                // Same OID/branch is not proof of identity: a separate clone can satisfy both, so validate the repository and worktree registry.
+                if(targetExists)await EnsureLinkedWorktreeAsync(root,target,branch,oid,ct);
                 var relative=Path.GetRelativePath(root,plan.Cwd);var mapped=relative=="."?target:Path.Combine(target,relative);
                 if(!Directory.Exists(mapped))throw new IOException("基线不包含原子目录；已准备目录保留，请选择仓库根目录重试。");
+                if(completed!=null)EnsureCompletedCwdIdentity(completed,mapped);
                 var replacement=plan with{Cwd=PhysicalDirectory.Resolve(mapped).Path,Workspace=PhysicalDirectory.Workspace(mapped)};
                 plans[plans.FindIndex(p=>p.Id==plan.Id)]=replacement;record.Completed[plan.Id]=replacement;Store.Save(preparationPath,record);
                 Store.Save(Store.FilePath($"workspaces/{plan.Id:N}.json"),new{State="Prepared",Root=root,Target=target,Branch=branch,Oid=oid});
@@ -201,6 +209,132 @@ public sealed class WorkspacePreparer
         }
         // Prepared directories are reusable; launch authorization IDs are always fresh.
         var launchBatch=Guid.NewGuid();return plans.Select(p=>p with{Id=Guid.NewGuid(),BatchId=launchBatch}).ToList();
+    }
+    private static void EnsureBatchTargetsDistinct(IReadOnlyList<LaunchItem> plans,Guid batch,string worktreeRoot,string mode)
+    {
+        if(mode!="isolated")return;
+        var isolated=plans.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1).SelectMany(g=>g).Select(p=>p.Id).ToHashSet();
+        if(isolated.Count==0)return;
+        // Compare the eventual prepared workspace (actual worktree target), never the destination root: a direct sibling under that root may be valid.
+        var eventual=new Dictionary<Guid,string>();
+        foreach(var plan in plans)
+        {
+            var path=isolated.Contains(plan.Id)?Path.Combine(worktreeRoot,batch.ToString("N"),"agent-"+plan.Position):plan.Workspace.Path;
+            eventual[plan.Id]=Directory.Exists(path)?PhysicalDirectory.Resolve(path).Path:Path.GetFullPath(path);
+        }
+        foreach(var plan in plans)
+        {
+            if(!isolated.Contains(plan.Id))continue;
+            foreach(var other in plans)
+            {
+                if(other.Id==plan.Id)continue;
+                if(!SameOrWithin(eventual[plan.Id],eventual[other.Id])&&!SameOrWithin(eventual[other.Id],eventual[plan.Id]))continue;
+                if(plan.Shared&&other.Shared)continue;
+                throw new IOException("独立工作目录目标与同批其他工作目录重叠，已停止；请调整目录模式或位置。");
+            }
+        }
+    }
+    private static void EnsureExistingTargetsStable(PreparationRecord record,string worktreeRoot,Guid batch,string mode)
+    {
+        if(mode!="isolated")return;
+        foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1))
+        {
+            var root=group.First().Workspace.Path;var baseline=record.Baselines.GetValueOrDefault(group.Key);
+            foreach(var plan in group)
+            {
+                var target=Path.Combine(worktreeRoot,batch.ToString("N"),"agent-"+plan.Position);
+                var branch=$"launcher/{batch:N}/{plan.Position}";
+                var workspacePath=Store.FilePath($"workspaces/{plan.Id:N}.json");
+                var known=File.Exists(workspacePath);var completed=record.Completed.GetValueOrDefault(plan.Id);
+                if(!Directory.Exists(target))
+                {
+                    if(known)throw new IOException("上次准备已中断且目录未找到。请核对工作目录记录；不会自动重复创建或删除分支。");
+                    if(completed!=null)throw new IOException("已准备目录缺失，禁止自动重放；请核对工作目录记录。");
+                    continue;
+                }
+                if(known)ValidateIntentRecord(workspacePath,root,target,branch,baseline);
+                if(completed!=null)EnsureCompletedTargetIdentity(completed,target);
+                else if(!known)throw new IOException("目标目录已存在但没有准备意图记录，禁止复用或删除。");
+            }
+        }
+    }
+    private static void ValidateIntentRecord(string path,string root,string target,string branch,string? oid)
+    {
+        Dictionary<string,JsonElement>? state;
+        try{state=Store.Read<Dictionary<string,JsonElement>>(path);}catch(Exception e)when(e is JsonException or InvalidDataException){throw new IOException($"工作目录意图记录无法解析，禁止重放：{path}",e);}
+        if(state==null
+          ||!state.TryGetValue("State",out var stateValue)||stateValue.ValueKind!=JsonValueKind.String||stateValue.GetString() is not ("Intent" or "Prepared")
+          ||!state.TryGetValue("Root",out var rootValue)||rootValue.ValueKind!=JsonValueKind.String
+          ||!state.TryGetValue("Target",out var targetValue)||targetValue.ValueKind!=JsonValueKind.String
+          ||!state.TryGetValue("Branch",out var branchValue)||branchValue.ValueKind!=JsonValueKind.String
+          ||!state.TryGetValue("Oid",out var oidValue)||oidValue.ValueKind!=JsonValueKind.String
+          ||branchValue.GetString()!=branch||(oid!=null&&oidValue.GetString()!=oid)
+          ||!SamePhysicalDirectory(rootValue.GetString()!,root)||!SamePhysicalDirectory(targetValue.GetString()!,target))
+            throw new IOException($"工作目录意图记录与当前目标不一致，禁止重放：{path}");
+    }
+    private static void EnsureCompletedTargetIdentity(LaunchItem completed,string target)
+    {
+        var live=PhysicalDirectory.Resolve(target);
+        if(!StringComparer.Ordinal.Equals(completed.Workspace.Key,live.Key)||!StringComparer.OrdinalIgnoreCase.Equals(completed.Workspace.Path,live.Path))
+            throw new IOException("已准备目录物理身份与准备记录不一致，禁止覆盖记录。请恢复原目录，或改用“使用已准备目录”。");
+    }
+    private static void EnsureCompletedCwdIdentity(LaunchItem completed,string mapped)
+    {
+        var live=PhysicalDirectory.Resolve(mapped).Path;
+        if(!StringComparer.OrdinalIgnoreCase.Equals(completed.Cwd,live))throw new IOException("准备记录中的工作目录与当前准备目录不一致，禁止覆盖记录。");
+    }
+    private async Task EnsureLinkedWorktreeAsync(string root,string target,string branch,string oid,CancellationToken ct)
+    {
+        var rootCommon=await GitCommonDirectoryAsync(root,ct);var targetCommon=await GitCommonDirectoryAsync(target,ct);
+        if(rootCommon!=targetCommon)throw new IOException("已准备目录不是该仓库登记的 Git 工作树，禁止复用或覆盖准备记录。");
+        if(!WorktreeListed(await Git(root,["worktree","list","--porcelain"],ct),target,branch,oid))throw new IOException("已准备目录未登记在该仓库的 Git 工作树列表中，禁止复用或覆盖准备记录。");
+    }
+    private async Task<string> GitCommonDirectoryAsync(string cwd,CancellationToken ct)
+    {
+        var raw=(await Git(cwd,["rev-parse","--git-common-dir"],ct)).Trim();
+        if(raw.Length==0)throw new IOException("无法解析 Git 公共目录。");
+        string full;try{full=Path.GetFullPath(raw.Replace('/',Path.DirectorySeparatorChar),Path.GetFullPath(cwd));}catch(Exception e)when(e is ArgumentException or NotSupportedException or PathTooLongException){throw new IOException("Git 公共目录路径无效。",e);}
+        if(!Directory.Exists(full))throw new IOException($"Git 公共目录不可用：{full}");
+        return PhysicalDirectory.Resolve(full).Key;
+    }
+    private static bool WorktreeListed(string output,string target,string branch,string oid)
+    {
+        string? path=null,head=null,refName=null;
+        foreach(var raw in output.Split('\n'))
+        {
+            var line=raw.TrimEnd('\r');
+            if(line.Length==0)
+            {
+                if(path!=null&&head==oid&&refName=="refs/heads/"+branch&&SamePath(path,target))return true;
+                path=null;head=null;refName=null;continue;
+            }
+            if(line.StartsWith("worktree ",StringComparison.Ordinal))path=line[9..];
+            else if(line.StartsWith("HEAD ",StringComparison.Ordinal))head=line[5..];
+            else if(line.StartsWith("branch ",StringComparison.Ordinal))refName=line[7..];
+        }
+        return path!=null&&head==oid&&refName=="refs/heads/"+branch&&SamePath(path,target);
+    }
+    private static bool SamePath(string left,string right)
+    {
+        try
+        {
+            var a=Path.TrimEndingDirectorySeparator(Path.GetFullPath(left.Replace('/',Path.DirectorySeparatorChar)));var b=Path.TrimEndingDirectorySeparator(Path.GetFullPath(right.Replace('/',Path.DirectorySeparatorChar)));
+            if(StringComparer.OrdinalIgnoreCase.Equals(a,b))return true;
+            if(Directory.Exists(a)&&Directory.Exists(b))return PhysicalDirectory.Resolve(a).Key==PhysicalDirectory.Resolve(b).Key;
+        }
+        catch(Exception e)when(e is not OutOfMemoryException){}
+        return false;
+    }
+    private static bool SamePhysicalDirectory(string left,string right)
+    {
+        try{return Directory.Exists(left)&&Directory.Exists(right)&&PhysicalDirectory.Resolve(left).Key==PhysicalDirectory.Resolve(right).Key;}
+        catch(Exception e)when(e is not OutOfMemoryException){return false;}
+    }
+    private static bool SameOrWithin(string path,string root)
+    {
+        var candidate=Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));var parent=Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var prefix=parent.EndsWith(Path.DirectorySeparatorChar)?parent:parent+Path.DirectorySeparatorChar;
+        return StringComparer.OrdinalIgnoreCase.Equals(candidate,parent)||candidate.StartsWith(prefix,StringComparison.OrdinalIgnoreCase);
     }
     private async Task<string> Git(string cwd,string[] args,CancellationToken ct)
     {

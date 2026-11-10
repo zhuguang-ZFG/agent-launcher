@@ -92,6 +92,8 @@ internal sealed class Monitor : IDisposable
     private bool ledgerBroken;
     private bool pressure;
     private int healthy,busy;
+    private static readonly TimeSpan IdleTimeout=TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan AcceptTick=TimeSpan.FromSeconds(1);
     public int Run()
     {
         using var single=new Mutex(false,@"Local\"+Store.Pipe+"-monitor");bool own;
@@ -116,9 +118,16 @@ internal sealed class Monitor : IDisposable
                     while(!connected)
                     {
                         // The accept task stays pending across ticks: a client that connects at a tick boundary is never stranded by disposal.
-                        var tick=Task.WhenAny(accept,Task.Delay(2000)).GetAwaiter().GetResult();
+                        var tick=Task.WhenAny(accept,Task.Delay(AcceptTick)).GetAwaiter().GetResult();
                         if(tick==accept){connected=true;break;}
-                        Refresh();if(!ledgerBroken&&ledger.Entries.All(Store.IsTerminal)&&DateTime.UtcNow-lastActivity>TimeSpan.FromSeconds(30)){if(accept.IsCompleted){connected=true;break;}return 0;}
+                        Refresh();
+                        // Retire only when nothing can still be reconciled and no client polled recently; any accepted request resets lastActivity.
+                        if(!ledgerBroken&&blocked==null&&jobs.Count==0&&ledger.Entries.All(Store.IsTerminal)&&DateTime.UtcNow-lastActivity>=IdleTimeout)
+                        {
+                            // Give a simultaneous poll one final chance instead of stranding it on a disposed listener.
+                            if(accept.IsCompleted||Task.WhenAny(accept,Task.Delay(250)).GetAwaiter().GetResult()==accept){connected=true;break;}
+                            return 0;
+                        }
                     }
                     lastActivity=DateTime.UtcNow;
                     using var deadline=new CancellationTokenSource(3000);
@@ -127,7 +136,7 @@ internal sealed class Monitor : IDisposable
                         var request=Ipc.ReadAsync<Request>(pipe,deadline.Token).GetAwaiter().GetResult();Refresh();
                         Response response;
                         try{response=Handle(request);}catch(Exception e)when(e is not OutOfMemoryException){response=new(false,e.Message);}
-                        Ipc.WriteAsync(pipe,response,deadline.Token).GetAwaiter().GetResult();
+                        Ipc.WriteResponseAsync(pipe,response,deadline.Token).GetAwaiter().GetResult();
                     }
                     catch(Exception e)when(e is IOException or OperationCanceledException or JsonException){/* Peer failure never grants additional authorization. */}
                 }
@@ -209,14 +218,17 @@ internal sealed class Monitor : IDisposable
             }
             var reserved=ledger.Entries.Where(e=>!Store.IsTerminal(e)).Aggregate(0UL,(sum,e)=>sum+e.Plan.Budget);
             var decision=ResourcePolicy.Check(sample!,reserved,items.Aggregate(0UL,(sum,p)=>sum+p.Budget));if(!decision.Allowed)throw new IOException(decision.Reason);
-            var entries=items.Select(p=>new ControlEntry{Plan=p,Digest=Store.Digest(p),Epoch=epoch}).ToArray();ledger.Entries.AddRange(entries);
+            var entries=items.Select(p=>new ControlEntry{Plan=p,Digest=Store.Digest(p),Epoch=epoch}).ToArray();
+            // Reject an unrepresentable plan before it can be persisted or granted; active records are never truncated later.
+            foreach(var candidate in entries)Ipc.EnsureEntryRepresentable(candidate);
+            ledger.Entries.AddRange(entries);
             try{Save();}catch{ledger.Entries.RemoveAll(e=>entries.Contains(e));throw;}
             return new(true,"已预约预算与工作目录",entries,sample,epoch);
         }
         var entry=ledger.Entries.SingleOrDefault(e=>e.Plan.Id==request.Attempt)??throw new IOException("启动请求不存在或已过期。");
         if(request.Operation=="revoke")
         {
-            if(entry.State=="Pending"){entry.State="Revoked";entry.Detail="已撤销，迟到请求不会执行";try{Save();}catch{entry.State="Pending";throw;}}
+            if(entry.State=="Pending"){var previousState=entry.State;var previousDetail=entry.Detail;entry.State="Revoked";entry.Detail="已撤销，迟到请求不会执行";try{Save();}catch{entry.State=previousState;entry.Detail=previousDetail;throw;}}
             return new(entry.State=="Revoked",entry.State=="Revoked"?entry.Detail:"已领取或可能运行，需继续核对",[entry],sample,epoch);
         }
         if(request.Operation=="begin")
@@ -240,11 +252,14 @@ internal sealed class Monitor : IDisposable
     }
     private Response Status()
     {
-        var active=ledger.Entries.Where(e=>!Store.IsTerminal(e));
-        // The 1-MiB IPC frame caps the response; keep the newest terminal entries that fit rather than a fixed count.
+        var active=ledger.Entries.Where(e=>!Store.IsTerminal(e)).ToArray();
+        // Every active record must stay representable; refuse the status instead of silently dropping an unverified attempt.
+        foreach(var entry in active)Ipc.EnsureEntryRepresentable(entry);
+        // Each response frame is capped; keep the newest terminal entries that fit rather than a fixed count.
         var terminal=ledger.Entries.Where(Store.IsTerminal).TakeLast(40).Reverse().ToList();var kept=new List<ControlEntry>();long bytes=0;
         foreach(var e in terminal){var size=JsonSerializer.SerializeToUtf8Bytes(e,Store.Json).LongLength;if(bytes+size>768*1024)break;kept.Add(e);bytes+=size;}
-        kept.Reverse();return new(blocked==null,blocked??"监控器已核对",active.Concat(kept).ToArray(),sample,epoch);
+        kept.Reverse();return new(blocked==null,blocked??"监控器已核对",active.Concat(kept).ToArray(),sample,epoch,AdmissionBlockedReason());
     }
+    private string? AdmissionBlockedReason()=>blocked??(pressure?"资源压力尚未连续恢复，稍后重新检查。":null);
     public void Dispose(){foreach(var j in jobs.Values)j.Dispose();root?.Dispose();}
 }
