@@ -329,14 +329,14 @@ public partial class MainWindow : Window
     }
     private void UpdateLaunch()
     {
-        var count=config.Draft.Slots.Count(s=>s.Enabled);var reserved=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Aggregate(0UL,(sum,e)=>sum+e.Plan.Budget)??0;
-        var admission=status?.Memory is {} memory?ResourcePolicy.Check(memory,reserved,(ulong)count*ResourcePolicy.AgentBudget):new Admission(false,"等待资源检测");
+        var count=config.Draft.Slots.Count(s=>s.Enabled);
+        var admission=DecideAdmission(config.Draft,status?.Memory,status?.Entries);
         var admissionBlockedReason=status?.AdmissionBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
         var explicitDirectoryMissing=config.Draft.Slots.Any(s=>s.Enabled&&s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory));
         var missing=explicitDirectoryMissing||config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
         LaunchButton.Content=busy?"正在处理…":$"启动 {count} 个 Agent";
-        LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&admission.Allowed&&!admissionBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
+        LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&admission.Launchable&&!admissionBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
         LaunchHint.Text=closeRequested?"正在关闭窗口，等待本次操作与配置保存完成…":
             launchFinalizing&&launchStopping||launchCancellation?.IsCancellationRequested==true||!cancelTask.IsCompleted?"正在停止后续步骤并核对撤销结果，暂不能再次启动":
             launchFinalizing?"正在完成本次启动收尾；可以编辑配置，暂不能再次启动":
@@ -347,18 +347,34 @@ public partial class MainWindow : Window
             pendingProject?"项目路径输入尚未应用；请按 Enter 或移开焦点完成校验":
             explicitDirectoryMissing?"通用组合需要重新指定独立目录，请打开对应 Agent 的详情":
             missing?"先选择项目文件夹":count==0?"先勾选至少一个 Agent":
-            admissionBlocked?admissionBlockedReason!:!admission.Allowed?admission.Reason:
+            admissionBlocked?admissionBlockedReason!:admission.Kind==AdmissionKind.Deny?admission.Reason:
             !SaveHealthy?saveError!=null?"配置尚未保存："+saveError:"正在保存配置…":
             validationError.Length>0?validationError:
             status?.Ok!=true?"正在等待后台检查就绪，暂时不能启动":
             commandsChecking?"正在检查命令和目录":
             LaunchButton.IsEnabled?"检查全部通过，可以启动":"本次配置已提交，暂不能再次启动";
         LaunchHint.Foreground=(Brush)FindResource(LaunchButton.IsEnabled?"Ink":"Muted");
-        if(status?.Memory is {} m){AvailableValue.Text=$"{GiB(m.Available)} GiB";BudgetValue.Text=$"{count*2} GiB";ResourceText.Text=(admissionBlocked?admissionBlockedReason!:admission.Reason)+$" · {m.At.LocalDateTime:HH:mm:ss} 采样";}
-        else{AvailableValue.Text="—";BudgetValue.Text=$"{count*2} GiB";ResourceText.Text="资源检测不可用，暂缓启动";}
+        var jobGib=GiB((config.Draft.Resource?.JobMemoryLimit??ResourcePolicy.DefaultJobMemoryLimit)* (ulong)Math.Max(count,0));
+        if(status?.Memory is {} m){AvailableValue.Text=$"{GiB(m.Available)} GiB";BudgetValue.Text=$"{jobGib} GiB";ResourceText.Text=(admissionBlocked?admissionBlockedReason!:admission.Reason)+$" · {m.At.LocalDateTime:HH:mm:ss} 采样";}
+        else{AvailableValue.Text="—";BudgetValue.Text=$"{jobGib} GiB";ResourceText.Text="资源检测不可用，暂缓启动";}
         if(status?.Entries?.Any(e=>!Store.IsTerminal(e))==true)SessionExpander.IsExpanded=true;
     }
     private static string GiB(ulong value)=>(value/(double)ResourcePolicy.GiB).ToString("F1");
+    private static AdmissionDecision DecideAdmission(Draft draft,MemorySnapshot? memory,IEnumerable<ControlEntry>? entries,bool includeGitPreparation=false)
+    {
+        if(memory is null)return new(AdmissionKind.Deny,"等待资源检测",0,0,0,0,0,0,0,false);
+        var settings=draft.Resource??new ResourceSettings();
+        var policy=ResourcePolicy.SnapshotFor(settings,memory.Total,memory.CommitLimit);
+        var reserved=(entries??[]).Where(e=>!Store.IsTerminal(e)).Select(e=>ResourcePolicy.BudgetOf(e.Plan)).ToList();
+        var requested=draft.Slots.Where(s=>s.Enabled).Select(s=>new BudgetItem(s.Id,"agent",settings.PlanningBytes,settings.JobMemoryLimit)).ToList();
+        if(includeGitPreparation)
+        {
+            var enabled=draft.Slots.Where(s=>s.Enabled).Select(s=>PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(s.Directory)?draft.Project:s.Directory).Key).ToList();
+            if(draft.DirectoryMode=="isolated"&&enabled.GroupBy(key=>key,StringComparer.OrdinalIgnoreCase).Any(g=>g.Count()>1))
+                requested.Add(new BudgetItem(Guid.Empty,"git",ResourcePolicy.DefaultGitPlanningBytes,ResourcePolicy.GitJobMemoryLimit));
+        }
+        return ResourcePolicy.Evaluate(memory,policy,reserved,requested);
+    }
     private string? commError;
     private async Task RefreshAsync()
     {
@@ -534,8 +550,7 @@ public partial class MainWindow : Window
             var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));await RefreshAsync();
             if(status?.Ok!=true)throw new IOException(status?.Message??"监控状态不可用");
             var admissionBlocked=status?.AdmissionBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
-            var reserved=status?.Entries?.Where(x=>!Store.IsTerminal(x)).Aggregate(0UL,(sum,x)=>sum+x.Plan.Budget)??0;
-            var admission=ResourcePolicy.Check(status?.Memory??throw new IOException("资源不可用"),reserved,(ulong)draft.Slots.Count(s=>s.Enabled)*ResourcePolicy.AgentBudget);if(!admission.Allowed)throw new IOException(admission.Reason);
+            var admission=DecideAdmission(draft,status?.Memory??throw new IOException("资源不可用"),status?.Entries,includeGitPreparation:true);if(admission.Kind==AdmissionKind.Deny)throw new IOException(admission.Reason);if(admission.Kind==AdmissionKind.RequireWaiver)throw new IOException("需要有效确认授权。");
             ProgressText.Text="正在核对命令和工作目录…";
             // Active agent workspaces are the monitor's own reserve precondition; checking them here keeps an occupied destination from leaving a worktree and branch behind.
             var activeWorkspaces=status?.Entries?.Where(x=>!Store.IsTerminal(x)&&x.Plan.Kind=="agent").Select(x=>x.Plan.Workspace).ToArray()??[];

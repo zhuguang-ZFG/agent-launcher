@@ -81,13 +81,13 @@ public static class PhysicalDirectory
 public sealed class Job : IDisposable
 {
     public SafeFileHandle Handle { get; }
-    public Job(string name, ulong memory=0, bool root=false, bool openOnly=false)
+    public Job(string name, ulong memory=0, bool root=false, bool openOnly=false, int cpuRate=ResourcePolicy.DefaultCpuRate)
     {
         Handle=openOnly?Native.OpenJobObject(0x001F003F,false,name):Native.CreateJobObject(IntPtr.Zero,name);
         if(Handle.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
         try
         {
-            if(!openOnly && root) Set(15,new Native.CpuRate{Flags=1|4,Rate=3500});
+            if(!openOnly && root) Set(15,new Native.CpuRate{Flags=1|4,Rate=(uint)cpuRate});
             if(!openOnly && memory>0)Set(9,new Native.ExtendedLimits{Basic=new Native.BasicLimits{Flags=0x200},JobMemory=(UIntPtr)memory});
         }
         catch { Handle.Dispose();throw; }

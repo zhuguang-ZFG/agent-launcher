@@ -249,4 +249,170 @@ internal static class ResourcePolicyChecks
             if (File.ReadAllText(primary) != garbage || File.ReadAllText(backup) != garbage) throw new Exception("corrupt file overwritten");
         });
     }
+
+    public static void RunDecisions(Action<string, Action> Test)
+    {
+        var total = 16 * ResourcePolicy.GiB;
+        var policy = new ResourcePolicySnapshot("practical", ResourcePolicy.DefaultJobMemoryLimit, ResourcePolicy.DefaultPlanningBytes,
+            ResourcePolicy.DefaultPhysicalFloor(total), ResourcePolicy.DefaultCommitFloor(32 * ResourcePolicy.GiB),
+            ResourcePolicy.DefaultCpuRate, ResourcePolicy.GitJobMemoryLimit, ResourcePolicy.DefaultGitPlanningBytes);
+        BudgetItem Agent(int i, ulong? plan = null, ulong? cap = null) =>
+            new(Guid.NewGuid(), "agent", plan ?? policy.PlanningBytes, cap ?? policy.JobMemoryLimit);
+        MemorySnapshot Ok(ulong avail = 8 * ResourcePolicy.GiB, ulong commitAvail = 20 * ResourcePolicy.GiB, double cpu = 10, int ageMs = 0) =>
+            new(total, avail, 32 * ResourcePolicy.GiB, commitAvail, cpu, DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(ageMs));
+
+        Test("ACC-R03 stale or invalid sample is hard deny", () =>
+        {
+            var stale = ResourcePolicy.Evaluate(Ok(ageMs: 4000), policy, [], [Agent(0)]);
+            var badCpu = ResourcePolicy.Evaluate(Ok() with { CpuPercent = double.NaN }, policy, [], [Agent(0)]);
+            var infCpu = ResourcePolicy.Evaluate(Ok() with { CpuPercent = double.PositiveInfinity }, policy, [], [Agent(0)]);
+            var overCpu = ResourcePolicy.Evaluate(Ok() with { CpuPercent = 100.1 }, policy, [], [Agent(0)]);
+            var negCpu = ResourcePolicy.Evaluate(Ok() with { CpuPercent = -0.1 }, policy, [], [Agent(0)]);
+            var availOverTotal = ResourcePolicy.Evaluate(Ok(avail: total + 1), policy, [], [Agent(0)]);
+            var zeroTotal = ResourcePolicy.Evaluate(Ok() with { Total = 0 }, policy, [], [Agent(0)]);
+            if (stale.Kind != AdmissionKind.Deny || badCpu.Kind != AdmissionKind.Deny || infCpu.Kind != AdmissionKind.Deny || overCpu.Kind != AdmissionKind.Deny || negCpu.Kind != AdmissionKind.Deny || availOverTotal.Kind != AdmissionKind.Deny || zeroTotal.Kind != AdmissionKind.Deny || stale.SampleValid || badCpu.SampleValid || infCpu.SampleValid || overCpu.SampleValid || negCpu.SampleValid || availOverTotal.SampleValid || zeroTotal.SampleValid)
+                throw new Exception("invalid sample not hard-denied");
+        });
+
+        Test("ACC-R02 hard floor cannot be waived", () =>
+        {
+            var d = ResourcePolicy.Evaluate(Ok(avail: 3 * ResourcePolicy.GiB / 2), policy, [], [Agent(0)]);
+            if (d.Kind != AdmissionKind.Deny || !d.Reason.Contains("内存")) throw new Exception(d.Reason);
+            var cpu = ResourcePolicy.Evaluate(Ok(cpu: 80), policy, [], [Agent(0)]);
+            if (cpu.Kind != AdmissionKind.Deny) throw new Exception("CPU 80 was not hard-denied");
+            var commit = ResourcePolicy.Evaluate(Ok(commitAvail: ResourcePolicy.GiB / 2), policy, [], [Agent(0)]);
+            if (commit.Kind != AdmissionKind.Deny) throw new Exception("commit floor was waived");
+        });
+
+        Test("ACC-R01 practical soft overage requires waiver when hard checks pass", () =>
+        {
+            var many = Enumerable.Range(0, 8).Select(i => Agent(i)).ToArray();
+            var d = ResourcePolicy.Evaluate(Ok(avail: 12 * ResourcePolicy.GiB, commitAvail: 24 * ResourcePolicy.GiB), policy, [], many);
+            if (d.Kind != AdmissionKind.RequireWaiver) throw new Exception("expected waiver, got " + d.Kind + " " + d.Reason);
+            if (d.CapSumRequested != 8 * policy.JobMemoryLimit) throw new Exception("soft cap used planning bytes");
+        });
+
+        Test("ACC-R06 conservative soft overage is denied", () =>
+        {
+            var cons = policy with { Mode = "conservative" };
+            var many = Enumerable.Range(0, 8).Select(i => Agent(i)).ToArray();
+            var d = ResourcePolicy.Evaluate(Ok(avail: 12 * ResourcePolicy.GiB, commitAvail: 24 * ResourcePolicy.GiB), cons, [], many);
+            if (d.Kind != AdmissionKind.Deny) throw new Exception("conservative allowed overage");
+        });
+
+        Test("ACC-R04 legacy reserved item uses 768 MiB planning and Plan.Budget cap", () =>
+        {
+            var legacy = new BudgetItem(Guid.NewGuid(), "agent", ResourcePolicy.DefaultPlanningBytes, 2 * ResourcePolicy.GiB);
+            var d = ResourcePolicy.Evaluate(Ok(), policy, [legacy], [Agent(0)]);
+            if (d.PlanningReserved != ResourcePolicy.DefaultPlanningBytes) throw new Exception("legacy planning wrong");
+            if (d.CapSumReserved != 2 * ResourcePolicy.GiB) throw new Exception("legacy cap wrong");
+        });
+
+        Test("ACC-C02 custom job cap cannot go below 1 GiB or zero floors", () =>
+        {
+            var bad = false;
+            try { ResourcePolicy.ValidateSnapshot(policy with { JobMemoryLimit = 512 * ResourcePolicy.MiB }, total, 32 * ResourcePolicy.GiB); }
+            catch (InvalidDataException) { bad = true; }
+            if (!bad) throw new Exception("sub-GiB cap accepted");
+            var zeroFloor = false;
+            try { ResourcePolicy.ValidateSnapshot(policy with { PhysicalFloor = 0, Mode = "custom" }, total, 32 * ResourcePolicy.GiB); }
+            catch (InvalidDataException) { zeroFloor = true; }
+            if (!zeroFloor) throw new Exception("zero floor accepted");
+        });
+
+        Test("ACC-C01 default CPU rate stays 3500", () =>
+        {
+            if (ResourcePolicy.DefaultCpuRate != 3500) throw new Exception("cpu default changed");
+            if (ResourcePolicy.DefaultJobMemoryLimit != 2 * ResourcePolicy.GiB) throw new Exception("job default changed");
+        });
+
+        Test("ACC-R01 custom soft overage requires waiver and two agents stay allow", () =>
+        {
+            var custom = policy with { Mode = "custom" };
+            var many = Enumerable.Range(0, 8).Select(i => Agent(i)).ToArray();
+            var over = ResourcePolicy.Evaluate(Ok(avail: 12 * ResourcePolicy.GiB, commitAvail: 24 * ResourcePolicy.GiB), custom, [], many);
+            if (over.Kind != AdmissionKind.RequireWaiver) throw new Exception("custom should require waiver, got " + over.Kind);
+            var two = ResourcePolicy.Evaluate(Ok(avail: 12 * ResourcePolicy.GiB, commitAvail: 24 * ResourcePolicy.GiB), policy, [], [Agent(0), Agent(1)]);
+            if (two.Kind != AdmissionKind.Allow) throw new Exception("two agents under soft cap were not allowed: " + two.Kind + " " + two.Reason);
+            if (two.CapSumRequested != 2 * policy.JobMemoryLimit) throw new Exception("two-agent cap sum");
+        });
+
+        Test("ACC-R04 git uses 256 MiB planning and 1 GiB cap", () =>
+        {
+            var git = new BudgetItem(Guid.NewGuid(), "git", 0, 0);
+            var d = ResourcePolicy.Evaluate(Ok(), policy, [], [git, Agent(0)]);
+            if (d.PlanningRequested != policy.GitPlanningBytes + policy.PlanningBytes) throw new Exception("git planning wrong: " + d.PlanningRequested);
+            if (d.CapSumRequested != policy.GitJobMemoryLimit + policy.JobMemoryLimit) throw new Exception("git cap wrong: " + d.CapSumRequested);
+            if (d.Kind != AdmissionKind.Allow) throw new Exception("git+agent should allow, got " + d.Kind + " " + d.Reason);
+        });
+
+        Test("ACC-C02 ValidateSnapshot applies sample-dependent tighter caps", () =>
+        {
+            var overJob = false;
+            try { ResourcePolicy.ValidateSnapshot(policy with { Mode = "custom", JobMemoryLimit = 8 * ResourcePolicy.GiB, PlanningBytes = ResourcePolicy.DefaultPlanningBytes }, 4 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB); }
+            catch (InvalidDataException) { overJob = true; }
+            if (!overJob) throw new Exception("job cap above physical total accepted");
+            var overFloor = false;
+            try { ResourcePolicy.ValidateSnapshot(policy with { Mode = "custom", PhysicalFloor = 8 * ResourcePolicy.GiB }, 8 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB); }
+            catch (InvalidDataException) { overFloor = true; }
+            if (!overFloor) throw new Exception("physical floor above total/2 accepted");
+        });
+    }
+
+    public static void RunWaivers(Action<string, Action> Test)
+    {
+        var total = 16 * ResourcePolicy.GiB;
+        var policy = new ResourcePolicySnapshot("practical", ResourcePolicy.DefaultJobMemoryLimit, ResourcePolicy.DefaultPlanningBytes,
+            ResourcePolicy.DefaultPhysicalFloor(total), ResourcePolicy.DefaultCommitFloor(32 * ResourcePolicy.GiB),
+            ResourcePolicy.DefaultCpuRate, ResourcePolicy.GitJobMemoryLimit, ResourcePolicy.DefaultGitPlanningBytes);
+        var now = new DateTimeOffset(2026, 11, 10, 13, 34, 0, TimeSpan.Zero);
+        var clock = now;
+        var table = new WaiverTable(() => clock);
+        var slots = new Guid[] { Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"), Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1") };
+        string Hash() => ResourcePolicy.PolicyHash(policy);
+        var digest = "plan-digest-one";
+        var require = new AdmissionDecision(AdmissionKind.RequireWaiver, "soft", 8 * policy.PlanningBytes, 0, 8 * policy.JobMemoryLimit, 0, ResourcePolicy.SoftCap(total), policy.PhysicalFloor, policy.CommitFloor, true);
+        var deny = require with { Kind = AdmissionKind.Deny, Reason = "硬保护" };
+        var allow = require with { Kind = AdmissionKind.Allow, Reason = "资源充足" };
+
+        Test("ACC-R01 waiver issues only for RequireWaiver and is single-use", () =>
+        {
+            var denied = table.Issue(deny, 1, Hash(), digest, slots, now);
+            if (denied.WaiverId != null) throw new Exception("hard deny issued a waiver");
+            var allowed = table.Issue(allow, 1, Hash(), digest, slots, now);
+            if (allowed.WaiverId != null) throw new Exception("allow issued a waiver");
+            var issued = table.Issue(require, 1, Hash(), digest, slots, now);
+            if (issued.WaiverId is not { } id || issued.WaiverExpiresAt != now.AddSeconds(ResourcePolicy.WaiverTtlSeconds)) throw new Exception("issue did not return a 45s waiver");
+            if (!table.Consume(id, 1, Hash(), digest, slots)) throw new Exception("first consume failed");
+            if (table.Consume(id, 1, Hash(), digest, slots)) throw new Exception("waiver was reused");
+        });
+
+        Test("ACC-R01 expired or rebound waiver cannot be consumed", () =>
+        {
+            clock = now;
+            var issued = table.Issue(require, 4, Hash(), digest, slots, now);
+            var id = issued.WaiverId ?? throw new Exception("missing waiver");
+            if (table.Consume(id, 5, Hash(), digest, slots)) throw new Exception("revision change consumed");
+            var issued2 = table.Issue(require, 4, Hash(), digest, slots, now);
+            var id2 = issued2.WaiverId ?? throw new Exception("missing waiver");
+            if (table.Consume(id2, 4, "deadbeef", digest, slots)) throw new Exception("policy hash change consumed");
+            var issued3 = table.Issue(require, 4, Hash(), digest, slots, now);
+            var id3 = issued3.WaiverId ?? throw new Exception("missing waiver");
+            if (table.Consume(id3, 4, Hash(), "other-plan", slots)) throw new Exception("plan digest change consumed");
+            var issued4 = table.Issue(require, 4, Hash(), digest, slots, now);
+            var id4 = issued4.WaiverId ?? throw new Exception("missing waiver");
+            clock = now.AddSeconds(46);
+            if (table.Consume(id4, 4, Hash(), digest, slots)) throw new Exception("expired waiver consumed");
+            if (ResourcePolicy.WaiverTtlSeconds != 45) throw new Exception("product TTL changed");
+        });
+
+        Test("ACC-R02 Issue does not accept a client confirmed flag", () =>
+        {
+            if (typeof(Request).GetProperty("Confirmed") != null || typeof(WaiverTable).GetMethod("Issue")!.GetParameters().Any(p => p.Name == "confirmed"))
+                throw new Exception("client confirmed flag exists");
+            var hash = Hash();
+            if (ResourcePolicy.PolicyHash(policy) != hash) throw new Exception("PolicyHash is not stable");
+            if (ResourcePolicy.PolicyHash(policy with { CpuRate = 4000 }) == hash) throw new Exception("PolicyHash ignored cpu");
+        });
+    }
 }

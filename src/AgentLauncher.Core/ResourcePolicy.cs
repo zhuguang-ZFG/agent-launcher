@@ -126,26 +126,175 @@ public static class ResourcePolicy
     public const ulong MaxCustomCommitFloor = 16 * GiB;
     public static ulong Reserve(ulong total) => Math.Max(3 * GiB, total / 5);
 
-    public static Admission Check(MemorySnapshot sample, ulong reserved, ulong requested)
+    public static ResourcePolicySnapshot SnapshotFor(ResourceSettings settings, ulong totalPhysical, ulong commitLimit)
     {
-        // Conservatively reserve the full budget again. Never subtract paged-out commit from physical headroom.
-        if (!double.IsFinite(sample.CpuPercent) || DateTimeOffset.UtcNow - sample.At > TimeSpan.FromSeconds(3)) return new(false, "资源读数暂时不可信，稍候会自动重新检查。");
-        if (reserved + requested > Math.Min(8 * GiB, sample.Total * 35 / 100)) return new(false, "本次要用的内存超过总预算，请少勾选几个 Agent。");
-        if (sample.Available < Reserve(sample.Total) + reserved + requested) return new(false, "现在可用内存不够：要给系统留余量。请关掉一些应用，或减少启动的 Agent 个数。");
-        if (sample.CommitAvailable < Math.Max(2 * GiB, sample.CommitLimit / 20) + reserved + requested) return new(false, "系统内存余量不足，暂时不能新增任务。");
-        return sample.CpuPercent >= 80 ? new(false, "整机 CPU 正忙，稍等片刻再启动。") : new(true, "资源充足");
+        settings ??= new ResourceSettings();
+        return new(
+            settings.Mode,
+            settings.JobMemoryLimit,
+            settings.PlanningBytes,
+            settings.PhysicalFloorOverride ?? DefaultPhysicalFloor(totalPhysical),
+            settings.CommitFloorOverride ?? DefaultCommitFloor(commitLimit),
+            settings.CpuRate,
+            GitJobMemoryLimit,
+            DefaultGitPlanningBytes);
     }
 
     public static AdmissionDecision Evaluate(
         MemorySnapshot sample,
         ResourcePolicySnapshot policy,
         IReadOnlyList<BudgetItem> reserved,
-        IReadOnlyList<BudgetItem> requested) =>
-        throw new NotImplementedException("Evaluate is implemented in Task 2.");
+        IReadOnlyList<BudgetItem> requested)
+    {
+        reserved ??= [];
+        requested ??= [];
+        var planningRequested = SumPlanning(policy, requested);
+        var planningReserved = SumPlanning(policy, reserved);
+        var capRequested = SumCap(policy, requested);
+        var capReserved = SumCap(policy, reserved);
+        var soft = sample is not null && sample.Total > 0 ? SoftCap(sample.Total) : 0;
+        var floor = policy.PhysicalFloor;
+        var commitFloor = policy.CommitFloor;
 
-    public static string PolicyHash(ResourcePolicySnapshot policy) =>
-        throw new NotImplementedException("PolicyHash is implemented in Task 2.");
+        AdmissionDecision Result(AdmissionKind kind, string reason, bool sampleValid) =>
+            new(kind, reason, planningRequested, planningReserved, capRequested, capReserved, soft, floor, commitFloor, sampleValid);
 
-    public static void ValidateSnapshot(ResourcePolicySnapshot policy, ulong totalPhysical, ulong commitLimit) =>
-        throw new NotImplementedException("ValidateSnapshot is implemented in Task 2.");
+        if (!SampleValid(sample) || sample is null)
+            return Result(AdmissionKind.Deny, "系统采样无效，请稍后重试。", false);
+
+        try { ValidateSnapshot(policy, sample.Total, sample.CommitLimit); }
+        catch (InvalidDataException ex) { return Result(AdmissionKind.Deny, ex.Message, true); }
+
+        if (!HasRoom(sample.Available, planningRequested, planningReserved, policy.PhysicalFloor))
+            return Result(AdmissionKind.Deny, "现在可用内存不够：要给系统留余量。请关掉一些应用，或减少启动的 Agent 个数。", true);
+        if (!HasRoom(sample.CommitAvailable, planningRequested, planningReserved, policy.CommitFloor))
+            return Result(AdmissionKind.Deny, "系统内存余量不足，暂时不能新增任务。", true);
+        if (sample.CpuPercent >= CpuBusyPercent)
+            return Result(AdmissionKind.Deny, "整机 CPU 正忙，稍等片刻再启动。", true);
+
+        if (SumExceeds(capRequested, capReserved, soft))
+        {
+            if (policy.Mode == "conservative")
+                return Result(AdmissionKind.Deny, "本次要用的内存超过总预算，请少勾选几个 Agent。", true);
+            return Result(AdmissionKind.RequireWaiver, "按 Job 上限加总已超过软预算，需要一次性确认授权后才能继续。硬保护仍然有效。", true);
+        }
+        return Result(AdmissionKind.Allow, "资源充足", true);
+    }
+
+    public static string PolicyHash(ResourcePolicySnapshot policy)
+    {
+        var mode = System.Text.Json.JsonSerializer.Serialize(policy.Mode);
+        var payload = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{{\"CommitFloor\":{policy.CommitFloor},\"CpuRate\":{policy.CpuRate},\"GitJobMemoryLimit\":{policy.GitJobMemoryLimit},\"GitPlanningBytes\":{policy.GitPlanningBytes},\"JobMemoryLimit\":{policy.JobMemoryLimit},\"Mode\":{mode},\"PhysicalFloor\":{policy.PhysicalFloor},\"PlanningBytes\":{policy.PlanningBytes}}}");
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
+    }
+
+    public static string PlanDigest(IEnumerable<LaunchItem> items)
+    {
+        var builder = new System.Text.StringBuilder();
+        foreach (var item in items ?? [])
+        {
+            builder.Append(item.Id.ToString("N")).Append('\n')
+                .Append(item.Kind).Append('\n')
+                .Append(item.Name).Append('\n')
+                .Append(item.Cwd).Append('\n')
+                .Append(item.Command.Executable).Append('\n')
+                .Append(string.Join('\u0001', item.Command.Arguments ?? [])).Append('\n')
+                .Append(item.Budget.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\n')
+                .Append((item.PlanningBytes ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
+        }
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+    }
+
+    public static void ValidateSnapshot(ResourcePolicySnapshot policy, ulong totalPhysical, ulong commitLimit)
+    {
+        if (policy is null || policy.Mode is not ("conservative" or "practical" or "custom"))
+            throw new InvalidDataException("资源配置不完整或不支持。");
+        var maxJob = totalPhysical < MaxJobMemoryLimit ? totalPhysical : MaxJobMemoryLimit;
+        if (policy.JobMemoryLimit < MinJobMemoryLimit)
+            throw new InvalidDataException("Job 内存上限不能低于 1 GiB。");
+        if (policy.JobMemoryLimit > maxJob)
+            throw new InvalidDataException("Job 内存上限不能超过 8 GiB。");
+        if (policy.PlanningBytes < MinPlanningBytes || policy.PlanningBytes > policy.JobMemoryLimit)
+            throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
+        if (policy.CpuRate < MinCpuRate || policy.CpuRate > MaxCpuRate)
+            throw new InvalidDataException("CPU 封顶必须在 15% 到 80% 之间。");
+        if (policy.GitJobMemoryLimit != GitJobMemoryLimit || policy.GitPlanningBytes != DefaultGitPlanningBytes)
+            throw new InvalidDataException("Git 资源上限不可自定义。");
+        if (policy.PhysicalFloor == 0 || policy.PhysicalFloor < MinCustomPhysicalFloor)
+            throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");
+        var maxPhysical = Min(totalPhysical / 2, MaxCustomPhysicalFloor);
+        if (policy.PhysicalFloor > maxPhysical)
+            throw new InvalidDataException("物理临界余量不能超过 8 GiB。");
+        if (policy.CommitFloor == 0 || policy.CommitFloor < MinCustomCommitFloor)
+            throw new InvalidDataException("提交临界余量不能低于下限，也不能为 0。");
+        var maxCommit = Min(commitLimit / 4, MaxCustomCommitFloor);
+        if (policy.CommitFloor > maxCommit)
+            throw new InvalidDataException("提交临界余量不能超过 16 GiB。");
+    }
+
+    public static BudgetItem BudgetOf(LaunchItem plan)
+    {
+        var git = plan.Kind == "git";
+        return new(
+            plan.Id,
+            git ? "git" : (plan.Kind ?? "agent"),
+            git ? DefaultGitPlanningBytes : plan.PlanningBytes is null or 0 ? DefaultPlanningBytes : plan.PlanningBytes.Value,
+            git ? GitJobMemoryLimit : plan.Budget);
+    }
+
+    static bool SampleValid(MemorySnapshot? sample)
+    {
+        if (sample is null) return false;
+        if (DateTimeOffset.UtcNow - sample.At > TimeSpan.FromSeconds(SampleTtlSeconds)) return false;
+        if (!double.IsFinite(sample.CpuPercent) || sample.CpuPercent < 0 || sample.CpuPercent > 100) return false;
+        if (sample.Total == 0 || sample.Available == 0 || sample.CommitLimit == 0 || sample.CommitAvailable == 0) return false;
+        if (sample.Available > sample.Total || sample.CommitAvailable > sample.CommitLimit) return false;
+        return true;
+    }
+
+    static ulong PlanningOf(ResourcePolicySnapshot policy, BudgetItem item) =>
+        item.Kind == "git" ? policy.GitPlanningBytes : item.PlanningBytes == 0 ? DefaultPlanningBytes : item.PlanningBytes;
+
+    static ulong CapOf(ResourcePolicySnapshot policy, BudgetItem item) =>
+        item.Kind == "git" ? policy.GitJobMemoryLimit : item.JobMemoryLimit == 0 ? DefaultJobMemoryLimit : item.JobMemoryLimit;
+
+    static ulong SumPlanning(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> items)
+    {
+        ulong sum = 0;
+        foreach (var item in items)
+        {
+            var value = PlanningOf(policy, item);
+            if (sum > ulong.MaxValue - value) return ulong.MaxValue;
+            sum += value;
+        }
+        return sum;
+    }
+
+    static ulong SumCap(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> items)
+    {
+        ulong sum = 0;
+        foreach (var item in items)
+        {
+            var value = CapOf(policy, item);
+            if (sum > ulong.MaxValue - value) return ulong.MaxValue;
+            sum += value;
+        }
+        return sum;
+    }
+
+    static bool HasRoom(ulong available, ulong first, ulong second, ulong floor)
+    {
+        if (first > ulong.MaxValue - second) return false;
+        var used = first + second;
+        if (used > ulong.MaxValue - floor) return false;
+        return available >= used + floor;
+    }
+
+    static bool SumExceeds(ulong first, ulong second, ulong cap)
+    {
+        if (first > ulong.MaxValue - second) return true;
+        return first + second > cap;
+    }
+
+    static ulong Min(ulong left, ulong right) => left < right ? left : right;
 }
