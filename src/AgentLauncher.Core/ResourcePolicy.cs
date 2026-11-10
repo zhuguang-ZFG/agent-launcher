@@ -79,11 +79,14 @@ public static class ConfigurationCompatibility
 
     private static void Upgrade(Draft draft)
     {
-        draft.Resource ??= new ResourceSettings();
-        if (string.IsNullOrWhiteSpace(draft.Resource.Mode)) draft.Resource.Mode = "practical";
-        if (draft.Resource.JobMemoryLimit == 0) draft.Resource.JobMemoryLimit = ResourcePolicy.DefaultJobMemoryLimit;
-        if (draft.Resource.PlanningBytes == 0) draft.Resource.PlanningBytes = ResourcePolicy.DefaultPlanningBytes;
-        if (draft.Resource.CpuRate == 0) draft.Resource.CpuRate = ResourcePolicy.DefaultCpuRate;
+        if (draft.SchemaVersion < CurrentSchemaVersion)
+        {
+            draft.Resource ??= new ResourceSettings();
+            if (string.IsNullOrWhiteSpace(draft.Resource.Mode)) draft.Resource.Mode = "practical";
+            if (draft.Resource.JobMemoryLimit == 0) draft.Resource.JobMemoryLimit = ResourcePolicy.DefaultJobMemoryLimit;
+            if (draft.Resource.PlanningBytes == 0) draft.Resource.PlanningBytes = ResourcePolicy.DefaultPlanningBytes;
+            if (draft.Resource.CpuRate == 0) draft.Resource.CpuRate = ResourcePolicy.DefaultCpuRate;
+        }
         draft.SchemaVersion = CurrentSchemaVersion;
     }
 }
@@ -94,6 +97,7 @@ public static class ResourcePolicy
     public const ulong MiB = 1024UL * 1024;
     public const ulong DefaultJobMemoryLimit = 2 * GiB;
     public const ulong MinJobMemoryLimit = 1 * GiB;
+    public const ulong MaxJobMemoryLimit = 8 * GiB;
     public const ulong DefaultPlanningBytes = 768 * MiB;
     public const ulong MinPlanningBytes = 256 * MiB;
     public const ulong GitJobMemoryLimit = GiB;
@@ -111,9 +115,15 @@ public static class ResourcePolicy
     public const ulong GitBudget = GiB;
     public static ulong DefaultPhysicalFloor(ulong total) => Math.Max(2 * GiB, total / 8);
     public static ulong DefaultCommitFloor(ulong commitLimit) => Math.Max(2 * GiB, commitLimit / 20);
-    public static ulong SoftCap(ulong total) => Math.Min(8 * GiB, total * 35 / 100);
+    public static ulong SoftCap(ulong total)
+    {
+        var portion = total / 100 * 35 + total % 100 * 35 / 100;
+        return Math.Min(8 * GiB, portion);
+    }
     public static ulong MinCustomPhysicalFloor => 3 * GiB / 2;
+    public const ulong MaxCustomPhysicalFloor = 8 * GiB;
     public static ulong MinCustomCommitFloor => GiB;
+    public const ulong MaxCustomCommitFloor = 16 * GiB;
     public static ulong Reserve(ulong total) => Math.Max(3 * GiB, total / 5);
 
     public static Admission Check(MemorySnapshot sample, ulong reserved, ulong requested)

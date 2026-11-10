@@ -45,10 +45,13 @@ public sealed class Draft
         if(Project==null)throw new InvalidDataException("项目目录字段缺失，未修改原配置。");
         if (Resource == null || Resource.Mode is not ("conservative" or "practical" or "custom")) throw new InvalidDataException("资源配置不完整或不支持。");
         if (Resource.JobMemoryLimit < ResourcePolicy.MinJobMemoryLimit) throw new InvalidDataException("Job 内存上限不能低于 1 GiB。");
+        if (Resource.JobMemoryLimit > ResourcePolicy.MaxJobMemoryLimit) throw new InvalidDataException("Job 内存上限不能超过 8 GiB。");
         if (Resource.PlanningBytes < ResourcePolicy.MinPlanningBytes || Resource.PlanningBytes > Resource.JobMemoryLimit) throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
         if (Resource.CpuRate < ResourcePolicy.MinCpuRate || Resource.CpuRate > ResourcePolicy.MaxCpuRate) throw new InvalidDataException("CPU 封顶必须在 15% 到 80% 之间。");
         if (Resource.PhysicalFloorOverride is {} physicalFloor && physicalFloor < ResourcePolicy.MinCustomPhysicalFloor) throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");
+        if (Resource.PhysicalFloorOverride is {} physicalCeiling && physicalCeiling > ResourcePolicy.MaxCustomPhysicalFloor) throw new InvalidDataException("物理临界余量不能超过 8 GiB。");
         if (Resource.CommitFloorOverride is {} commitFloor && commitFloor < ResourcePolicy.MinCustomCommitFloor) throw new InvalidDataException("提交临界余量不能低于下限，也不能为 0。");
+        if (Resource.CommitFloorOverride is {} commitCeiling && commitCeiling > ResourcePolicy.MaxCustomCommitFloor) throw new InvalidDataException("提交临界余量不能超过 16 GiB。");
         foreach (var slot in Slots)
         {
             if(!Agents.All.Any(a=>a.Id==slot.AgentId)||slot.Profiles==null||slot.Directory==null||slot.Note==null)throw new InvalidDataException("Agent 配置不完整。");

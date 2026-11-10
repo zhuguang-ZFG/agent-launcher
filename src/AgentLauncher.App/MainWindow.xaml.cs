@@ -41,6 +41,7 @@ public partial class MainWindow : Window
 #if INTEGRATION_TESTS
     private bool uiChecksStarted;
     private Task? commandCheckPause;
+    internal static Func<string,string,MessageBoxButton,MessageBoxResult>? TestConfirm;
 #endif
     private Draft? pendingCommandCheck;
     private string validationError="";
@@ -612,7 +613,12 @@ public partial class MainWindow : Window
     {
         var recovered=await Task.Run(()=>Store.Read<Configuration>(configPath+".bak"))??throw new IOException("没有可恢复备份。");
         if(recovered.Draft==null||recovered.Templates==null||recovered.Templates.Values.Any(t=>t==null)||recovered.RecentProjects==null||recovered.RecentAgents==null||recovered.TerminalPath==null)throw new IOException("备份版本或结构不支持，未恢复。");try{recovered=ConfigurationCompatibility.Accept(recovered);}catch(InvalidDataException ex){throw new IOException("备份版本或结构不支持，未恢复。",ex);}
+#if INTEGRATION_TESTS
+        var confirmed=TestConfirm!=null?TestConfirm("将用上一个有效备份恢复配置。当前损坏文件会另存保留。","恢复配置",MessageBoxButton.OKCancel):MessageBox.Show(this,"将用上一个有效备份恢复配置。当前损坏文件会另存保留。", "恢复配置",MessageBoxButton.OKCancel);
+        if(confirmed!=MessageBoxResult.OK)return;
+#else
         if(MessageBox.Show(this,"将用上一个有效备份恢复配置。当前损坏文件会另存保留。", "恢复配置",MessageBoxButton.OKCancel)!=MessageBoxResult.OK)return;
+#endif
         await Task.Run(()=>{if(File.Exists(configPath))File.Copy(configPath,configPath+".corrupt-"+DateTime.UtcNow.ToString("yyyyMMddHHmmss"));Store.Save(configPath,recovered);});
         config=recovered;readOnly=false;RestoreBackupButton.Visibility=Visibility.Collapsed;ErrorText.Text="";SaveStatus.Text="已从备份恢复";ApplyTheme();Render();
     });

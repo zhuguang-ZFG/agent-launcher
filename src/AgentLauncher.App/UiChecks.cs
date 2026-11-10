@@ -39,13 +39,27 @@ public partial class MainWindow
         await LoadAsync();ErrorText.Text="";
         Check("healthy configuration reloads writable",!readOnly);
         var primaryBefore=System.IO.File.Exists(configPath)?System.IO.File.ReadAllBytes(configPath):null;
-        var badBackup=new Configuration();badBackup.LastEdited=badBackup.Draft.Copy();badBackup.LastEdited.SchemaVersion=2;
+        var badBackup=new Configuration();badBackup.LastEdited=badBackup.Draft.Copy();badBackup.LastEdited.SchemaVersion=ConfigurationCompatibility.CurrentSchemaVersion+1;
         Store.Save(configPath+".bak",badBackup);
         RestoreBackupClick(this,new RoutedEventArgs());
         for(var i=0;i<50&&ErrorText.Text.Length==0;i++)await Task.Delay(100);
         Check("restore rejects backup startup would reject",ErrorText.Text.Contains("结构不支持"));
         var primaryAfter=System.IO.File.Exists(configPath)?System.IO.File.ReadAllBytes(configPath):null;
         Check("rejected restore leaves primary untouched",(primaryBefore==null)==(primaryAfter==null)&&(primaryBefore==null||primaryAfter!.SequenceEqual(primaryBefore)));
+        System.IO.File.Delete(configPath+".bak");ErrorText.Text="";
+        var legalBackup=new Configuration();
+        legalBackup.Draft.Project="restored-v2";
+        legalBackup.LastEdited=legalBackup.Draft.Copy();
+        Store.Save(configPath+".bak",legalBackup);
+        var confirmCalls=0;
+        TestConfirm=(_,_,_)=>{confirmCalls++;return MessageBoxResult.OK;};
+        try
+        {
+            RestoreBackupClick(this,new RoutedEventArgs());
+            for(var i=0;i<50&&SaveStatus.Text!="已从备份恢复";i++)await Task.Delay(100);
+            Check("legal schema 2 backup restores without modal dialog",confirmCalls==1&&!readOnly&&config.Draft.Project=="restored-v2"&&SaveStatus.Text=="已从备份恢复"&&RestoreBackupButton.Visibility==Visibility.Collapsed);
+        }
+        finally{TestConfirm=null;}
         System.IO.File.Delete(configPath+".bak");ErrorText.Text="";
         config=new Configuration();Render();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
         Check("empty state shows guidance not error",ErrorBanner.Visibility==Visibility.Collapsed&&LaunchHint.Text.Contains("项目")&&!LaunchButton.IsEnabled);
