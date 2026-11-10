@@ -283,6 +283,7 @@ powershell -NoProfile -File scripts/test.ps1
 ### 待评审测试和未验证范围
 
 - 新增 `ConfigurationReviewChecks.cs`（两项、九字段 × 三种快照）、`WorkspaceReviewChecks.cs`（五项）、`RuntimeReviewChecks.cs`（六项）、`UiReviewChecks.cs`（28 项），并在现有 Program/Integration/UiChecks 中各接入调用。未添加运行时故障注入 hook；沿用隔离 root/fake sample。新夹具清理只针对自己的进程/目录，Monitor 清理核对测试根、PID 和启动时间。
+- 后续评审修正 `UiChecks` 的 null 模板夹具：从完整 `Configuration` 序列化生成 JSON，仅将 `Templates["broken"]` 设为 null，避免 CR01 的必需字段校验先行失败而遮蔽模板保护。原 fail-closed 断言保持不变；WPF 窄检查在原 30 秒内 exit 0、94 项通过，证据 `D:/temp/User/AgentLauncher-tests-review-764354e62f3c40daac21ec0df34f7e5d/report/ui-checks.json`。本次仅修改夹具和记录，仍待评审；未重跑其他阶段，不把上一轮完整门禁当作本次执行。
 - 根因防复发：持久化字段必须区分「缺失」与显式默认；路径/提交/分支名不能代替物理仓库身份；恢复操作必须同时验证状态、持久化与用户可达入口；多消费者等待共享任务不能用尚未复位的标志自旋。
 - `task_verify run` 当前仍为 **unverified / project-or-git-baseline-unavailable，checks=[]**；没有 operator-configured passed/failed 项。上述手动通过结果与新测试待评审状态分别报告。请评审新增回归和调用接入，在后续用户回合建立新基线。
 - 完整 spec 目标未关闭：第 6、8 节中真实 Pi 交互、所有分屏布局、系统 DPI/Narrator、高对比度全矩阵、真实压力/长时稳定性和正式签名/.NET10 分发仍未完整验收。本轮没有补做命令超时、结构化错误码、终端定位等额外功能，不将 12 项修复当作全部 spec 完成。

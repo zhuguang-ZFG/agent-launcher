@@ -29,7 +29,9 @@ public partial class MainWindow
         // F6/F8 regressions: null template values and unsupported LastEdited must fail closed. Both use the real configPath in the isolated test root.
         await saveTask;
         var healthyConfig=System.IO.File.Exists(configPath)?System.IO.File.ReadAllBytes(configPath):null;
-        System.IO.File.WriteAllText(configPath,"{\"SchemaVersion\":1,\"Draft\":{\"SchemaVersion\":1,\"DirectoryMode\":\"isolated\",\"Layout\":\"vertical\",\"Slots\":[{\"AgentId\":\"pi\",\"Profiles\":{}}]},\"Templates\":{\"broken\":null},\"TerminalPath\":\"\",\"RecentProjects\":[]}");
+        var nullTemplate=System.Text.Json.JsonSerializer.SerializeToNode(new Configuration(),Store.Json)!;
+        nullTemplate["Templates"]!["broken"]=null;
+        System.IO.File.WriteAllText(configPath,nullTemplate.ToJsonString(Store.Json));
         await LoadAsync();
         Check("null template value enters fail-closed read-only",readOnly&&RestoreBackupButton.Visibility==Visibility.Visible&&!LaunchButton.IsEnabled);
         if(healthyConfig!=null)System.IO.File.WriteAllBytes(configPath,healthyConfig);else System.IO.File.Delete(configPath);
