@@ -75,7 +75,7 @@ public partial class MainWindow : Window
         try
         {
             config=await Task.Run(()=>Store.Read<Configuration>(configPath))??new();
-            if(config.SchemaVersion!=1||config.Draft==null||config.Templates==null||config.Templates.Values.Any(t=>t==null)||config.RecentProjects==null||config.RecentAgents==null||config.TerminalPath==null)throw new InvalidDataException("配置版本或结构不支持，禁止覆盖。");config.Draft.Validate();foreach(var template in config.Templates.Values)template.Validate();config.LastEdited?.Validate();
+            if(config.Draft==null||config.Templates==null||config.Templates.Values.Any(t=>t==null)||config.RecentProjects==null||config.RecentAgents==null||config.TerminalPath==null)throw new InvalidDataException("配置版本或结构不支持，禁止覆盖。");config=ConfigurationCompatibility.Accept(config);
         }
         catch(Exception e)when(e is IOException or JsonException or InvalidOperationException or UnauthorizedAccessException or InvalidDataException)
         {readOnly=true;config=new Configuration();ErrorText.Text="配置无法读取，已禁止覆盖和启动。请在设置中检查配置文件及 .bak 备份。\n"+e.Message;}
@@ -611,7 +611,7 @@ public partial class MainWindow : Window
     private async void RestoreBackupClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
     {
         var recovered=await Task.Run(()=>Store.Read<Configuration>(configPath+".bak"))??throw new IOException("没有可恢复备份。");
-        if(recovered.SchemaVersion!=1||recovered.Draft==null||recovered.Templates==null||recovered.Templates.Values.Any(t=>t==null)||recovered.RecentProjects==null||recovered.RecentAgents==null||recovered.TerminalPath==null)throw new IOException("备份版本或结构不支持，未恢复。");recovered.Draft.Validate();foreach(var t in recovered.Templates.Values)t.Validate();recovered.LastEdited?.Validate();
+        if(recovered.Draft==null||recovered.Templates==null||recovered.Templates.Values.Any(t=>t==null)||recovered.RecentProjects==null||recovered.RecentAgents==null||recovered.TerminalPath==null)throw new IOException("备份版本或结构不支持，未恢复。");try{recovered=ConfigurationCompatibility.Accept(recovered);}catch(InvalidDataException ex){throw new IOException("备份版本或结构不支持，未恢复。",ex);}
         if(MessageBox.Show(this,"将用上一个有效备份恢复配置。当前损坏文件会另存保留。", "恢复配置",MessageBoxButton.OKCancel)!=MessageBoxResult.OK)return;
         await Task.Run(()=>{if(File.Exists(configPath))File.Copy(configPath,configPath+".corrupt-"+DateTime.UtcNow.ToString("yyyyMMddHHmmss"));Store.Save(configPath,recovered);});
         config=recovered;readOnly=false;RestoreBackupButton.Visibility=Visibility.Collapsed;ErrorText.Text="";SaveStatus.Text="已从备份恢复";ApplyTheme();Render();
