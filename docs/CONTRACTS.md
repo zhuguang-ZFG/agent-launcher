@@ -4,6 +4,16 @@
 
 v0.6 实测补充：所有本产品对同一配置/回执的读写须持同一文件命名互斥锁（有限等待），读端不能以 File.Exists 的瞬时结果判断创建成败；仍使用临时文件 flush、原子替换与备份。只有明确的共享错误可短时重试，损坏/权限错误不能当作空记录。Job 最后一个句柄丢失不等于成员退出；没有 Finished 或可查询的空 Job 证据时保持 Unknown，禁止释放预算。两项都须纳入 R12/R13 回归。
 
+评审补充（CR02～CR12，技术预览接口）：以下边界由现有实现与回归约束；完整发布签名和验收范围仍按各节及 IMPLEMENTATION.md 区分。
+
+- **准备目录**：写 Git/准备记录前，比较所有最终独立目标、同批直接目录和最新状态中的活动工作区。重用目录须同时核对 intent、保存的物理身份、common Git dir 和 worktree 登记；相同分支/OID 不足以证明身份。准备期间新占用仍由 reserve 拒绝。
+- **监控连接**：400 ms 探测超时不能单独证明监控器不存在。启动备用 Worker 前，读取有界 PID 提示并核对进程仍存活、程序路径匹配；PID 只用于减少重复拉起，不是授权/资源归属证明。单实例 mutex 仍是仲裁依据；请求字节发出后不因超时自动重放预约。
+- **状态与账本**：单帧 1 MiB，连续响应最多 64 帧/16 MiB，全部帧一致且完整后才更新 UI。新计划必须能完整回传才允许落盘。已有单条活动记录超界时，明确报告省略的有界 ID、返回 `Ok=false` 和准入阻止原因，其余记录完整返回并保留撤销入口；异常原记录、预算和目录占用不删改，恢复需人工核对。普通终态账本历史按最旧优先裁剪到 6 MiB，活动项不裁剪；8 MiB 读取拒绝上限不变，已损坏/超界账本不自动修复。
+- **取消与检查**：准备/提交停止后，先解锁配置再等待撤销。预约结果未知的补偿清理也先通知 UI 解锁；清理完成前独立门禁禁止启动和单项重试，不能依赖刷新后的 Pending 列表维持门禁。命令检查只有一个 Dispatcher 消费者，所有调用者等待同一任务；最后一次待检查判断至清除运行标志之间不得加入异步等待。
+- **编辑恢复**：移除撤销只属于当前项目/草稿，切换项目（含最近项目）或恢复命名/上次组合后失效；同项目选择与普通会话重绘保留。配置读取必须给出实际结构错误，不能由无关缺字段错误遮蔽 null 模板校验。
+
+对应回归：`WorkspaceReviewChecks` CR02/CR12、`RuntimeReviewChecks` CR06/CR10、`UiReviewChecks` CR03/CR07/CR09、`UiChecks` null 模板，以及丢失 reserve 响应的补偿测试。`RequiresDirectory` / `IsPortableTemplate` 的缺省兼容限制仍见 IMPLEMENTATION.md §11，未改变 schema。
+
 ## C1. 启动计划与进程生命周期
 
 ### 1. 范围 / 触发
@@ -147,7 +157,7 @@ Task<ProtectedProcess> SpawnProtectedAsync(PanePlan plan, SpawnGrant grant, Canc
 - `RevokePendingAsync` 对 Pending 授权持久化 Revoked 并增加代次；撤销成功后释放对应预算/占用。晚到 Runner 即使读到旧 plan，也必须被监控器拒绝。撤销与领取互斥，不能先释放预算再落盘撤销。
 - 发现 Creating/ResumeIntent/Unknown 时返回 NeedsReconciliation。只有取得 attempt 锁、核对创建者/Job 并确认旧尝试不会再执行，才可终结授权与释放预算。不能只凭 TTL、PID 不存在或主 CLI 已退出作结论。
 - 监控器重启先恢复授权账本、切换 controllerEpoch 并核对活动 attempt；旧连接的授权不能离线使用。Runner 在创建前及写 ResumeIntent 前核对当前授权，监控器不可用则不继续启动。恢复后只能将已核对的原 attempt 绑定到新 epoch，不为同一尝试再授予一次创建权限；旧 epoch 请求返回需要重新核对。
-- 以持久化撤销记录拒绝迟到请求；没有活动进程/未解决的 Creating 后，纯历史 Pending 已撤销记录不阻止监控器退出。用户重试使用新 attempt/grant，旧记录不删除。
+- 以持久化撤销记录拒绝迟到请求；没有活动进程/未解决的 Creating 后，纯历史 Pending 已撤销记录不阻止监控器退出。用户重试使用新 attempt/grant。终态控制账本记录可按上述大小预算裁剪，旧 ID 缺失后返回不存在/过期，绝不能据此自动重建授权。
 
 ### 3. 预算、线程与存活合同
 
@@ -276,7 +286,7 @@ Task<RecoveryReport> RecoverAsync(CancellationToken ct);
 
 同一用户一个 GUI 写入者，第二实例只激活已有窗口。监控器与各 Runner 分别写自己的事件/回执，通过 current-user ACL、版本与 ID 校验接收。配置保存使用同目录临时文件、flush、原子替换、上个有效备份；不把多份 JSON 的更新称为跨文件事务。跨文件关联使用稳定 ID，加载时验证完整性。
 
-首版不自动删除计划、claim、Unknown 记录、分支或 worktree；只对普通日志轮转。避免延迟 Runner 需要的计划被“按天数”删除。后续清理必须先定义运行归属证明。
+首版不自动删除计划、claim、Unknown 记录、分支或 worktree；普通日志轮转，控制账本只按上述大小预算裁剪终态历史。避免延迟 Runner 需要的计划被“按天数”删除。其他清理必须先定义运行归属证明。
 
 文件读写失败要保留内存中的草稿和最后有效磁盘版本，显示“尚未保存”。未来 schema 拒绝执行且不降级覆写；迁移备份后才替换，崩溃后可回退。并发保存按 revision 串行，旧请求不能覆盖新草稿。
 

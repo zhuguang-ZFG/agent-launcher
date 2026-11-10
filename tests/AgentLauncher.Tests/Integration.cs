@@ -21,13 +21,15 @@ internal static class Integration
         await Test("P04 begin rechecks complete resource policy without consuming grant",async()=>{
             var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
             const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            System.Reflection.FieldInfo Field(string name)=>type.GetField(name,flags)??throw new MissingFieldException(type.FullName,name);
+            var handle=type.GetMethod("Handle",flags)??throw new MissingMethodException(type.FullName,"Handle");
             var healthySample=new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow);
             foreach(var sample in new[]{healthySample with{CommitAvailable=ResourcePolicy.GiB},healthySample with{Available=4*ResourcePolicy.GiB},healthySample with{CpuPercent=double.NaN},healthySample with{At=DateTimeOffset.UtcNow.AddSeconds(-10)}})
             {
                 using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;var item=Item("recheck",["--hold","1"]);var entry=new ControlEntry{Plan=item,Digest=Store.Digest(item)};
-                type.GetField("sample",flags)!.SetValue(monitor,sample);type.GetField("ledger",flags)!.SetValue(monitor,new Ledger{Entries=[entry]});
-                type.GetField("ledgerPath",flags)!.SetValue(monitor,Path.Combine(Store.Root,"recheck-"+Guid.NewGuid().ToString("N")+".json"));
-                var denied=false;try{type.GetMethod("Handle",flags)!.Invoke(monitor,[new Request("begin",Guid.NewGuid(),Attempt:item.Id)]);}catch(System.Reflection.TargetInvocationException ex)when(ex.InnerException is IOException){denied=true;}
+                Field("sample").SetValue(monitor,sample);Field("ledger").SetValue(monitor,new Ledger{Entries=[entry]});
+                Field("ledgerPath").SetValue(monitor,Path.Combine(Store.Root,"recheck-"+Guid.NewGuid().ToString("N")+".json"));
+                var denied=false;try{handle.Invoke(monitor,[new Request("begin",Guid.NewGuid(),Attempt:item.Id)]);}catch(System.Reflection.TargetInvocationException ex)when(ex.InnerException is IOException){denied=true;}
                 Assert(denied&&entry.State=="Pending","begin consumed a grant with invalid resource evidence");
             }
             await Task.CompletedTask;
@@ -84,12 +86,13 @@ internal static class Integration
             var result=await ControlledCommand.RunAsync(command,cwd);Assert(result.Code==0&&result.Output.Trim().Length>0,result.Error);evidence.Add(new{name="pi-version",output=result.Output.Trim()});
         });
         await Test("Client timeout after committed reserve auto-revokes",async()=>{
-            var item=Item("cleanup",["--hold","100"]);
+            var item=Item("cleanup",["--hold","100"]);var cleanupNotifications=0;
             Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND","1");
-            try{await Ipc.ReserveWithCleanupAsync([item]);Assert(false,"timeout not surfaced");}
+            try{await Ipc.ReserveWithCleanupAsync([item],beforeCleanup:()=>cleanupNotifications++);Assert(false,"timeout not surfaced");}
             catch(IOException e){Assert(e.Message.Contains("撤销"),e.Message);}
             finally{Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND",null);}
             var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            Assert(cleanupNotifications==1,"UI cleanup notification was not delivered exactly once");
             Assert(status.Entries!.Single(e=>e.Plan.Id==item.Id).State=="Revoked","committed grant not revoked after client timeout");
         });
         // F1 regression: ControlledCommand must route its reserve through the cleanup wrapper; a lost reserve response must not leave a Pending git grant holding the global slot.

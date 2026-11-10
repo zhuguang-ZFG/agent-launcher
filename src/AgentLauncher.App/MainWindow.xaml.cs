@@ -18,10 +18,13 @@ public partial class MainWindow : Window
 {
     private Configuration config=new();
     private bool rendering,busy,loading=true,readOnly,refreshing,closing;
+    private bool launchFinalizing,launchStopping,closeRequested;
     private readonly DispatcherTimer timer=new(){Interval=TimeSpan.FromSeconds(2)};
     private byte[]? pendingSave;
     private Task saveTask=Task.CompletedTask;
     private Task commandCheckTask=Task.CompletedTask;
+    private Task launchTask=Task.CompletedTask;
+    private Task cancelTask=Task.CompletedTask;
     private string? saveError;
     private bool saving;
     private readonly List<(Slot Slot,int Index)> undoRemovals=[];
@@ -29,6 +32,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? launchCancellation;
     private Guid[] submittedAttempts=[];
     private long submittedRevision=-1;
+    private long submissionGeneration;
     private readonly string[] arguments;
     private string? sessionSignature;
     private readonly Dictionary<Guid,TextBlock> commandLabels=[];
@@ -36,6 +40,7 @@ public partial class MainWindow : Window
     private bool commandsChecking,commandsRunning;
 #if INTEGRATION_TESTS
     private bool uiChecksStarted;
+    private Task? commandCheckPause;
 #endif
     private Draft? pendingCommandCheck;
     private string validationError="";
@@ -50,6 +55,7 @@ public partial class MainWindow : Window
     {
         arguments=args;InitializeComponent();
         ProjectPath.TextChanged+=(_,_)=>{if(!rendering){projectInputRevision++;if(!loading)UpdateLaunch();}};
+        ProjectPath.KeyDown+=ProjectKeyDown;
         var work=SystemParameters.WorkArea;Width=Math.Min(1120,work.Width-32);Height=Math.Min(800,work.Height-32);MinWidth=Math.Min(560,work.Width-32);MinHeight=Math.Min(460,work.Height-32);
         SizeChanged+=(_,_)=>ArrangePanels();
         Loaded+=async (_,_)=>await GuardAsync(LoadAsync);
@@ -198,7 +204,7 @@ public partial class MainWindow : Window
         var position=config.Draft.Slots.IndexOf(slot)+1;
         var shell=new Border{BorderThickness=new(1),CornerRadius=new(6),Padding=new(10),Margin=new(3)};shell.SetResourceReference(Border.BackgroundProperty,"PreviewSurface");shell.SetResourceReference(Border.BorderBrushProperty,"PreviewLine");
         var text=new TextBlock{Text=$"{position}  {slot.DisplayName}",FontSize=14,FontWeight=FontWeights.SemiBold};text.SetResourceReference(TextBlock.ForegroundProperty,"PreviewInk");
-        var detail=new TextBlock{Text="启动后是一个终端窗格",FontSize=12,Margin=new(0,4,0,0)};detail.SetResourceReference(TextBlock.ForegroundProperty,"PreviewMuted");
+        var detail=new TextBlock{Text="启动时自动加载 · 无需再输入命令",FontSize=12,Margin=new(0,4,0,0)};detail.SetResourceReference(TextBlock.ForegroundProperty,"PreviewMuted");
         shell.Child=new StackPanel{Children={text,detail}};return shell;
     }
     private void ArrangePanels()
@@ -267,16 +273,20 @@ public partial class MainWindow : Window
         try
         {
             discoveredInstalls=await Task.Run(()=>{var directories=Commands.InstallSearchDirs();return Agents.All.Where(a=>a.Command.Length>0).ToDictionary(a=>a.Id,a=>Commands.DiscoverInstalls(a.Command,directories).ToArray());});
-            DiscoveryStatus.Text=$"找到 {discoveredInstalls.Count(p=>p.Value.Length>0)} 种 CLI · 只确认命令位置，版本与登录状态未验证";RefreshAgentChoices();
+            var found=Agents.All.Where(a=>discoveredInstalls.GetValueOrDefault(a.Id)?.Length>0).Select(a=>a.Name).ToArray();
+            DiscoveryStatus.Text=found.Length==0?"没有找到本机 CLI；可在详情中选择已安装的程序":"已找到 "+string.Join("、",found)+" · 选中后随终端自动加载，版本与登录状态未验证";RefreshAgentChoices();
             try{discoveredTerminals=await Task.Run(()=>TerminalDiscovery.Installs().ToArray());}
             catch(Exception ex)when(ex is not OutOfMemoryException){DiscoveryStatus.Text+="；Terminal 查询未完成："+ex.Message;}
             await CheckCommandsAsync();
         }
         catch(Exception ex)when(ex is not OutOfMemoryException){DiscoveryStatus.Text="查找未完成："+ex.Message;}
-        finally{discovering=false;DiscoverButton.IsEnabled=true;}
+        finally{discovering=false;DiscoverButton.IsEnabled=!busy;}
     }
     private Task CheckCommandsAsync()
     {
+        // Single consumer: a request only queues the latest draft and returns the running task. The loop's last pending check and
+        // the finally that clears commandsRunning have no await between them, so no caller can observe "running but not consuming".
+        // Adding an await there would reintroduce the starvation that the previous waiter loop caused.
         pendingCommandCheck=config.Draft.Copy();commandsChecking=true;UpdateLaunch();
         if(!commandsRunning){commandsRunning=true;commandCheckTask=RunCommandChecksAsync();}
         return commandCheckTask;
@@ -288,6 +298,10 @@ public partial class MainWindow : Window
         while(pendingCommandCheck is {} draft)
         {
             pendingCommandCheck=null;var errors=new List<string>();var labels=new Dictionary<Guid,(string Text,string Tooltip)>();
+#if INTEGRATION_TESTS
+            // Deterministic in-flight edit fixture; no pause exists in the production build.
+            if(commandCheckPause is {} pause){commandCheckPause=null;await pause;}
+#endif
             foreach(var slot in draft.Slots.Where(s=>s.Enabled))
             {
                 var position=draft.Slots.IndexOf(slot)+1;
@@ -321,8 +335,23 @@ public partial class MainWindow : Window
         var missing=explicitDirectoryMissing||config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
         LaunchButton.Content=busy?"正在处理…":$"启动 {count} 个 Agent";
-        LaunchButton.IsEnabled=!busy&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&admission.Allowed&&!admissionBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
-        LaunchHint.Text=busy?"正在准备文件夹并打开终端":readOnly?"当前配置只读，已禁止启动与保存":submittedAttempts.Length>0?"已提交，正在等每个窗口确认；还没启动的可以在运行记录里撤销":pendingProject?"项目路径输入尚未应用；请移开焦点完成校验":explicitDirectoryMissing?"通用组合需要重新指定独立目录，请打开对应 Agent 的详情":missing?"先选择项目文件夹":count==0?"先勾选至少一个 Agent":admissionBlocked?admissionBlockedReason!:!admission.Allowed?admission.Reason:!SaveHealthy?saveError!=null?"配置尚未保存："+saveError:"正在保存配置…":validationError.Length>0?validationError:status?.Ok!=true?"正在等待后台检查就绪，暂时不能启动":commandsChecking?"正在检查命令和目录":"检查全部通过，可以启动";
+        LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&admission.Allowed&&!admissionBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
+        LaunchHint.Text=closeRequested?"正在关闭窗口，等待本次操作与配置保存完成…":
+            launchFinalizing&&launchStopping||launchCancellation?.IsCancellationRequested==true||!cancelTask.IsCompleted?"正在停止后续步骤并核对撤销结果，暂不能再次启动":
+            launchFinalizing?"正在完成本次启动收尾；可以编辑配置，暂不能再次启动":
+            busy?"正在准备文件夹并打开终端":
+            launchCancellation!=null?"正在核对预约失败后的撤销结果；可以编辑配置，暂不能再次启动":
+            readOnly?"当前配置只读，已禁止启动与保存":
+            submittedAttempts.Length>0?"已提交，正在等每个窗口确认；还没启动的可以在运行记录里撤销":
+            pendingProject?"项目路径输入尚未应用；请按 Enter 或移开焦点完成校验":
+            explicitDirectoryMissing?"通用组合需要重新指定独立目录，请打开对应 Agent 的详情":
+            missing?"先选择项目文件夹":count==0?"先勾选至少一个 Agent":
+            admissionBlocked?admissionBlockedReason!:!admission.Allowed?admission.Reason:
+            !SaveHealthy?saveError!=null?"配置尚未保存："+saveError:"正在保存配置…":
+            validationError.Length>0?validationError:
+            status?.Ok!=true?"正在等待后台检查就绪，暂时不能启动":
+            commandsChecking?"正在检查命令和目录":
+            LaunchButton.IsEnabled?"检查全部通过，可以启动":"本次配置已提交，暂不能再次启动";
         LaunchHint.Foreground=(Brush)FindResource(LaunchButton.IsEnabled?"Ink":"Muted");
         if(status?.Memory is {} m){AvailableValue.Text=$"{GiB(m.Available)} GiB";BudgetValue.Text=$"{count*2} GiB";ResourceText.Text=(admissionBlocked?admissionBlockedReason!:admission.Reason)+$" · {m.At.LocalDateTime:HH:mm:ss} 采样";}
         else{AvailableValue.Text="—";BudgetValue.Text=$"{count*2} GiB";ResourceText.Text="资源检测不可用，暂缓启动";}
@@ -333,9 +362,27 @@ public partial class MainWindow : Window
     private async Task RefreshAsync()
     {
         if(refreshing)return;refreshing=true;
-        try{status=await Ipc.EnsureMonitorAsync();if(submittedAttempts.Length>0){submittedAttempts=submittedAttempts.Where(id=>status.Entries?.Any(e=>e.Plan.Id==id&&e.State=="Pending")==true).ToArray();if(submittedAttempts.Length==0)submittedRevision=-1;}RenderSessions();UpdateLaunch();
-            var err=status.Ok?null:status.Message;if(commError!=null&&ErrorText.Text==commError)ErrorText.Text="";commError=err;if(err!=null)ErrorText.Text=err;}
-        catch(Exception e)when(e is IOException or OperationCanceledException or TimeoutException){status=null;commError="监控器不可用 · "+e.Message;ErrorText.Text=commError;UpdateLaunch();}
+        var requestGeneration=submissionGeneration;
+        try
+        {
+            var response=await Ipc.EnsureMonitorAsync();
+            // A request begun before a newer reservation cannot describe that submission, even if it arrives later.
+            if(requestGeneration!=submissionGeneration)return;
+            status=response;
+            // Successful status includes all active entries, but terminal history may be omitted or pruned.
+            if(status.Ok&&!status.More&&status.Entries is {} entries&&submittedAttempts.Length>0)
+            {
+                submittedAttempts=submittedAttempts.Where(id=>entries.Any(e=>e.Plan.Id==id&&e.State=="Pending")).ToArray();
+                if(submittedAttempts.Length==0)submittedRevision=-1;
+            }
+            RenderSessions();UpdateLaunch();
+            var err=status.Ok?null:status.Message;if(commError!=null&&ErrorText.Text==commError)ErrorText.Text="";commError=err;if(err!=null)ErrorText.Text=err;
+        }
+        catch(Exception e)when(e is IOException or OperationCanceledException or TimeoutException)
+        {
+            if(requestGeneration!=submissionGeneration)return;
+            status=null;commError="监控器不可用 · "+e.Message;ErrorText.Text=commError;UpdateLaunch();
+        }
         finally{refreshing=false;}
     }
     private void RenderSessions()
@@ -378,6 +425,21 @@ public partial class MainWindow : Window
         ChooseProjectButton.IsEnabled=!locked;SaveTemplateButton.IsEnabled=!locked;DiscoverButton.IsEnabled=!locked&&!discovering;AddButton.IsEnabled=!locked&&config.Draft.Slots.Count<4;Layout.IsEnabled=!locked&&config.Draft.Slots.Count(s=>s.Enabled)==2;
     }
     private void SetBusy(bool value){busy=value;CancelButton.IsEnabled=value&&launchCancellation!=null;SetConfigLocked(value);UpdateLaunch();}
+    private void UnlockForCleanup()
+    {
+        // The launch operation still owns its token or finalization gate. Editing is safe; starting another launch is not.
+        SetBusy(false);CancelButton.IsEnabled=false;
+    }
+    private async Task FinishLaunchAsync()
+    {
+        var token=launchCancellation;launchFinalizing=true;launchStopping=token?.IsCancellationRequested==true;launchCancellation=null;UnlockForCleanup();
+        try
+        {
+            if(token?.IsCancellationRequested==true)await RevokeOnCancelAsync(token.Token);
+            sessionSignature=null;await RefreshAsync();
+        }
+        finally{token?.Dispose();launchFinalizing=false;UpdateLaunch();}
+    }
     private sealed record RevokeReport(int Revoked,int Retained,int Unknown);
     private async Task<RevokeReport> RevokeAttemptsAsync(IEnumerable<Guid> ids)
     {
@@ -401,9 +463,14 @@ public partial class MainWindow : Window
         if(report.Unknown>0)parts.Add($"{report.Unknown} 项撤销结果未确认");
         return parts.Count==0?"没有可撤销的待领取请求。":string.Join("；",parts)+"；已运行的任务不受影响。";
     }
-    private async Task CancelAsync()
+    private Task CancelAsync()
     {
         launchCancellation?.Cancel();
+        if(!cancelTask.IsCompleted)return cancelTask;
+        return cancelTask=RevokeSubmittedAsync();
+    }
+    private async Task RevokeSubmittedAsync()
+    {
         var ids=submittedAttempts;
         if(ids.Length==0){ProgressText.Text="已请求停止后续步骤；正在进行的 Git 写操作会先完成。尚未提交可撤销的启动请求。";return;}
         ProgressText.Text="已请求停止后续步骤；正在通过监控器撤销尚未领取的启动请求…";
@@ -415,15 +482,20 @@ public partial class MainWindow : Window
     private async Task RevokeOnCancelAsync(CancellationToken token)
     {
         if(!token.IsCancellationRequested||submittedAttempts.Length==0)return;
+        UnlockForCleanup();
         ProgressText.Text="已停止后续步骤，正在撤销尚未领取的启动请求…";
         var report=await RevokeAttemptsAsync(submittedAttempts);
         await RefreshAsync();
         ProgressText.Text=RevokeSummary(report);
         if(report.Unknown>0)ErrorText.Text=$"撤销结果未确认：{report.Unknown} 项可能仍在等待领取；请在运行记录中核对。";
     }
-    private async Task RetrySessionAsync(Guid id)
+    private Task RetrySessionAsync(Guid id)
     {
-        if(busy||readOnly||submittedAttempts.Length>0)return;
+        if(closeRequested||busy||launchFinalizing||launchCancellation!=null||!cancelTask.IsCompleted||readOnly||submittedAttempts.Length>0)return Task.CompletedTask;
+        return launchTask=RetrySessionCoreAsync(id);
+    }
+    private async Task RetrySessionCoreAsync(Guid id)
+    {
         launchCancellation=new();SetBusy(true);
         try
         {
@@ -433,24 +505,24 @@ public partial class MainWindow : Window
             if(previous.State is not ("FailedBeforeStart" or "Revoked"))throw new IOException("不能证明此项未运行，已阻止重复提交。");
             var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));
             var retry=previous.Plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=previous.Plan.Id};
-            var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token);if(!reserve.Ok)throw new IOException(reserve.Message);
-            submittedRevision=config.Draft.Revision;submittedAttempts=[retry.Id];
-            if(launchCancellation.Token.IsCancellationRequested){await RevokeOnCancelAsync(launchCancellation.Token);return;}
+            var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token,UnlockForCleanup);if(!reserve.Ok)throw new IOException(reserve.Message);
+            submittedRevision=config.Draft.Revision;submittedAttempts=[retry.Id];submissionGeneration++;
+            if(launchCancellation.Token.IsCancellationRequested)return;
             try{await Task.Run(()=>Commands.SubmitTerminal(terminal,[retry],"vertical"));}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
-            if(launchCancellation.Token.IsCancellationRequested){await RevokeOnCancelAsync(launchCancellation.Token);return;}
+            if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="只提交了这一项的新尝试；已有会话保持不变，正在等待回执。";
         }
-        finally
-        {
-            var token=launchCancellation;launchCancellation=null;
-            try{if(token?.IsCancellationRequested==true)await RevokeOnCancelAsync(token.Token);}finally{SetBusy(false);CancelButton.IsEnabled=false;token?.Dispose();}
-            sessionSignature="";await RefreshAsync();
-        }
+        finally{await FinishLaunchAsync();}
     }
-    private async void LaunchClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
+    private async void LaunchClick(object sender,RoutedEventArgs e)
     {
-        if(busy||readOnly||submittedAttempts.Length>0)return;
+        if(closeRequested||busy||launchFinalizing||launchCancellation!=null||!cancelTask.IsCompleted||readOnly||submittedAttempts.Length>0)return;
+        launchTask=LaunchAsync();
+        await GuardAsync(()=>launchTask);
+    }
+    private async Task LaunchAsync()
+    {
         if(ProjectPath.Text.Trim()!=config.Draft.Project)SelectProject(ProjectPath.Text.Trim());
         launchCancellation=new();SetBusy(true);ErrorText.Text="";
         try
@@ -459,44 +531,53 @@ public partial class MainWindow : Window
             await saveTask;if(!SaveHealthy)throw new IOException(saveError!=null?"先解决配置保存失败，再启动。":"正在保存配置，请稍候。");
             var draft=config.Draft.Copy();
             var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));await RefreshAsync();
+            if(status?.Ok!=true)throw new IOException(status?.Message??"监控状态不可用");
             var admissionBlocked=status?.AdmissionBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
             var reserved=status?.Entries?.Where(x=>!Store.IsTerminal(x)).Aggregate(0UL,(sum,x)=>sum+x.Plan.Budget)??0;
             var admission=ResourcePolicy.Check(status?.Memory??throw new IOException("资源不可用"),reserved,(ulong)draft.Slots.Count(s=>s.Enabled)*ResourcePolicy.AgentBudget);if(!admission.Allowed)throw new IOException(admission.Reason);
             ProgressText.Text="正在核对命令和工作目录…";
-            var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token));
+            // Active agent workspaces are the monitor's own reserve precondition; checking them here keeps an occupied destination from leaving a worktree and branch behind.
+            var activeWorkspaces=status?.Entries?.Where(x=>!Store.IsTerminal(x)&&x.Plan.Kind=="agent").Select(x=>x.Plan.Workspace).ToArray()??[];
+            var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token,activeWorkspaces));
             launchCancellation.Token.ThrowIfCancellationRequested();
-            var reserve=await Ipc.ReserveWithCleanupAsync(plans.ToArray(),launchCancellation.Token);if(!reserve.Ok)throw new IOException(reserve.Message);
-            submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();
-            if(launchCancellation.Token.IsCancellationRequested){await RevokeOnCancelAsync(launchCancellation.Token);return;}
+            var reserve=await Ipc.ReserveWithCleanupAsync(plans.ToArray(),launchCancellation.Token,UnlockForCleanup);if(!reserve.Ok)throw new IOException(reserve.Message);
+            submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
+            if(launchCancellation.Token.IsCancellationRequested)return;
             try{await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout));}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
-            if(launchCancellation.Token.IsCancellationRequested){await RevokeOnCancelAsync(launchCancellation.Token);return;}
+            if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="已交给 Windows Terminal 打开，正在等每个窗口确认。进程出现不代表 Agent 已就绪。";
             for(var i=0;i<10;i++)
             {
-                if(launchCancellation.Token.IsCancellationRequested){await RevokeOnCancelAsync(launchCancellation.Token);break;}
+                if(launchCancellation.Token.IsCancellationRequested)break;
                 await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true)){if(config.MinimizeAfterLaunch)WindowState=WindowState.Minimized;break;}
             }
         }
-        finally
-        {
-            var token=launchCancellation;launchCancellation=null;
-            try{if(token?.IsCancellationRequested==true)await RevokeOnCancelAsync(token.Token);}finally{SetBusy(false);CancelButton.IsEnabled=false;token?.Dispose();}
-            await RefreshAsync();
-        }
-    });
-    private void CancelClick(object sender,RoutedEventArgs e)=>_=GuardAsync(CancelAsync);
-    private void SelectProject(string path){if(!Edit(d=>d.Project=path))return;if(path.Length>0){config.RecentProjects.Remove(path);config.RecentProjects.Insert(0,path);config.RecentProjects=config.RecentProjects.Take(8).ToList();QueueSave();}}
-    private async void ProjectLostFocus(object sender,RoutedEventArgs e){if(ProjectPath.Text.Trim()!=config.Draft.Project)SelectProject(ProjectPath.Text.Trim());await GuardAsync(CheckCommandsAsync);}
+        finally{await FinishLaunchAsync();}
+    }
+    private async void CancelClick(object sender,RoutedEventArgs e){await GuardAsync(CancelAsync);UpdateLaunch();}
+    private void SelectProject(string path){var changed=!StringComparer.OrdinalIgnoreCase.Equals(config.Draft.Project,path);if(!Edit(d=>d.Project=path))return;if(changed&&undoRemovals.Count>0){undoRemovals.Clear();RenderSessionsNow();}if(path.Length>0){config.RecentProjects.Remove(path);config.RecentProjects.Insert(0,path);config.RecentProjects=config.RecentProjects.Take(8).ToList();QueueSave();}}
+    private async void ProjectLostFocus(object sender,RoutedEventArgs e)=>await GuardAsync(ApplyProjectInputAsync);
+    private async void ProjectKeyDown(object sender,KeyEventArgs e)
+    {
+        if(e.Key!=Key.Enter||Keyboard.Modifiers!=ModifierKeys.None)return;
+        e.Handled=true;await GuardAsync(ApplyProjectInputAsync);
+    }
+    private async Task ApplyProjectInputAsync()
+    {
+        if(loading||rendering||busy||readOnly||closeRequested)return;
+        if(ProjectPath.Text.Trim()!=config.Draft.Project)SelectProject(ProjectPath.Text.Trim());
+        await CheckCommandsAsync();
+    }
     private void ChooseClick(object sender,RoutedEventArgs e){if(busy||readOnly)return;var picker=new OpenFolderDialog{Title="选择项目文件夹"};if(picker.ShowDialog(this)==true)SelectProject(picker.FolderName);}
-    private void RecentChanged(object sender,SelectionChangedEventArgs e){if(!rendering&&Recent.SelectedItem is string path)Edit(d=>d.Project=path);}
+    private void RecentChanged(object sender,SelectionChangedEventArgs e){if(!rendering&&Recent.SelectedItem is string path)SelectProject(path);}
     private void AddClick(object sender,RoutedEventArgs e){if(config.Draft.Slots.Count<4)Edit(d=>d.Slots.Add(new()));}
     private void LayoutChanged(object sender,SelectionChangedEventArgs e){if(Layout.SelectedItem is ComboBoxItem {Tag:string value})Edit(d=>d.Layout=value);}
     private void DirectoryChanged(object sender,SelectionChangedEventArgs e){if(DirectoryMode.SelectedItem is ComboBoxItem {Tag:string value})Edit(d=>d.DirectoryMode=value);}
     private void TemplateChanged(object sender,SelectionChangedEventArgs e)
     {
-        if(rendering||Templates.SelectedItem is not ComboBoxItem{Tag:{} selection})return;
-        try{config.Restore(selection is TemplateAction.LastEdited?config.LastEdited??throw new InvalidOperationException("尚无上次组合"):config.Templates[(string)selection]);QueueSave();validationError="";ErrorText.Text="";Render();}catch(Exception ex)when(ex is not OutOfMemoryException){ErrorText.Text=ex.Message;}
+        if(rendering||busy||readOnly||Templates.SelectedItem is not ComboBoxItem{Tag:{} selection})return;
+        try{config.Restore(selection is TemplateAction.LastEdited?config.LastEdited??throw new InvalidOperationException("尚无上次组合"):config.Templates[(string)selection]);QueueSave();validationError="";ErrorText.Text="";undoRemovals.Clear();Render();RenderSessionsNow();}catch(Exception ex)when(ex is not OutOfMemoryException){ErrorText.Text=ex.Message;}
     }
     private void SaveTemplateClick(object sender,RoutedEventArgs e)
     {
@@ -586,9 +667,21 @@ public partial class MainWindow : Window
     private async void ClosingWindow(object? sender,CancelEventArgs e)
     {
         if(closing)return;e.Cancel=true;
+        if(closeRequested)return;
         if(busy&&MessageBox.Show(this,"当前正在处理启动。关闭只停止后续准备，不结束已运行任务。关闭窗口？","关闭配置窗口",MessageBoxButton.YesNo)!=MessageBoxResult.Yes)return;
-        launchCancellation?.Cancel();await saveTask;
-        if(saveError!=null&&MessageBox.Show(this,"配置尚未保存："+saveError+"\n仍要关闭？","保存失败",MessageBoxButton.YesNo)!=MessageBoxResult.Yes)return;
-        timer.Stop();closing=true;await Dispatcher.InvokeAsync(Close,DispatcherPriority.Background);
+        closeRequested=true;var restartTimer=timer.IsEnabled;timer.Stop();IsEnabled=false;UpdateLaunch();
+        try
+        {
+            launchCancellation?.Cancel();
+            // Keep the Dispatcher alive until both launch compensation and an explicit stop have settled.
+            await GuardAsync(()=>launchTask);await GuardAsync(()=>cancelTask);
+            await commandCheckTask;await saveTask;
+            if(saveError!=null&&MessageBox.Show(this,"配置尚未保存："+saveError+"\n仍要关闭？","保存失败",MessageBoxButton.YesNo)!=MessageBoxResult.Yes)return;
+            closing=true;await Dispatcher.InvokeAsync(Close,DispatcherPriority.Background);
+        }
+        finally
+        {
+            if(!closing){closeRequested=false;IsEnabled=true;if(restartTimer)timer.Start();UpdateLaunch();}
+        }
     }
 }

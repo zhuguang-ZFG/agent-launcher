@@ -20,10 +20,13 @@ internal static class RuntimeReviewChecks
         Directory.CreateDirectory(cwd);
         await test("CR04 revoke save failure restores state and detail before later begin",()=>RevokeRollbackAsync(cwd));
         await test("CR06 oversized plan is rejected before persistence",()=>OversizedPlanAsync(cwd));
+        await test("CR06 ledger stays readable while active reservations survive pruning",()=>LedgerBoundAsync(cwd));
+        await test("CR06 unrepresentable active record is withheld instead of failing status",()=>WithheldStatusAsync(cwd));
         await test("CR06 paged status keeps oversized active and history records exact",()=>StatusTransportAsync(cwd));
         await test("CR06 truncated and epoch-mixed continuation frames are rejected",()=>ContinuationRejectionAsync(cwd));
         await test("CR07 pressure exposes an admission reason without changing reconciliation health",()=>PressureReasonAsync(cwd));
         await test("CR10 idle monitor retires within five seconds without polling and keeps pending attempts",()=>IdleRetirementAsync(cwd));
+        await test("CR10 a merely busy pipe does not start a second monitor",()=>BusyPipeAsync(cwd));
     }
 
     private static void Assert(bool value,string message){if(!value)throw new Exception(message);}
@@ -82,6 +85,85 @@ internal static class RuntimeReviewChecks
         Assert(probe.LedgerState.Entries.Count==0,"rejected plan mutated the in-memory ledger");
         Assert(!File.Exists(ledgerPath),"rejected plan was persisted to disk");
         await Task.CompletedTask;
+    }
+
+    private static Task LedgerBoundAsync(string cwd)
+    {
+        // Terminal history must never grow the published ledger past Store.Read's 8 MiB bound; otherwise the next monitor start
+        // reports a broken ledger and refuses every launch until the file is repaired by hand.
+        var root=OwnedRoot(cwd);var ledgerPath=Path.Combine(root,"control.json");
+        var ledger=new Ledger();var historyCwd=Path.Combine(root,"projects","history");var large=new string('c',60000);
+        for(var i=0;i<120;i++)ledger.Entries.Add(new ControlEntry{Plan=Item("cr06-ledger-"+i,[large],historyCwd),State="Settled",Detail="done"});
+        var newestTerminal=ledger.Entries[^1].Plan.Id;
+        var active=Item("cr06-ledger-active",["--hold","100"],Path.Combine(root,"projects","active"));
+        ledger.Entries.Add(new ControlEntry{Plan=active,Digest=Store.Digest(active),Detail="fixture pending authorization"});
+        var before=ledger.Entries.Count;
+        var rawSize=JsonSerializer.SerializeToUtf8Bytes(ledger,Store.Json).LongLength;
+        using var probe=new MonitorProbe(ledger,FreshSample(),ledgerPath);
+        probe.Invoke("Save");
+        var size=new FileInfo(ledgerPath).Length;
+        Assert(rawSize>LedgerPruneTrigger,"fixture never crossed the pruning trigger: "+rawSize);
+        Assert(size<LedgerReadCap,"published ledger approached the unreadable bound: "+size);
+        var stored=Store.Read<Ledger>(ledgerPath)??throw new Exception("pruned ledger is not readable");
+        Assert(stored.Entries.Count<before,"pruning kept every terminal record");
+        Assert(stored.Entries.Any(e=>e.Plan.Id==active.Id&&e.State=="Pending"&&e.Plan.Command.Arguments.SequenceEqual(new[]{"--hold","100"})),"pruning dropped or changed the active reservation");
+        Assert(stored.Entries.Any(e=>e.Plan.Id==newestTerminal),"pruning dropped the newest terminal record before older ones");
+        return Task.CompletedTask;
+    }
+
+    private static async Task WithheldStatusAsync(string cwd)
+    {
+        var root=OwnedRoot(cwd);var ledger=new Ledger();
+        var oversized=Item(new string('汉',Ipc.FrameLimit/6),[new string('d',Ipc.FrameLimit)],Path.Combine(root,"projects","big"));
+        ledger.Entries.Add(new ControlEntry{Plan=oversized,Digest=Store.Digest(oversized),Detail="fixture pending authorization"});
+        var listed=Item("cr06-listed",["--hold","1"],Path.Combine(root,"projects","listed"));
+        ledger.Entries.Add(new ControlEntry{Plan=listed,Digest=Store.Digest(listed),Detail="fixture pending authorization"});
+        using var probe=new MonitorProbe(ledger,FreshSample(),Path.Combine(root,"control.json"));
+        var status=probe.Status();
+        Assert(!status.Ok&&!string.IsNullOrEmpty(status.AdmissionBlockedReason),"an unrepresentable active record did not close the gate");
+        Assert(status.Message.Contains("超出单帧边界")&&status.Message.Contains(oversized.Id.ToString("N")),"withheld record ID was not reported: "+status.Message);
+        Assert(status.Entries!.Any(e=>e.Plan.Id==listed.Id&&e.Plan.Command.Arguments.SequenceEqual(listed.Command.Arguments)),"representable active record was hidden or modified");
+        Assert(!status.Entries!.Any(e=>e.Plan.Id==oversized.Id),"withheld record was still returned");
+        using var wire=new MemoryStream();await Ipc.WriteResponseAsync(wire,status,CancellationToken.None);wire.Position=0;
+        var received=await Ipc.ReadResponseAsync(wire,CancellationToken.None);
+        Assert(!received.Ok&&received.Entries!.Single().Plan.Id==listed.Id,"bounded failure status did not survive wire transport");
+        foreach(var request in new[]{new Request("reserve",Guid.NewGuid(),[Item("cr06-denied",[],Path.Combine(root,"projects","denied"))]),new Request("begin",Guid.NewGuid(),Attempt:listed.Id)})
+        {
+            var denied=false;
+            try{probe.Invoke("Handle",request);}catch(TargetInvocationException e)when(e.InnerException is IOException failure&&failure.Message.Contains("超出单帧边界")){denied=true;}
+            Assert(denied,"incomplete status allowed "+request.Operation);
+        }
+        var revoke=(Response)probe.Invoke("Handle",new Request("revoke",Guid.NewGuid(),Attempt:listed.Id))!;
+        Assert(revoke.Ok&&revoke.Entries!.Single().State=="Revoked","oversized peer prevented revoking a representable pending entry");
+        Assert(ledger.Entries.Single(e=>e.Plan.Id==oversized.Id).Plan.Command.Arguments.SequenceEqual(oversized.Command.Arguments),"withholding modified the original ledger");
+    }
+
+    private static async Task BusyPipeAsync(string cwd)
+    {
+        // A single-instance pipe that is merely busy must not be read as "no monitor"; otherwise every contended reserve spawns a Worker
+        // that exits immediately. The spawn log is an INTEGRATION_TESTS-only hook, so only a real Process.Start can add a line.
+        var log=Path.Combine(OwnedRoot(cwd),"monitor-spawns.log");var previous=Environment.GetEnvironmentVariable("AGENT_LAUNCHER_MONITOR_SPAWN_LOG");
+        Environment.SetEnvironmentVariable("AGENT_LAUNCHER_MONITOR_SPAWN_LOG",log);
+        try
+        {
+            await Ipc.EnsureMonitorAsync();
+            File.Delete(log);
+            using var holder=new NamedPipeClientStream(".",Store.Pipe,PipeDirection.InOut,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly);
+            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await holder.ConnectAsync(timeout.Token);
+            var poll=Ipc.EnsureMonitorAsync();
+            var item=Item("cr10-busy",["--hold","1"],Path.Combine(cwd,"projects","busy"));
+            var reserve=Ipc.ReserveWithCleanupAsync([item]);
+            await Task.Delay(1200);
+            Assert(!File.Exists(log),"a second monitor was started during pipe contention");
+            holder.Dispose();
+            var response=await reserve;
+            Assert((await poll).Ok,"status through a busy pipe failed");
+            Assert(response.Ok,"reserve through a busy pipe failed: "+response.Message);
+            Assert(!File.Exists(log),"a second monitor was started while the pipe was merely busy");
+            await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));
+        }
+        finally{Environment.SetEnvironmentVariable("AGENT_LAUNCHER_MONITOR_SPAWN_LOG",previous);}
     }
 
     private static async Task StatusTransportAsync(string cwd)
@@ -186,6 +268,8 @@ internal static class RuntimeReviewChecks
         Assert(revokeWatch.Elapsed<=TimeSpan.FromSeconds(5),"owned monitor exit took "+revokeWatch.Elapsed.TotalSeconds.ToString("F2")+"s");
     }
 
+    private const long LedgerPruneTrigger=6L*1024*1024;
+    private const long LedgerReadCap=8L*1024*1024;
     private static string OwnedRoot(string cwd){var root=Path.GetFullPath(Path.Combine(cwd,"AgentLauncher-tests-runtime-"+Guid.NewGuid().ToString("N")));Directory.CreateDirectory(root);return root;}
 
     private static string FileMutexFor(string path)=>"Local\\AgentLauncher-file-"+Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(path).ToUpperInvariant())));

@@ -85,9 +85,9 @@ public static class Ipc
             try{await pipe.ConnectAsync(connect.Token);}
             catch(OperationCanceledException)when(!timeout.IsCancellationRequested)
             {
-                // No request bytes have been written: starting a retired monitor here cannot replay an authorization.
-                if(!File.Exists(Store.WorkerPath))throw new FileNotFoundException("缺少 Worker，请从完整发布目录启动。");
-                using var monitor=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});
+                // A busy single-instance pipe also times out here, so only start a monitor when the pid file does not name a live
+                // Worker. No request bytes have been written either way, so this can never replay an authorization.
+                if(!MonitorRunning())StartMonitor();
                 return await SendCoreAsync(request,timeout.Token,false);
             }
         }
@@ -99,12 +99,13 @@ public static class Ipc
 #endif
         return await ReadResponseAsync(pipe,timeout.Token);
     }
-    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default)
+    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default,Action? beforeCleanup=null)
     {
         try{return await SendCoreAsync(new("reserve",Guid.NewGuid(),items),ct,true);}
         catch(Exception e)when(e is IOException or TimeoutException or OperationCanceledException)
         {
             // The server may have committed the reservation before the client saw a failure; revoke best-effort so the workspace is not held.
+            beforeCleanup?.Invoke();
             foreach(var item in items){try{await SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));}catch(Exception inner)when(inner is IOException or TimeoutException or OperationCanceledException){}}
             throw new IOException("预约结果未确认，已尝试撤销全部启动项；请在运行记录中核对。",e);
         }
@@ -134,11 +135,16 @@ public static class Ipc
         }
         return first with{Entries=[..entries],More=false};
     }
-    public static void EnsureEntryRepresentable(ControlEntry entry)
+    public static bool EntryRepresentable(ControlEntry entry)
     {
         // One record must fit with a conservative status envelope; otherwise Save must fail closed before any grant exists.
-        var probe=new Response(true,new string('x',1024),[entry],null,new string('0',64),new string('r',64),false);
-        if(JsonSerializer.SerializeToUtf8Bytes(probe,Store.Json).Length>FrameLimit)throw new IOException("控制记录参数过大，无法在协议边界内完整传输；已拒绝保存或读取该记录。");
+        // Reserve room for the sample and bounded failure/omission messages as well as the entry itself.
+        var probe=new Response(true,new string('x',4096),[entry],null,new string('0',64),new string('r',64),false);
+        return JsonSerializer.SerializeToUtf8Bytes(probe,Store.Json).Length<=FrameLimit;
+    }
+    public static void EnsureEntryRepresentable(ControlEntry entry)
+    {
+        if(!EntryRepresentable(entry))throw new IOException("控制记录参数过大，无法在协议边界内完整传输；已拒绝保存或读取该记录。");
     }
     private static List<byte[]> SplitResponse(Response response)
     {
@@ -174,9 +180,33 @@ public static class Ipc
     {
         using var probe=new CancellationTokenSource(400);
         try{return await SendAsync(new("status",Guid.NewGuid()),probe.Token);}catch(TimeoutException){}catch(OperationCanceledException){}catch(IOException){}
-        if(!File.Exists(Store.WorkerPath))throw new FileNotFoundException("缺少 Worker，请从完整发布目录启动。");
-        using var p=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});
+        if(!MonitorRunning())StartMonitor();
         return await SendAsync(new("status",Guid.NewGuid()));
+    }
+    private static bool MonitorRunning()
+    {
+        // Deliberately avoids Store.Read: that helper waits up to 2 s for a file mutex, and this probe only decides whether to spawn.
+        try
+        {
+            var path=Store.FilePath("monitor-pid.json");
+            using var file=File.Open(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete);
+            if(file.Length is <1 or >32)return false;
+            using var reader=new StreamReader(file);
+            if(!int.TryParse(reader.ReadToEnd().Trim(),out var pid)||pid<=0)return false;
+            using var process=Process.GetProcessById(pid);
+            return !process.HasExited&&StringComparer.OrdinalIgnoreCase.Equals(process.MainModule?.FileName,Store.WorkerPath);
+        }
+        catch(Exception e)when(e is not OutOfMemoryException){return false;}
+    }
+    private static void StartMonitor()
+    {
+        if(!File.Exists(Store.WorkerPath))throw new FileNotFoundException("缺少 Worker，请从完整发布目录启动。");
+        // Test-only evidence counts spawn attempts, including a child that immediately loses the single-instance mutex.
+#if INTEGRATION_TESTS
+        var log=Environment.GetEnvironmentVariable("AGENT_LAUNCHER_MONITOR_SPAWN_LOG");
+        if(!string.IsNullOrEmpty(log))File.AppendAllText(log,"monitor\n");
+#endif
+        using var p=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});
     }
 }
 public static class Commands
@@ -293,14 +323,17 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
     public static void SubmitTerminal(string terminal,IReadOnlyList<LaunchItem> items,string layout)
     {
         var start=new ProcessStartInfo(terminal){UseShellExecute=false};start.ArgumentList.Add("-w");start.ArgumentList.Add("agent-"+items[0].BatchId.ToString("N"));
+        if(items.Count>1)start.ArgumentList.Add("--maximized");
+        var useSystemColors=TerminalAppearance.UseSystemColors;
         for(var i=0;i<items.Count;i++)
         {
             if(i>0){start.ArgumentList.Add(";");if(items.Count==4&&i>=2){start.ArgumentList.Add("move-focus");start.ArgumentList.Add(i==2?"left":"right");start.ArgumentList.Add(";");}}
             start.ArgumentList.Add(i==0?"new-tab":"split-pane");
-            if(i>0)start.ArgumentList.Add(i==1&&(items.Count>2||layout!="horizontal")?"-V":"-H");
-            start.ArgumentList.Add("--title");start.ArgumentList.Add($"{items[i].Position} {items[i].Name}".Replace(";","\\;"));
+            if(i>0){start.ArgumentList.Add(i==1&&(items.Count>2||layout!="horizontal")?"-V":"-H");start.ArgumentList.Add("--size");start.ArgumentList.Add("0.5");}
+            TerminalAppearance.AddPaneArguments(start,items[i],useSystemColors);
             start.ArgumentList.Add(Store.WorkerPath.Replace(";","\\;"));start.ArgumentList.Add("pane");start.ArgumentList.Add(items[i].Id.ToString("D"));
         }
+        start.ArgumentList.Add(";");start.ArgumentList.Add("focus-pane");start.ArgumentList.Add("--target");start.ArgumentList.Add("0");
         using var process=Process.Start(start)??throw new IOException("无法提交给 Windows Terminal。");
     }
 }

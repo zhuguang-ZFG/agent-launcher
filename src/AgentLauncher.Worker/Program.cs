@@ -35,6 +35,7 @@ internal static class Program
             var entry=grant.Entries[0];var plan=entry.Plan;
             root=new Job(Store.RootJob,openOnly:true);job=new Job(Store.JobName(id),openOnly:true);
             if(PhysicalDirectory.Workspace(plan.Cwd).Key!=plan.Workspace.Key)throw new IOException("工作目录物理身份变化，已阻止启动。");
+            if(interactive)TerminalAppearance.WritePaneHeading(plan);
             Write("SpawnIntent",0,0,null,"正在受保护地创建进程");
             child=new ProtectedProcess(plan.Command,plan.Cwd,root,job,redirected:!interactive);
             Write("CreatedSuspended",child.Process.Id,child.CreationTime,null,"已创建，尚未运行");
@@ -94,6 +95,7 @@ internal sealed class Monitor : IDisposable
     private int healthy,busy;
     private static readonly TimeSpan IdleTimeout=TimeSpan.FromSeconds(4);
     private static readonly TimeSpan AcceptTick=TimeSpan.FromSeconds(1);
+    private const long LedgerBudget=6L*1024*1024;
     public int Run()
     {
         using var single=new Mutex(false,@"Local\"+Store.Pipe+"-monitor");bool own;
@@ -144,7 +146,26 @@ internal sealed class Monitor : IDisposable
         }
         finally{Dispose();single.ReleaseMutex();}
     }
-    private void Save()=>Store.Save(ledgerPath,ledger);
+    private void Save()
+    {
+        PruneLedger();
+        Store.Save(ledgerPath,ledger);
+    }
+    private void PruneLedger()
+    {
+        // Terminal history is convenience only. Keep the published ledger well under Store.Read's 8 MiB bound: an unreadable
+        // control.json sets ledgerBroken and refuses every launch until the file is repaired by hand. Pruning drops the oldest
+        // terminal records first and never touches active ones, which cannot exceed the budget on their own (at most four agent
+        // plans plus one Git plan, each already bounded to a single frame by EnsureEntryRepresentable).
+        var total=JsonSerializer.SerializeToUtf8Bytes(ledger,Store.Json).LongLength;
+        if(total<=LedgerBudget)return;
+        foreach(var entry in ledger.Entries.Where(Store.IsTerminal).ToList())
+        {
+            if(total<=LedgerBudget)return;
+            total-=JsonSerializer.SerializeToUtf8Bytes(entry,Store.Json).LongLength+1;
+            ledger.Entries.Remove(entry);
+        }
+    }
     private void Refresh()
     {
         if(sample==null||DateTimeOffset.UtcNow-sample.At>=TimeSpan.FromSeconds(2))
@@ -196,7 +217,7 @@ internal sealed class Monitor : IDisposable
         if(request.Operation=="status")return Status();
         if(request.Operation=="reserve")
         {
-            if(blocked!=null)throw new IOException(blocked);if(pressure)throw new IOException("资源压力尚未连续恢复，稍后重新检查。");
+            if(AdmissionBlockedReason() is {} reason)throw new IOException(reason);
             var items=request.Items??[];if(items.Length is <1 or >4||items.Select(i=>i.Id).Distinct().Count()!=items.Length)throw new IOException("启动项数量或 ID 无效。");
             var previous=ledger.Entries.Where(e=>items.Any(i=>i.Id==e.Plan.Id)).ToArray();
             if(previous.Length>0){if(previous.Length==items.Length&&previous.All(e=>e.Digest==Store.Digest(items.Single(i=>i.Id==e.Plan.Id))))return new(true,"请求已记录",previous,sample,epoch);throw new IOException("启动 ID 已使用。");}
@@ -234,6 +255,7 @@ internal sealed class Monitor : IDisposable
         if(request.Operation=="begin")
         {
             if(entry.State!="Pending")throw new IOException("授权已撤销或被领取，不能重复启动。");
+            if(UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!Ipc.EntryRepresentable(e)).ToArray()) is {} reason)throw new IOException(reason);
             if(blocked!=null)throw new IOException(blocked);
             if(pressure)throw new IOException("资源压力尚未连续恢复，保留预约；可撤销此项。");
             var reserved=ledger.Entries.Where(e=>!Store.IsTerminal(e)).Aggregate(0UL,(sum,e)=>sum+e.Plan.Budget);
@@ -253,13 +275,23 @@ internal sealed class Monitor : IDisposable
     private Response Status()
     {
         var active=ledger.Entries.Where(e=>!Store.IsTerminal(e)).ToArray();
-        // Every active record must stay representable; refuse the status instead of silently dropping an unverified attempt.
-        foreach(var entry in active)Ipc.EnsureEntryRepresentable(entry);
+        // Withhold only an active record that cannot cross the frame boundary: failing the whole status would hide every other
+        // revoke entry and leave the user without a recovery path.
+        var withheld=active.Where(entry=>!Ipc.EntryRepresentable(entry)).ToArray();
+        var listed=active.Where(entry=>!withheld.Contains(entry)).ToArray();
         // Each response frame is capped; keep the newest terminal entries that fit rather than a fixed count.
         var terminal=ledger.Entries.Where(Store.IsTerminal).TakeLast(40).Reverse().ToList();var kept=new List<ControlEntry>();long bytes=0;
         foreach(var e in terminal){var size=JsonSerializer.SerializeToUtf8Bytes(e,Store.Json).LongLength;if(bytes+size>768*1024)break;kept.Add(e);bytes+=size;}
-        kept.Reverse();return new(blocked==null,blocked??"监控器已核对",active.Concat(kept).ToArray(),sample,epoch,AdmissionBlockedReason());
+        kept.Reverse();
+        var omittedReason=UnrepresentableReason(withheld);
+        return new(blocked==null&&withheld.Length==0,omittedReason??blocked??"监控器已核对",listed.Concat(kept).ToArray(),sample,epoch,omittedReason??AdmissionBlockedReason());
     }
-    private string? AdmissionBlockedReason()=>blocked??(pressure?"资源压力尚未连续恢复，稍后重新检查。":null);
+    private static string? UnrepresentableReason(ControlEntry[] entries)
+    {
+        if(entries.Length==0)return null;
+        // Names/arguments may themselves be oversized. Only bounded IDs belong in the response header.
+        return $"{entries.Length} 条活动记录超出单帧边界，已暂停新启动；本次状态省略 ID：{string.Join("、",entries.Take(4).Select(e=>e.Plan.Id.ToString("N")))}。请人工核对 control.json 及备份；其他记录仍可撤销。";
+    }
+    private string? AdmissionBlockedReason()=>UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!Ipc.EntryRepresentable(e)).ToArray())??blocked??(pressure?"资源压力尚未连续恢复，稍后重新检查。":null);
     public void Dispose(){foreach(var j in jobs.Values)j.Dispose();root?.Dispose();}
 }

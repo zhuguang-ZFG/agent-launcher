@@ -1,6 +1,7 @@
 #if INTEGRATION_TESTS
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Windows;
 using System.Windows.Controls;
 using AgentLauncher.Core;
@@ -74,6 +75,22 @@ public partial class MainWindow
         Check("CR07 healthy admission allows launch",LaunchButton.IsEnabled);
         await RefreshAsync();
 
+        // Queue a newer draft while the consumer is definitely suspended; every caller waits for that same consumer.
+        var releaseCheck=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        commandCheckPause=releaseCheck.Task;
+        var firstCheck=CheckCommandsAsync();
+        Task queuedCheck;
+        try
+        {
+            config.Edit(d=>d.Project=missingDirectory);Render();queuedCheck=CheckCommandsAsync();
+            Check("CR07 in-flight edits share one consuming task",commandsRunning&&!firstCheck.IsCompleted&&ReferenceEquals(firstCheck,queuedCheck));
+        }
+        finally{releaseCheck.TrySetResult();}
+        await queuedCheck;
+        Check("CR07 in-flight directory edit is applied before waiters complete",validationError.Contains("目录不可用")&&!commandsChecking&&!commandsRunning&&pendingCommandCheck==null);
+        config.Edit(d=>d.Project=Store.Root);Render();await CheckCommandsAsync();
+        Check("CR07 a completed consumer accepts a fresh request",validationError.Length==0&&!commandsChecking&&!commandsRunning);
+
         // CR05: only history is bounded; an older Pending row and its revoke action must stay reachable.
         var active=ReviewEntry("cr05-active");active.Created=DateTimeOffset.UtcNow.AddMinutes(-10);
         var entries=new List<ControlEntry>{active};
@@ -120,6 +137,22 @@ public partial class MainWindow
         Check("CR09 undo retry restores after freeing capacity",config.Draft.Slots.Any(slot=>slot.Id==refusedSlot));
         await RefreshAsync();
 
+        // Removal undo belongs to the current project/template, including recent-project selection and LastEdited restore.
+        undoRemovals.Clear();config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
+        ReviewRemoveFirstSlot(this);SelectProject(Store.Root);
+        Check("CR09 selecting the same project preserves removal undo",undoRemovals.Count==1);
+        SelectProject(Path.Combine(Store.Root,"cr09-other-project"));
+        Check("CR09 project switch drops stale removal undo",undoRemovals.Count==0&&!ReviewFind<Button>(Sessions).Any(button=>button.Content as string=="撤销移除"));
+        ReviewRemoveFirstSlot(this);config.RecentProjects.Add(Store.Root);Render();Recent.SelectedItem=Store.Root;
+        Check("CR09 recent project switch drops stale removal undo",config.Draft.Project==Store.Root&&undoRemovals.Count==0);
+        config.SaveTemplate("cr09-restore");ReviewRemoveFirstSlot(this);Render();
+        Templates.SelectedItem=Templates.Items.OfType<ComboBoxItem>().Single(item=>item.Tag as string=="cr09-restore");
+        Check("CR09 template restore drops stale removal undo",undoRemovals.Count==0&&!ReviewFind<Button>(Sessions).Any(button=>button.Content as string=="撤销移除"));
+        ReviewRemoveFirstSlot(this);
+        Templates.SelectedItem=Templates.Items.OfType<ComboBoxItem>().Single(item=>item.Tag is TemplateAction.LastEdited);
+        Check("CR09 LastEdited restore drops stale removal undo",undoRemovals.Count==0&&!ReviewFind<Button>(Sessions).Any(button=>button.Content as string=="撤销移除"));
+        config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
+
         // CR03: stop revokes the frozen batch through the monitor and late begin is denied; session revoke stays usable while busy.
         ReviewKillMonitor();Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE","1");await RefreshAsync();
         var node=Commands.FindExe("node.exe")!;
@@ -136,6 +169,29 @@ public partial class MainWindow
         var late=await Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:cancelItem.Id));
         Check("CR03 late begin is denied after cancel",!late.Ok);
         submittedAttempts=[];submittedRevision=-1;launchCancellation?.Dispose();launchCancellation=null;SetBusy(false);
+
+        var cleanupItem=cancelItem with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),Name="cr03-unlock"};
+        var cleanupReserve=await Ipc.ReserveWithCleanupAsync([cleanupItem]);
+        Check("CR03 cleanup reservation admitted ("+cleanupReserve.Message+")",cleanupReserve.Ok);
+        submittedAttempts=[cleanupItem.Id];submittedRevision=config.Draft.Revision;launchCancellation=new();launchCancellation.Cancel();SetBusy(true);
+        using(var holder=new NamedPipeClientStream(".",Store.Pipe,PipeDirection.InOut,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly))
+        {
+            using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(3));await holder.ConnectAsync(deadline.Token);
+            var finish=FinishLaunchAsync();
+            try
+            {
+                Check("CR03 config unlocks before a delayed revoke completes",!finish.IsCompleted&&!busy&&ProjectPath.IsEnabled&&SlotList.IsEnabled&&!CancelButton.IsEnabled);
+                Check("CR03 delayed cleanup still blocks another launch",launchFinalizing&&!LaunchButton.IsEnabled);
+                Check("CR03 config edits are accepted during cleanup",Edit(d=>d.Slots[0].Note="edited while revoke waits"));
+                // Even a refresh that clears the pending IDs cannot release the operation's finalization gate.
+                submittedAttempts=[];submittedRevision=-1;await CheckCommandsAsync();await saveTask;UpdateLaunch();
+                await RetrySessionAsync(cancelItem.Id);LaunchClick(this,new RoutedEventArgs());
+                Check("CR03 empty pending list cannot bypass cleanup gate",launchFinalizing&&launchCancellation==null&&!LaunchButton.IsEnabled&&config.Draft.Slots[0].Note=="edited while revoke waits");
+            }
+            finally{holder.Dispose();await finish;}
+        }
+        var cleanupStatus=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+        Check("CR03 delayed revoke settles before finalization gate opens",!launchFinalizing&&cleanupStatus.Entries?.Single(e=>e.Plan.Id==cleanupItem.Id).State=="Revoked");
         Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE",null);ReviewKillMonitor();await RefreshAsync();
         Check("CR03 monitor healthy after cancel",status is{Ok:true});
 

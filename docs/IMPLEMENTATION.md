@@ -288,3 +288,123 @@ powershell -NoProfile -File scripts/test.ps1
 - `task_verify run` 当前仍为 **unverified / project-or-git-baseline-unavailable，checks=[]**；没有 operator-configured passed/failed 项。上述手动通过结果与新测试待评审状态分别报告。请评审新增回归和调用接入，在后续用户回合建立新基线。
 - 完整 spec 目标未关闭：第 6、8 节中真实 Pi 交互、所有分屏布局、系统 DPI/Narrator、高对比度全矩阵、真实压力/长时稳定性和正式签名/.NET10 分发仍未完整验收。本轮没有补做命令超时、结构化错误码、终端定位等额外功能，不将 12 项修复当作全部 spec 完成。
 
+
+## 11. 评审后续修正（2026-11-10）
+
+承接第 10 节，处理评审提出的三项残余：CR12 只覆盖同批、CR06 账本无上界、CR01 策略布尔未披露。runner、阈值和既有断言未修改；以下结果均为手动执行，operator 基线仍未建立。
+
+### CR12：活动会话工作目录纳入预检
+
+- 问题：第 10 节的预检只比较同一批次内的目标。对已运行会话占用的工作目录，仍由 monitor 在 reserve 阶段拒绝，而那时 worktree、分支和准备记录已经写完——正是 CR12 要消除的顺序。
+- 修复：`WorkspacePreparer.PrepareAsync` 增加可选 `activeWorkspaces`；App 从最近一次 status 取所有非终态 agent 的 `Plan.Workspace` 传入。`EnsureBatchTargetsDistinct` 在写任何 Git/准备记录之前，把每个独立目标与活动工作区做路径包含比较（与 monitor 的 `Overlaps` 同一判据）。直接目录计划不写 worktree，仍由 reserve 拒绝，不重复检查。
+- 回归：`CR12 active session workspace also blocks the batch before Git writes`——活动工作区等于存放根时，无新增准备/工作目录记录、worktree 列表与 launcher 分支不变、目标目录无写入；活动工作区不相交时同一 draft 仍能准备两项。
+- 残余：这是准备开始时的快照比较；准备期间新出现的会话仍由 reserve 兜底（reserve 在任何进程创建之前）。
+
+### CR06：账本上界
+
+- 问题：`EnsureEntryRepresentable` 允许单条接近 1 MiB，账本终态记录从不裁剪，而 `Store.Read` 在 8 MiB 处拒绝整份文件；一旦触发，`ledgerBroken` 会永久拒绝启动，只能手工修 `control.json`。这与 CONTRACTS C4「状态事件有界落盘」相悖。
+- 修复：`Monitor.Save()` 先 `PruneLedger()`，按最旧优先裁剪**终态**记录直到序列化后 ≤ 6 MiB；活动记录永不裁剪。reserve 最多 4 个 Agent + 1 个 Git 计划、每条 ≤ 1 MiB，因此活动部分本身留在预算内，8 MiB 读取上限留出 2 MiB 余量。
+- 回归：`CR06 ledger stays readable while active reservations survive pruning`——120 条终态（每条 60 000 字符参数）+ 1 条 Pending，序列化后超过 6 MiB；`Save()` 后发布文件 ≈5.98 MiB（本次运行 6 271 575 字节，随夹具路径长度略变），`Store.Read<Ledger>` 可读回，Pending 预约参数逐字保留，最新终态记录未被裁掉，记录数确实减少。
+- 残余：已经超过 8 MiB 或已损坏的历史账本无法自动恢复（读取阶段就失败），仍需人工处理；本轮只保证今后不再增长到该边界。
+
+### CR01：两枚策略布尔仍可静默缺省（已披露，未改 schema）
+
+- `Slot.RequiresDirectory` 与 `Draft.IsPortableTemplate` 使用 `WhenWritingDefault`，缺失时静默取 false。它们不能简单加 `[JsonRequired]`：旧配置文件本来就不写 false 值，加了等于破坏性 schema 变更。
+- 影响边界：手工删字段的 portable 组合会从「必须重新指定目录」退化为「继承新项目」，通用组合会退化为「绑定组合」。这与 CR01「不能靠对象初始化器改变执行语义」属于同一类残余。
+- 处理：本轮只披露、不扩大改动。要关闭需升 schema 并做显式迁移（把缺失值当作迁移事件，而不是默认值）。
+
+### 当时未处理（本轮处理结果见第 12 节）
+
+- `EnsureMonitorAsync` / `SendCoreAsync(ensureMonitor)` 仍把 400 ms 连接超时一律当作「监控器不存在」；单实例管道在忙时会空拉一个立即退出的 Worker。
+- 取消后的撤销在 `SetBusy(false)` 之前完成，每项 8 秒超时，最坏情况配置区锁定约 32 秒。
+- 撤销移除记录不随模板恢复/项目切换失效，可能把旧项目的 slot 插回新配置。
+- `CheckCommandsAsync` 的正确性仍依赖「最后一个循环判断到 finally 之间没有 await」这一约定，只有实现者知道。
+- 单条活动记录不可表示时整个 status 失败，UI 侧没有撤销入口。
+
+### 验证
+
+- `dotnet build AgentLauncher.sln -c Release`：0 警告 / 0 错误。
+- `powershell -NoProfile -File scripts/test.ps1`：**19 模型/原生、85 集成、94 WPF、5 原型、5 浏览器检查通过**，未使用 SkipUi/SkipBrowser。证据：`artifacts/integration-results.json`（88 条证据，85 项带断言）、`artifacts/ui/ui-checks.json`、`artifacts/prototype-browser-results.json`、`artifacts/review-followup-20261110.json`；集成根 `D:/Temp/User/AgentLauncher-tests-integration-9daf63b4bf274645bbb5a54e6d924c8e`。
+- `artifacts/preview` 已按本轮源码重新发布，哈希见 `review-followup-20261110.json`。
+- 新增两项回归仍待评审；本轮只覆盖上述条目，不改变第 6、8 节的未验收范围，也不把手动门禁称为 spec 验收。
+
+## 12. 评审清理与取消交互补齐（2026-11-10）
+
+继续处理第 11 节列出的五项后续工作，同时收拢重复的目标目录核对、完善错误诊断并同步 CONTRACTS。所有改动留在当前工作树，未提交或发布到远端。
+
+### 行为与边界
+
+| 条目 | 实现与回归 |
+| --- | --- |
+| CR10 忙碌管道 | 两条监控启动路径在探测超时后，先读取最多 32 字节的 PID 提示并核对存活 Worker 路径；确认已有 Worker 时继续等待连接。真实单实例管道被占住 1.2 秒时，并发 status/reserve 都成功，测试日志证明未尝试额外启动。PID 提示不参与授权，实际单实例仍由 mutex 保证；启动/退出竞态不保证零冗余进程 |
+| CR06 异常活动记录 | 超界单条只从本次 status 省略，消息使用数量与最多四个 ID，避免超长名称再次撑爆响应。返回 `Ok=false` 和准入原因，服务端 reserve/begin 同样拒绝新启动；其他完整记录仍能回传和撤销。新计划的单帧检测预留 4 KiB 状态头余量，1 MiB 帧上限不变。回归用超长中文名称/参数验证真实编码、解码、准入拒绝、同伴撤销和原账本不被改写 |
+| CR03 取消后的界面 | 启动与单项重试统一通过 `FinishLaunchAsync`：停止后续提交后，先解锁配置，再等待撤销；不在 try 分支重复等待同一轮取消撤销。reserve 未确认后的补偿也通过通知先解锁。token/finalization 门禁独立于 Pending 列表，清理过程中即使刷新清空 ID、修改草稿，也不能发起下一次启动或重试；测试用真实占用管道验证等待期间可编辑、清理后授权 Revoked |
+| CR09 撤销移除作用域 | 手动/选择/拖入项目均走 `SelectProject`，补上最近项目入口；实际项目变化、命名组合和 LastEdited 恢复清除旧 undo 并刷新入口。同项目选择及无关会话重绘保留 undo。新增五项 UI 断言 |
+| CR07 检查消费者 | 在代码与 CONTRACTS 中记录单 Dispatcher 消费者、共享任务以及末次循环判断至 finally 无 await 的不变量；一次性测试暂停让草稿确定在检查过程中修改，验证同一等待任务最终消费最新目录，完成后还能启动新检查 |
+| 可维护性与诊断 | 两处目录采纳判断共用 `EnsureTargetAdoptable`，原有目录替换/恢复回归继续约束行为；null 模板断言要求实际结构错误；反射夹具缺成员时抛带字段/方法名的异常，避免空引用遮蔽失败原因 |
+
+已省略的超界记录自身仍没有 UI 撤销入口，需人工核对 `control.json` 与备份；本轮解决的是异常单条拖垮其他记录的可见性/撤销能力。不会把异常记录裁短后当作完整执行计划，也不会释放其预算/目录占用。大于 8 MiB 的旧账本仍不能自动读取/修复；CR01 两枚布尔的 schema 兼容问题仍按第 11 节披露。
+
+### 验证与证据
+
+- 正常 Release 与 `INTEGRATION_TESTS` 构建均通过，0 警告 / 0 错误。原命令 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test.ps1` **exit 0，167.35 秒**：**19 模型/原生、87 集成、108 WPF、5 原型、5 浏览器检查通过**；未跳过阶段，新增 2 项集成、14 项 WPF 断言。集成报告含 90 条证据、87 项断言、0 失败。
+- 证据：`artifacts/review-cleanup-20261110.json`、`artifacts/integration-results.json`、`artifacts/ui/ui-checks.json`、`artifacts/prototype-browser-results.json`；完整日志 `D:/Temp/review-cleanup-gate.log`，集成根 `D:/Temp/User/AgentLauncher-tests-integration-663ae20fbc084f4a9864cf5ad24df521`。本轮结果覆盖旧的通用报告，§11 的 `review-followup-20261110.json` 保留为上一轮记录。
+- `scripts/build.ps1` 重新发布 `artifacts/preview`；四个自有程序集哈希及测试标记扫描结果存入本轮证据。Worker 无参数 smoke 返回预期 exit 2。没有用真实用户配置打开 GUI；WPF 图像仍只是 120 DPI 内部渲染，不是完整系统 DPI/读屏验收。
+- 主动 LSP 探测 8 个修改文件未取得可确认结果（5 unavailable、3 inconclusive），不能以零诊断宣称 LSP 通过；静态/编译依据是上述成功构建和原仓库测试。
+- 新增两个测试专用观测点：`AGENT_LAUNCHER_MONITOR_SPAWN_LOG` 记录启动尝试，`commandCheckPause` 确定性暂停一次目录检查；两者仅在 `INTEGRATION_TESTS` 编译。不修改 runner、原 30 秒 WPF 超时、资源预算或既有断言来获得通过。
+- 新增回归仍待评审；本轮没有可调用的 operator `task_verify` 工具，沿用上一轮 unverified 状态，手动门禁不替代 operator 基线或完整 spec 验收。会话 UI 拆分到独立 partial 文件属于后续组织性重构，本轮未做。
+
+## 13. 启动门禁与关闭收尾五项修复（2026-11-10）
+
+- `MainWindow.xaml.cs`：状态响应只有 `Ok=true` 且明确报告同一 ID 已离开 Pending，才释放本地提交记录；缺失 ID、失败响应不会丢弃撤销所有权。正常启动和单项重试共享可等待的 `launchTask`，显式停止保留 `cancelTask`；被拒绝的重复入口不覆盖原任务。关闭时禁止新提交、防重复关闭，等待启动补偿、显式撤销、命令检查与配置保存；不终止已运行 Agent。
+  **后续修正：本段的“必须明确看到终态”策略不再适用，现由第 15 节的提交代次与完整活动快照协调取代。** 终态可合法省略/裁剪，不能依赖永久可见。
+- 项目路径 Enter 与失焦共用提交和目录校验，保留焦点，非法目录阻止启动；Ctrl+Enter 快捷键保持原义。收尾提示分别表达取消、普通启动收尾、预约失败补偿及关闭等待，不再把禁用按钮说成可以启动。CLI 查找完成按当前 busy 状态恢复按钮。
+- 根因：把“状态快照缺少 ID”当成完成证据；把“配置已解锁”当成操作已结束。准备目录及内部准备记录可复用，但 `WorkspacePreparer.PrepareAsync` 返回前会生成新的 attempt/batch ID；reserve 的同 ID 幂等和单次 begin 授权只约束同一尝试，不能据此排除重复调用 Prepare 后的重复批次风险。本轮用提交代次保护入口，未执行真实重复 Agent 场景。
+- 一次性隔离 WPF 探针使用真实 MainWindow、路径键盘事件与真实 IPC 客户端，由受控命名管道服务器固定迟到响应和撤销时序；不启动 Agent，不提交 Terminal。固定探针在修改前 **4 通过 / 12 失败**，修改后 **16 通过 / 0 失败**。证据：`artifacts/five-fixes-red/results.json`、`artifacts/five-fixes-green/results.json`；当前两张 WPF 渲染图已打开检查。首次探针有一个串联状态夹具问题，修正为独立条件并加强关闭事件时序断言后才记录上述红/绿结果，未弱化断言。
+- 原 WPF `--ui-check`：**exit 0，108 项通过，11.31 秒**，未修改原 30 秒限制、既有测试、runner 或资源阈值；报告 `artifacts/five-fixes-ui/ui-checks.json`，120 DPI。测试专用 App/Worker 发布及正常 `scripts/build.ps1` 发布均成功；`artifacts/preview` 已更新。
+- `task_verify run`：**unverified / project-or-git-baseline-unavailable，checks=[]**；operator passed/failed 均无执行项，手动通过不替代基线。临时探针源码归档 `artifacts/five-fixes-probe.zip` 供评审，不接入固定测试集；新增验证输入本身仍待评审。
+- 本轮未跑完整原生/集成/浏览器门禁，未做系统 DPI/Narrator 全矩阵、真实 Agent 压力或两小时稳定性验收。没有改布局、XAML 或菜单文案；额外的“更多”和重试按钮交互建议不属于本次批准的五项。
+
+## 14. 实际分屏外观、Omp 发现与低开销验证（2026-11-10）
+
+### 实现与不变量
+
+- 新增 Windows 层 `TerminalAppearance`，由原 `Commands.SubmitTerminal` 入口设置当前窗格的内置 `One Half Dark` 配色、蓝色标签、稳定的「序号 / Agent / 项目」标题和正确工作目录。两项显式等分，多项窗口最大化，完成布局后焦点回第一项；原 1/2/3/4 项布局逻辑、结构化参数、批次 ID、claim、Job 与资源预算不变。
+- 不写用户 `settings.json`，不安装 Terminal profile fragment；官方 Terminal 的 fragment 目录不热加载，不能用新 profile 已立即可用作假设。系统高对比度或无法确认配色模式时，不覆盖 Terminal 配色。窗口标题过滤控制字符，分号保持 Terminal 转义；真实目录仍按原值传给受保护进程。
+- Runner 在创建 Agent 前只打印一次 UTF-8 加载头部，不输出启动参数或密钥，不运行额外 shell，不持续重绘/抢输入，不对 Agent 自身 TUI 做包裹或改写。Agent 自身配色、登录、初始化仍由对应 CLI 管理；加载提示不声称 Agent 已就绪。
+- `Agents.All` 原本已有 Omp，本轮没有重复添加。验证实际发现 `C:/Users/zhugu/.bun/bin/omp.exe`，`omp --version` 为 **omp/18.18.6**；默认空程序路径通过原 `Commands.Resolve("omp", new())` 自动得到该 exe。配置窗口现在列出已找到 CLI 名称，预览明确说明“启动时自动加载”；不自动运行未勾选项、下载软件或登录账户。
+
+### 实际界面与验证
+
+- Windows Terminal **1.24.12741.0** 注册包可用，PATH 中没有 wt；既有注册包发现路径成功启动。真实左右/上下双分屏均截图检查，中文、空格、分号与 `&` 工作目录逐项一致；标题与初始焦点正确。图中明确标记为**受控轻量程序，不是真实 Agent**，不拿它冒充 Omp 对话验收。
+- 左右分屏场景 **15 项通过**，上下分屏 **13 项通过**：实际 Worker/IPC/Job 受保护自动加载、目录传递、完成回执、预约终结与空闲 Monitor 退出；高对比度分支不注入配色参数，控制字符不能进入窗格标题。报告和截图：`artifacts/terminal-vertical-verified/`、`artifacts/terminal-horizontal/`。
+- 首次终端夹具错误地在 Runner `Started` 后立即要求子程序初始化文件存在；现场截图和随后写出的两份文件证明此时程序已启动。修正夹具为独立等待子程序初始化报告（总等待仍限 15 秒）后重跑，既有断言不弱化；原失败保留在 `artifacts/terminal-vertical/`。该证据同时重申“进程 Started 不等于应用初始化已完成”。
+- 最终源码原 WPF 窄检查 **108 项通过、exit 0、11.59 秒**，仍使用原 30 秒限制；报告 `artifacts/terminal-ui-checks/ui-checks.json`。正常 `scripts/build.ps1` 已重新发布 App/Worker 到 `artifacts/preview`；没有编辑既有测试、runner 或策略。临时 Terminal 探针已移除，固定源码存于 `artifacts/terminal-probe.zip`，作为待评审验证输入，不并入固定测试集。
+
+### 资源测量（各 60 秒 / 30 样本，16 逻辑处理器）
+
+| 场景 | 峰值 Private Bytes | 整机口径平均 CPU | 判读 |
+| --- | ---: | ---: | --- |
+| Monitor + 两 Runner（不含 Terminal、受控子程序或真实 Agent） | 28.85 MiB | 0.0498% | 本次受控 P03 子场景低于 64 MiB / 0.2% |
+| GUI 静置，不做 UIA 操作 | 99.81 MiB | 0.1632% | 本次 P02 子场景低于 100 MiB / 0.5%，余量较小 |
+| GUI 含 UIA 查询、聚焦与截图 | 104.52 MiB | 0.2182% | 超过 100 MiB；保留交互峰值，不覆盖或冒充纯空闲结果 |
+
+原始数据：`artifacts/terminal-vertical-verified/result.json`、`artifacts/terminal-gui-quiet/idle.json`、`artifacts/terminal-gui-idle/idle.json`。Working Set 单独保存，不与 Private Bytes 混算。Terminal 共享进程单次观测 Private Bytes 68.05 MiB / Working Set 103.00 MiB，非本窗格独占值，不计入上述协调层数值。美化没有增加常驻进程、WebView 或刷新动画；这些样本不证明真实 Agent/工具峰值、长期稳定性或相对旧版本的性能改善。
+
+### 未验证范围
+
+- 本机可用物理内存采样约 2.47 GiB；单 Agent 仍需系统保留 `max(3 GiB,total/5)` 加 2 GiB 预算（本机约 5.04 GiB 可用）。真实 Omp 配置界面正确显示资源阻塞，启动按钮禁用，证据 `artifacts/terminal-gui-idle/surface.json` 和 `omp-auto-discovered.png`。未用测试 fake sample 绕过真实 Agent 门禁，**真实 Omp 交互、登录及任务执行尚未验证**；模拟采样仅用于隔离的轻量程序夹具。
+- 本轮实际 Terminal 画面覆盖两种双分屏；未新增三/四 Agent 实机运行、系统高对比度全矩阵、真实压力或两小时稳定性证据。前五项修复的独立红/绿证据保留在第 13 节。
+- operator `task_verify` 缺少项目/基线，手动验证与新增探针评审状态分开报告；不宣称完整 spec 验收完成。
+
+参考：[Terminal 命令行参数源码](https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalApp/AppCommandlineArgs.cpp)、[fragment 加载实现](https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalSettingsModel/CascadiaSettingsSerialization.cpp)。
+
+## 15. 终态省略与提交代次协调（2026-11-10）
+
+- 问题：第 13 节仅接受正面终态证据，忽略 `Worker.Status` 的终态 768 KiB 总限额及 `PruneLedger` 裁剪。合法单条计划可超过历史限额但小于 IPC 帧上限；如果首次查询前已结束，UI 永远看不到该 ID，导致 `submittedAttempts` 永久不清空。
+- 修正：成功预约后，正常启动与单项重试均递增本地 `submissionGeneration`；`RefreshAsync` 发出请求前捕获代次，返回或报错时若代次已变化，整份旧结果丢弃，不覆盖当前状态/撤销所有权。同代次的 `Ok=true`、最终完整分页且非 null 的 Entries 是完整活动快照：仅保留明确仍为 Pending 的提交 ID，允许通过缺失 ID 确认不再待领取；终态历史是否可见不再影响放行。失败响应、缺失 Entries 不释放门禁；不增加自动重试或改变 Worker 协议/历史上限。
+- 独立 WPF 探针直接调用真实 `Worker.Status()`/`PruneLedger()` 生成 800 KiB 合法大条目、历史省略、账本裁剪及混合 Pending 场景。迟到响应场景实际走正常启动与单项重试的 reserve 成功路径，随后移除夹具 Terminal 文件阻止创建真实终端/Agent，再检查旧响应丢弃、取消请求和后续快照放行。夹具初稿在 reserve 响应前取消及串联残留 ID，均纠正为独立边界后固定断言，不改产品或弱化断言去获得红态。
+- 固定探针：旧实现 **14 通过 / 8 失败**（`artifacts/status-generation-red-isolated/result.json`），修复后 **22 通过 / 0 失败**（`artifacts/status-generation-green/result.json`），exit 0、3.68 秒。原 WPF 检查 **108 项通过、exit 0、11.46 秒**，仍为原 30 秒上限，报告 `artifacts/status-generation-ui/ui-checks.json`。绿色界面截图已检查，省略终态后启动按钮重新开放。
+- 正常 App/Worker 已通过 `scripts/build.ps1` 重新发布到 `artifacts/preview`。没有改既有测试、runner、阈值、Terminal 外观或用户配置；新一次性探针是待评审验证输入，不替代 operator 基线。
+- 当前桌面已创建 `D:/Desktop/多 Agent 启动器.lnk`，读回验证目标为 `D:/Users/pj/agent-launcher/artifacts/preview/AgentLauncher.App.exe`、工作目录为完整 preview、参数为空。通过快捷方式实际打开生产 App，并确认界面发现 Pi/Codex/Claude Code/Omp/Kimi/Qoder；没有启动 Agent 或修改用户草稿。当前真实资源检查提示可用内存不足，启动按钮禁用是预期保护，不是门禁卡死。证据 `artifacts/desktop-ready/result.json`。
+- 本轮 `task_verify run` 为 **unverified / project-or-git-baseline-unavailable，checks=[]**，没有 operator passed/failed 执行项。一次性新探针固定源码归档 `artifacts/status-generation-probe.zip` 供评审，临时项目已删除；未更改既有测试或 runner。其他完整 spec 未验收范围不因此关闭。

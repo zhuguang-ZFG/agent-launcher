@@ -33,7 +33,7 @@ public partial class MainWindow
         nullTemplate["Templates"]!["broken"]=null;
         System.IO.File.WriteAllText(configPath,nullTemplate.ToJsonString(Store.Json));
         await LoadAsync();
-        Check("null template value enters fail-closed read-only",readOnly&&RestoreBackupButton.Visibility==Visibility.Visible&&!LaunchButton.IsEnabled);
+        Check("null template value enters fail-closed read-only",readOnly&&RestoreBackupButton.Visibility==Visibility.Visible&&!LaunchButton.IsEnabled&&ErrorText.Text.Contains("配置版本或结构不支持"));
         if(healthyConfig!=null)System.IO.File.WriteAllBytes(configPath,healthyConfig);else System.IO.File.Delete(configPath);
         readOnly=false;// white-box: exit the fail-closed state that production only clears via 恢复备份
         await LoadAsync();ErrorText.Text="";

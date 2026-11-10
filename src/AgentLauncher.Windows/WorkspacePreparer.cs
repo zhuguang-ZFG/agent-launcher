@@ -106,7 +106,7 @@ public sealed class WorkspacePreparer
     }
     private static bool ValidText(string? value)=>!string.IsNullOrWhiteSpace(value)&&!value.Contains('\0');
     private static bool AbsolutePath(string? value)=>ValidText(value)&&Path.IsPathFullyQualified(value!);
-    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct)
+    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null)
     {
         draft.Validate();
         Directory.CreateDirectory(Store.Root);
@@ -143,7 +143,7 @@ public sealed class WorkspacePreparer
             if(record.Digest!=digest)throw new IOException("准备记录摘要不符，禁止重放。");
             if(!StructurallyValid(record,plans))throw new IOException($"准备记录损坏，禁止重放：{preparationPath}");
             // Reject batch target collisions and changed prepared-directory identities before the repair/baseline/completed writes below.
-            EnsureBatchTargetsDistinct(plans,record.Original[0].BatchId,worktreeRoot,draft.DirectoryMode);
+            EnsureBatchTargetsDistinct(plans,record.Original[0].BatchId,worktreeRoot,draft.DirectoryMode,activeWorkspaces);
             EnsureExistingTargetsStable(record,worktreeRoot,record.Original[0].BatchId,draft.DirectoryMode);
             var repaired=false;
             // The draft digest still matches, so slot order is authoritative; keep worktree mapping but re-resolve commands so shim/entry updates are honored.
@@ -156,7 +156,7 @@ public sealed class WorkspacePreparer
             if(record.SchemaVersion!=1||repaired){record.SchemaVersion=1;Store.Save(preparationPath,record);}
             effective=record.Original.Select(p=>record.Completed.GetValueOrDefault(p.Id)??p).ToList();
         }
-        if(record==null){EnsureBatchTargetsDistinct(plans,batch,worktreeRoot,draft.DirectoryMode);record=new(){SchemaVersion=1,Digest=digest,Original=plans};Store.Save(preparationPath,record);}
+        if(record==null){EnsureBatchTargetsDistinct(plans,batch,worktreeRoot,draft.DirectoryMode,activeWorkspaces);record=new(){SchemaVersion=1,Digest=digest,Original=plans};Store.Save(preparationPath,record);}
         plans=effective??record.Original.ToList();batch=record.Original[0].BatchId;
         foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1).ToArray())
         {
@@ -184,11 +184,7 @@ public sealed class WorkspacePreparer
                 var workspacePath=Store.FilePath($"workspaces/{plan.Id:N}.json");
                 var known=File.Exists(workspacePath);var targetExists=Directory.Exists(target);var completed=record.Completed.GetValueOrDefault(plan.Id);
                 // Never adopt a replacement directory: compare the stored physical identity before any intent/completed/progress/record write.
-                if(targetExists&&known)ValidateIntentRecord(workspacePath,root,target,branch,oid);
-                if(!targetExists&&known)throw new IOException("上次准备已中断且目录未找到。请核对工作目录记录；不会自动重复创建或删除分支。");
-                if(!targetExists&&completed!=null)throw new IOException("已准备目录缺失，禁止自动重放；请核对工作目录记录。");
-                if(targetExists&&completed!=null)EnsureCompletedTargetIdentity(completed,target);
-                else if(targetExists&&!known)throw new IOException("目标目录已存在但没有准备意图记录，禁止复用或删除。");
+                EnsureTargetAdoptable(workspacePath,root,target,branch,oid,completed);
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);var drive=new DriveInfo(Path.GetPathRoot(target)!);
                 var reserve=Math.Max(2*ResourcePolicy.GiB,(ulong)drive.TotalSize/20);
                 if((ulong)drive.AvailableFreeSpace<reserve+estimated)throw new IOException("目标盘空间不足以保留余量和检出文件。");
@@ -210,10 +206,11 @@ public sealed class WorkspacePreparer
         // Prepared directories are reusable; launch authorization IDs are always fresh.
         var launchBatch=Guid.NewGuid();return plans.Select(p=>p with{Id=Guid.NewGuid(),BatchId=launchBatch}).ToList();
     }
-    private static void EnsureBatchTargetsDistinct(IReadOnlyList<LaunchItem> plans,Guid batch,string worktreeRoot,string mode)
+    private static void EnsureBatchTargetsDistinct(IReadOnlyList<LaunchItem> plans,Guid batch,string worktreeRoot,string mode,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces)
     {
         if(mode!="isolated")return;
         var isolated=plans.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1).SelectMany(g=>g).Select(p=>p.Id).ToHashSet();
+        // Direct slots never write a worktree, so only isolated targets can mutate disk before the monitor's reserve check.
         if(isolated.Count==0)return;
         // Compare the eventual prepared workspace (actual worktree target), never the destination root: a direct sibling under that root may be valid.
         var eventual=new Dictionary<Guid,string>();
@@ -232,6 +229,13 @@ public sealed class WorkspacePreparer
                 if(plan.Shared&&other.Shared)continue;
                 throw new IOException("独立工作目录目标与同批其他工作目录重叠，已停止；请调整目录模式或位置。");
             }
+            // A target written now must not land inside (or contain) a workspace that is already active. The monitor refuses
+            // that batch at reserve time, which is after the worktree, branch and preparation record exist; check it here first.
+            foreach(var active in activeWorkspaces??[])
+            {
+                if(!SameOrWithin(eventual[plan.Id],active.Path)&&!SameOrWithin(active.Path,eventual[plan.Id]))continue;
+                throw new IOException("独立工作目录目标与正在运行的会话工作目录重叠，已停止；请先结束该会话或更换存放位置。");
+            }
         }
     }
     private static void EnsureExistingTargetsStable(PreparationRecord record,string worktreeRoot,Guid batch,string mode)
@@ -242,21 +246,18 @@ public sealed class WorkspacePreparer
             var root=group.First().Workspace.Path;var baseline=record.Baselines.GetValueOrDefault(group.Key);
             foreach(var plan in group)
             {
-                var target=Path.Combine(worktreeRoot,batch.ToString("N"),"agent-"+plan.Position);
-                var branch=$"launcher/{batch:N}/{plan.Position}";
-                var workspacePath=Store.FilePath($"workspaces/{plan.Id:N}.json");
-                var known=File.Exists(workspacePath);var completed=record.Completed.GetValueOrDefault(plan.Id);
-                if(!Directory.Exists(target))
-                {
-                    if(known)throw new IOException("上次准备已中断且目录未找到。请核对工作目录记录；不会自动重复创建或删除分支。");
-                    if(completed!=null)throw new IOException("已准备目录缺失，禁止自动重放；请核对工作目录记录。");
-                    continue;
-                }
-                if(known)ValidateIntentRecord(workspacePath,root,target,branch,baseline);
-                if(completed!=null)EnsureCompletedTargetIdentity(completed,target);
-                else if(!known)throw new IOException("目标目录已存在但没有准备意图记录，禁止复用或删除。");
+                EnsureTargetAdoptable(Store.FilePath($"workspaces/{plan.Id:N}.json"),root,Path.Combine(worktreeRoot,batch.ToString("N"),"agent-"+plan.Position),$"launcher/{batch:N}/{plan.Position}",baseline,record.Completed.GetValueOrDefault(plan.Id));
             }
         }
+    }
+    private static void EnsureTargetAdoptable(string workspacePath,string root,string target,string branch,string? oid,LaunchItem? completed)
+    {
+        var known=File.Exists(workspacePath);var targetExists=Directory.Exists(target);
+        if(targetExists&&known)ValidateIntentRecord(workspacePath,root,target,branch,oid);
+        if(!targetExists&&known)throw new IOException("上次准备已中断且目录未找到。请核对工作目录记录；不会自动重复创建或删除分支。");
+        if(!targetExists&&completed!=null)throw new IOException("已准备目录缺失，禁止自动重放；请核对工作目录记录。");
+        if(targetExists&&completed!=null)EnsureCompletedTargetIdentity(completed,target);
+        else if(targetExists&&!known)throw new IOException("目标目录已存在但没有准备意图记录，禁止复用或删除。");
     }
     private static void ValidateIntentRecord(string path,string root,string target,string branch,string? oid)
     {

@@ -137,5 +137,28 @@ internal static class WorkspaceReviewChecks
             Assert(plans.Single(p=>p.Position==3).Cwd==PhysicalDirectory.Resolve(sibling).Path,"直接兄弟目录被改写");
             Assert(prepared[0].Workspace.Key!=prepared[1].Workspace.Key,"独立目标未分离");
         });
+        await TestWithCleanup("CR12 active session workspace also blocks the batch before Git writes",async()=>{
+            var root=OwnedRoot();var repo=Path.Combine(root,"source");await NewRepository(repo);
+            var destination=Path.Combine(root,"destination");Directory.CreateDirectory(destination);
+            var draft=Isolated(repo,[0,1]);
+            // An earlier single-slot launch may point straight at the destination root; the monitor refuses that overlap at reserve,
+            // which is after the worktree, branch and preparation record exist. The preflight must refuse it before any write.
+            var active=PhysicalDirectory.Workspace(destination);
+            var beforePreparation=PreparationFiles();var beforeWorkspaces=WorkspaceFiles();
+            var beforeWorktrees=await GitChecked(repo,"worktree","list","--porcelain");
+            var beforeBranches=await GitChecked(repo,"for-each-ref","--format=%(refname)","refs/heads/launcher");
+            var beforeDestination=Directory.GetFileSystemEntries(destination).Order().ToArray();
+            IOException? rejected=null;
+            try{await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,new[]{active});}catch(IOException e){rejected=e;}
+            Assert(rejected!=null&&rejected.Message.Contains("重叠"),"运行中会话占用的目标未被预检拒绝："+(rejected?.Message??"准备成功"));
+            Assert(PreparationFiles().SetEquals(beforePreparation),"拒绝后新增了准备记录");
+            Assert(WorkspaceFiles().SetEquals(beforeWorkspaces),"拒绝后新增了工作目录记录");
+            Assert(await GitChecked(repo,"worktree","list","--porcelain")==beforeWorktrees,"拒绝后 Git 工作树发生变化");
+            Assert(await GitChecked(repo,"for-each-ref","--format=%(refname)","refs/heads/launcher")==beforeBranches,"拒绝后 Git 分支发生变化");
+            Assert(Directory.GetFileSystemEntries(destination).Order().SequenceEqual(beforeDestination),"拒绝后目标目录出现写入");
+            var elsewhere=Path.Combine(root,"active-elsewhere");Directory.CreateDirectory(elsewhere);
+            var plans=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,new[]{PhysicalDirectory.Workspace(elsewhere)});
+            Assert(plans.Count==2&&plans[0].Workspace.Key!=plans[1].Workspace.Key,"不重叠的活动会话工作区被误拒");
+        });
     }
 }
