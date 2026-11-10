@@ -117,5 +117,6 @@ Test("F12 portable templates inherit new project without weakening directory pol
  Assert(c.Draft.Slots[3].RequiresDirectory,"portable restore silently dropped an explicit directory requirement");
  var restored=JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(c,Store.Json),Store.Json)!;Assert(restored.Templates["portable"].IsPortableTemplate&&restored.Draft.Slots[3].RequiresDirectory,"directory binding lost during persistence");
 });
+ConfigurationReviewChecks.Run(Test,temp);
 Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");
 Store.Save(Path.Combine(temp,"results.json"),new{passed,failures});return failures.Count==0?0:1;
