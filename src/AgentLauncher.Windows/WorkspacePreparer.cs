@@ -8,11 +8,11 @@ namespace AgentLauncher.Windows;
 public sealed record CommandResult(int Code,string Output,string Error);
 public static class ControlledCommand
 {
-    public static async Task<CommandResult> RunAsync(CommandSpec command,string cwd,CancellationToken ct=default,Action<string>? outputLine=null)
+    public static async Task<CommandResult> RunAsync(CommandSpec command,string cwd,CancellationToken ct=default,Action<string>? outputLine=null,ResourceSettings? resource=null,long? draftRevision=null)
     {
         ct.ThrowIfCancellationRequested();
-        var item=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"Git 准备",cwd,PhysicalDirectory.Workspace(cwd),false,command,ResourcePolicy.GitJobMemoryLimit,"git",PlanningBytes:ResourcePolicy.DefaultGitPlanningBytes,ResourceMode:"practical");
-        var reserve=await Ipc.ReserveWithCleanupAsync([item],ct);if(!reserve.Ok)throw new IOException(reserve.Message);
+        var item=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"Git 准备",cwd,PhysicalDirectory.Workspace(cwd),false,command,ResourcePolicy.GitJobMemoryLimit,"git",PlanningBytes:ResourcePolicy.DefaultGitPlanningBytes,ResourceMode:resource?.Mode??"practical");
+        var reserve=await Ipc.ReserveWithCleanupAsync([item],ct,draftRevision:draftRevision,planDigest:ResourcePolicy.PlanDigest([item]));if(!reserve.Ok)throw new IOException(reserve.Message);
         Process? process=null;
         try
         {
@@ -72,6 +72,8 @@ public sealed class WorkspacePreparer
 {
     private readonly string git=Commands.FindExe("git.exe")??"";
     private readonly string? destinationRoot;
+    private ResourceSettings resourceSettings=new();
+    private long draftRevision;
     public WorkspacePreparer(string? destinationRoot=null){this.destinationRoot=string.IsNullOrWhiteSpace(destinationRoot)?null:destinationRoot;}
     private static bool StructurallyValid(PreparationRecord record,IReadOnlyList<LaunchItem> expected)
     {
@@ -108,6 +110,8 @@ public sealed class WorkspacePreparer
     private static bool AbsolutePath(string? value)=>ValidText(value)&&Path.IsPathFullyQualified(value!);
     public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null)
     {
+        resourceSettings=draft.Resource??new ResourceSettings();
+        draftRevision=draft.Revision;
         draft.Validate();
         Directory.CreateDirectory(Store.Root);
         await using var preparationLock=new FileStream(Store.FilePath("preparation.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
@@ -340,7 +344,7 @@ public sealed class WorkspacePreparer
     }
     private async Task<string> Git(string cwd,string[] args,CancellationToken ct)
     {
-        var result=await ControlledCommand.RunAsync(new(git,args,"exe"),cwd,ct);
+        var result=await ControlledCommand.RunAsync(new(git,args,"exe"),cwd,ct,resource:resourceSettings,draftRevision:draftRevision);
         if(result.Code!=0)throw new IOException($"Git 准备失败（{result.Code}）：{result.Error.Trim()}");return result.Output;
     }
 }

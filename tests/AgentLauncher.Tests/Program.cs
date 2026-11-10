@@ -40,6 +40,20 @@ Test("G1 Job survives monitor handle close while runner retains ownership",()=>{
  using var p=new ProtectedProcess(new(Environment.ProcessPath!,["--hold","1200"],"exe"),temp,root,job);p.Resume();job.Dispose();using var reopened=new Job(name,openOnly:true);Assert(reopened.Members().Contains(p.Process.Id),"Job lost after monitor close");Assert(p.Process.WaitForExit(4000),"child timeout");
 });
 Test("G1 CPU cap configured at aggregate root",()=>{using var root=new Job(@"Local\AL-cap-"+Guid.NewGuid(),root:true);var size=Marshal.SizeOf<Native.CpuRate>();var buffer=Marshal.AllocHGlobal(size);try{Native.Check(Native.QueryInformationJobObject(root.Handle,15,buffer,(uint)size,IntPtr.Zero));var rate=Marshal.PtrToStructure<Native.CpuRate>(buffer);Assert(rate.Rate==3500&&(rate.Flags&4)!=0,"CPU cap not configured");}finally{Marshal.FreeHGlobal(buffer);}});
+Test("ACC-R05 reopening an existing root Job does not change CPU limits",()=>{
+ var name=@"Local\AL-reuse-"+Guid.NewGuid();
+ using var first=new Job(name,root:true,cpuRate:ResourcePolicy.DefaultCpuRate);
+ using var second=new Job(name,root:true,cpuRate:4000);
+ var size=Marshal.SizeOf<Native.CpuRate>();var buffer=Marshal.AllocHGlobal(size);
+ try
+ {
+  Native.Check(Native.QueryInformationJobObject(second.Handle,15,buffer,(uint)size,IntPtr.Zero));
+  var rate=Marshal.PtrToStructure<Native.CpuRate>(buffer);
+  Assert(rate.Rate==3500&&(rate.Flags&4)!=0,"reopened root Job CPU was changed to "+rate.Rate);
+  Assert(second.CreatedNew==false&&first.CreatedNew,"existing root Job was not detected");
+ }
+ finally{Marshal.FreeHGlobal(buffer);}
+});
 // F9 regression: each shim template's own node-selection semantics. Template text mirrors the private consts in Commands.Resolve; drift here means the adapter contract changed.
 const string piShimTemplate="""
 @ECHO off
@@ -122,6 +136,7 @@ ResourcePolicyChecks.RunMigration(Test,temp);
 ResourcePolicyChecks.RunReviewFixes(Test,temp);
 ResourcePolicyChecks.RunDecisions(Test);
 ResourcePolicyChecks.RunWaivers(Test);
+ResourcePolicyChecks.RunAuthorityFixes(Test);
 ConfigurationReviewChecks.Run(Test,temp);
 Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");
 Store.Save(Path.Combine(temp,"results.json"),new{passed,failures});return failures.Count==0?0:1;

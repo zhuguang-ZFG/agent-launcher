@@ -144,7 +144,8 @@ public static class ResourcePolicy
         MemorySnapshot sample,
         ResourcePolicySnapshot policy,
         IReadOnlyList<BudgetItem> reserved,
-        IReadOnlyList<BudgetItem> requested)
+        IReadOnlyList<BudgetItem> requested,
+        bool includeSoftBudget = true)
     {
         reserved ??= [];
         requested ??= [];
@@ -159,7 +160,7 @@ public static class ResourcePolicy
         AdmissionDecision Result(AdmissionKind kind, string reason, bool sampleValid) =>
             new(kind, reason, planningRequested, planningReserved, capRequested, capReserved, soft, floor, commitFloor, sampleValid);
 
-        if (!SampleValid(sample) || sample is null)
+        if (!IsSampleValid(sample) || sample is null)
             return Result(AdmissionKind.Deny, "系统采样无效，请稍后重试。", false);
 
         try { ValidateSnapshot(policy, sample.Total, sample.CommitLimit); }
@@ -172,7 +173,7 @@ public static class ResourcePolicy
         if (sample.CpuPercent >= CpuBusyPercent)
             return Result(AdmissionKind.Deny, "整机 CPU 正忙，稍等片刻再启动。", true);
 
-        if (SumExceeds(capRequested, capReserved, soft))
+        if (includeSoftBudget && SumExceeds(capRequested, capReserved, soft))
         {
             if (policy.Mode == "conservative")
                 return Result(AdmissionKind.Deny, "本次要用的内存超过总预算，请少勾选几个 Agent。", true);
@@ -190,19 +191,21 @@ public static class ResourcePolicy
 
     public static string PlanDigest(IEnumerable<LaunchItem> items)
     {
-        var builder = new System.Text.StringBuilder();
-        foreach (var item in items ?? [])
+        var payload = System.Text.Json.JsonSerializer.Serialize((items ?? []).Select(item => new
         {
-            builder.Append(item.Id.ToString("N")).Append('\n')
-                .Append(item.Kind).Append('\n')
-                .Append(item.Name).Append('\n')
-                .Append(item.Cwd).Append('\n')
-                .Append(item.Command.Executable).Append('\n')
-                .Append(string.Join('\u0001', item.Command.Arguments ?? [])).Append('\n')
-                .Append(item.Budget.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\n')
-                .Append((item.PlanningBytes ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
-        }
-        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+            Id = item.Id.ToString("N"),
+            Kind = item.Kind ?? "agent",
+            Name = item.Name ?? "",
+            Cwd = item.Cwd ?? "",
+            WorkspaceKey = item.Workspace.Key ?? "",
+            WorkspacePath = item.Workspace.Path ?? "",
+            Shared = item.Shared,
+            Executable = item.Command.Executable ?? "",
+            Arguments = item.Command.Arguments ?? Array.Empty<string>(),
+            Budget = item.Budget,
+            PlanningBytes = item.PlanningBytes ?? 0
+        }));
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
     }
 
     public static void ValidateSnapshot(ResourcePolicySnapshot policy, ulong totalPhysical, ulong commitLimit)
@@ -222,14 +225,79 @@ public static class ResourcePolicy
             throw new InvalidDataException("Git 资源上限不可自定义。");
         if (policy.PhysicalFloor == 0 || policy.PhysicalFloor < MinCustomPhysicalFloor)
             throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");
-        var maxPhysical = Min(totalPhysical / 2, MaxCustomPhysicalFloor);
-        if (policy.PhysicalFloor > maxPhysical)
-            throw new InvalidDataException("物理临界余量不能超过 8 GiB。");
+        if (policy.PhysicalFloor != DefaultPhysicalFloor(totalPhysical))
+        {
+            var maxPhysical = Min(totalPhysical / 2, MaxCustomPhysicalFloor);
+            if (policy.PhysicalFloor > maxPhysical)
+                throw new InvalidDataException("物理临界余量不能超过 8 GiB。");
+        }
         if (policy.CommitFloor == 0 || policy.CommitFloor < MinCustomCommitFloor)
             throw new InvalidDataException("提交临界余量不能低于下限，也不能为 0。");
-        var maxCommit = Min(commitLimit / 4, MaxCustomCommitFloor);
-        if (policy.CommitFloor > maxCommit)
-            throw new InvalidDataException("提交临界余量不能超过 16 GiB。");
+        if (policy.CommitFloor != DefaultCommitFloor(commitLimit))
+        {
+            var maxCommit = Min(commitLimit / 4, MaxCustomCommitFloor);
+            if (policy.CommitFloor > maxCommit)
+                throw new InvalidDataException("提交临界余量不能超过 16 GiB。");
+        }
+    }
+
+    public static void ValidateSettings(ResourceSettings settings, ulong totalPhysical, ulong commitLimit)
+    {
+        settings ??= new ResourceSettings();
+        if (settings.Mode is not ("conservative" or "practical" or "custom"))
+            throw new InvalidDataException("资源配置不完整或不支持。");
+        var maxJob = totalPhysical < MaxJobMemoryLimit ? totalPhysical : MaxJobMemoryLimit;
+        if (settings.JobMemoryLimit < MinJobMemoryLimit)
+            throw new InvalidDataException("Job 内存上限不能低于 1 GiB。");
+        if (settings.JobMemoryLimit > maxJob)
+            throw new InvalidDataException("Job 内存上限不能超过 8 GiB。");
+        if (settings.PlanningBytes < MinPlanningBytes || settings.PlanningBytes > settings.JobMemoryLimit)
+            throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
+        if (settings.CpuRate < MinCpuRate || settings.CpuRate > MaxCpuRate)
+            throw new InvalidDataException("CPU 封顶必须在 15% 到 80% 之间。");
+        if (settings.PhysicalFloorOverride is { } physical)
+        {
+            if (physical == 0 || physical < MinCustomPhysicalFloor)
+                throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");
+            var maxPhysical = Min(totalPhysical / 2, MaxCustomPhysicalFloor);
+            if (physical > maxPhysical)
+                throw new InvalidDataException("物理临界余量不能超过 8 GiB。");
+        }
+        if (settings.CommitFloorOverride is { } commit)
+        {
+            if (commit == 0 || commit < MinCustomCommitFloor)
+                throw new InvalidDataException("提交临界余量不能低于下限，也不能为 0。");
+            var maxCommit = Min(commitLimit / 4, MaxCustomCommitFloor);
+            if (commit > maxCommit)
+                throw new InvalidDataException("提交临界余量不能超过 16 GiB。");
+        }
+    }
+
+    public static void ValidateLaunchItem(LaunchItem item, ResourcePolicySnapshot policy, ulong totalPhysical)
+    {
+        if (item is null) throw new InvalidDataException("执行计划不支持。");
+        if (item.Kind == "git")
+        {
+            if (item.Budget != GitJobMemoryLimit)
+                throw new InvalidDataException("执行计划不支持。");
+            if (item.PlanningBytes is { } gitPlanning && gitPlanning != 0 && gitPlanning != DefaultGitPlanningBytes)
+                throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
+            return;
+        }
+        if (item.Kind is not (null or "agent"))
+            throw new InvalidDataException("执行计划不支持。");
+        var maxJob = totalPhysical < MaxJobMemoryLimit ? totalPhysical : MaxJobMemoryLimit;
+        if (item.Budget < MinJobMemoryLimit || item.Budget > maxJob)
+            throw new InvalidDataException(item.Budget > totalPhysical ? "Job 内存上限不能超过可用机器总量。" : "Job 内存上限不能超过 8 GiB。");
+        if (item.Budget != policy.JobMemoryLimit)
+            throw new InvalidDataException("启动项 Job 上限与当前策略不一致。");
+        if (item.PlanningBytes is { } planning && planning != 0)
+        {
+            if (planning < MinPlanningBytes || planning > item.Budget)
+                throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
+            if (planning != policy.PlanningBytes)
+                throw new InvalidDataException("启动项规划估算与当前策略不一致。");
+        }
     }
 
     public static BudgetItem BudgetOf(LaunchItem plan)
@@ -242,7 +310,7 @@ public static class ResourcePolicy
             git ? GitJobMemoryLimit : plan.Budget);
     }
 
-    static bool SampleValid(MemorySnapshot? sample)
+    public static bool IsSampleValid(MemorySnapshot? sample)
     {
         if (sample is null) return false;
         if (DateTimeOffset.UtcNow - sample.At > TimeSpan.FromSeconds(SampleTtlSeconds)) return false;

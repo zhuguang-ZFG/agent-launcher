@@ -506,6 +506,15 @@ public partial class MainWindow : Window
         ProgressText.Text=RevokeSummary(report);
         if(report.Unknown>0)ErrorText.Text=$"撤销结果未确认：{report.Unknown} 项可能仍在等待领取；请在运行记录中核对。";
     }
+    private (ResourcePolicySnapshot Policy,string Hash,string Digest,long Revision,Guid[] Slots) ReservationBindings(LaunchItem[] items)
+    {
+        var memory=status?.Memory??throw new IOException("资源不可用");
+        var settings=config.Draft.Resource??new ResourceSettings();
+        var policy=ResourcePolicy.SnapshotFor(settings,memory.Total,memory.CommitLimit);
+        ResourcePolicy.ValidateSettings(settings,memory.Total,memory.CommitLimit);
+        var slots=items.Select(i=>i.Id).ToArray();
+        return (policy,ResourcePolicy.PolicyHash(policy),ResourcePolicy.PlanDigest(items),config.Draft.Revision,slots);
+    }
     private Task RetrySessionAsync(Guid id)
     {
         if(closeRequested||busy||launchFinalizing||launchCancellation!=null||!cancelTask.IsCompleted||readOnly||submittedAttempts.Length>0)return Task.CompletedTask;
@@ -522,7 +531,8 @@ public partial class MainWindow : Window
             if(previous.State is not ("FailedBeforeStart" or "Revoked"))throw new IOException("不能证明此项未运行，已阻止重复提交。");
             var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));
             var retry=previous.Plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=previous.Plan.Id};
-            var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token,UnlockForCleanup);if(!reserve.Ok)throw new IOException(reserve.Message);
+            var retryBindings=ReservationBindings([retry]);
+            var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token,UnlockForCleanup,retryBindings.Policy,retryBindings.Revision,retryBindings.Hash,retryBindings.Digest,retryBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=config.Draft.Revision;submittedAttempts=[retry.Id];submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
             try{await Task.Run(()=>Commands.SubmitTerminal(terminal,[retry],"vertical"));}
@@ -556,7 +566,9 @@ public partial class MainWindow : Window
             var activeWorkspaces=status?.Entries?.Where(x=>!Store.IsTerminal(x)&&x.Plan.Kind=="agent").Select(x=>x.Plan.Workspace).ToArray()??[];
             var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token,activeWorkspaces));
             launchCancellation.Token.ThrowIfCancellationRequested();
-            var reserve=await Ipc.ReserveWithCleanupAsync(plans.ToArray(),launchCancellation.Token,UnlockForCleanup);if(!reserve.Ok)throw new IOException(reserve.Message);
+            var planned=plans.ToArray();
+            var launchBindings=ReservationBindings(planned);
+            var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
             try{await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout));}

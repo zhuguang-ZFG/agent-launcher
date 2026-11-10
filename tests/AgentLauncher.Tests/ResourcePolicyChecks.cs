@@ -415,4 +415,147 @@ internal static class ResourcePolicyChecks
             if (ResourcePolicy.PolicyHash(policy with { CpuRate = 4000 }) == hash) throw new Exception("PolicyHash ignored cpu");
         });
     }
+
+    public static void RunAuthorityFixes(Action<string, Action> Test)
+    {
+        var total = 16 * ResourcePolicy.GiB;
+        var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), total, 32 * ResourcePolicy.GiB);
+
+        var digestRoot = Path.Combine(Path.GetTempPath(), "AgentLauncher-digest-" + Guid.NewGuid().ToString("N"));
+        var planDir = Path.Combine(digestRoot, "plan");
+        var otherDir = Path.Combine(digestRoot, "other");
+        Directory.CreateDirectory(planDir);
+        Directory.CreateDirectory(otherDir);
+
+        LaunchItem Item(string name, string[] args, bool shared = true, string? cwd = null, ulong? planning = null, ulong? cap = null)
+        {
+            var directory = cwd ?? planDir;
+            return new(Guid.NewGuid(), Guid.NewGuid(), 1, name, directory, PhysicalDirectory.Workspace(directory), shared,
+                new CommandSpec("C:\\exe\\agent.exe", args, "exe"), cap ?? ResourcePolicy.DefaultJobMemoryLimit, "agent",
+                PlanningBytes: planning, ResourceMode: "practical");
+        }
+
+        Test("ACC-R01 PlanDigest is unambiguous and includes Shared and Workspace", () =>
+        {
+            var a = Item("n", ["a", "b"]);
+            var collided = Item("n", ["a\u0001b"]) with { Id = a.Id, BatchId = a.BatchId };
+            if (ResourcePolicy.PlanDigest([a]) == ResourcePolicy.PlanDigest([collided]))
+                throw new Exception("argument delimiter collision");
+            var shared = Item("n", ["--x"]);
+            var exclusive = shared with { Shared = false };
+            if (ResourcePolicy.PlanDigest([shared]) == ResourcePolicy.PlanDigest([exclusive]))
+                throw new Exception("Shared was omitted from digest");
+            var relocated = shared with { Cwd = otherDir, Workspace = PhysicalDirectory.Workspace(otherDir) };
+            if (ResourcePolicy.PlanDigest([shared]) == ResourcePolicy.PlanDigest([relocated]))
+                throw new Exception("Workspace/Cwd was omitted from digest");
+        });
+
+        Test("ACC-C02 default floors on large machines are not capped by custom maxima", () =>
+        {
+            var large = 128 * ResourcePolicy.GiB;
+            var commit = 400 * ResourcePolicy.GiB;
+            var settings = new ResourceSettings();
+            ResourcePolicy.ValidateSettings(settings, large, commit);
+            var snapshot = ResourcePolicy.SnapshotFor(settings, large, commit);
+            if (snapshot.PhysicalFloor != ResourcePolicy.DefaultPhysicalFloor(large) || snapshot.PhysicalFloor != 16 * ResourcePolicy.GiB)
+                throw new Exception("default physical floor was changed: " + snapshot.PhysicalFloor);
+            if (snapshot.CommitFloor != ResourcePolicy.DefaultCommitFloor(commit) || snapshot.CommitFloor != 20 * ResourcePolicy.GiB)
+                throw new Exception("default commit floor was changed: " + snapshot.CommitFloor);
+            var decision = ResourcePolicy.Evaluate(new MemorySnapshot(large, 64 * ResourcePolicy.GiB, commit, 200 * ResourcePolicy.GiB, 10, DateTimeOffset.UtcNow), snapshot, [], [new BudgetItem(Guid.NewGuid(), "agent", ResourcePolicy.DefaultPlanningBytes, ResourcePolicy.DefaultJobMemoryLimit)]);
+            if (decision.Kind == AdmissionKind.Deny && decision.Reason.Contains("临界余量"))
+                throw new Exception("default 16 GiB floor was rejected: " + decision.Reason);
+            var customRejected = false;
+            try { ResourcePolicy.ValidateSettings(new ResourceSettings { Mode = "custom", PhysicalFloorOverride = 16 * ResourcePolicy.GiB }, large, commit); }
+            catch (InvalidDataException) { customRejected = true; }
+            if (!customRejected) throw new Exception("custom 16 GiB physical floor accepted");
+            var customCommit = false;
+            try { ResourcePolicy.ValidateSettings(new ResourceSettings { Mode = "custom", CommitFloorOverride = 20 * ResourcePolicy.GiB }, large, commit); }
+            catch (InvalidDataException) { customCommit = true; }
+            if (!customCommit) throw new Exception("custom 20 GiB commit floor accepted");
+        });
+
+        Test("ACC-R02 new requests reject illegal item planning and caps before reserve", () =>
+        {
+            ResourcePolicy.ValidateLaunchItem(Item("ok", ["--a"], planning: ResourcePolicy.DefaultPlanningBytes), policy, total);
+            var tiny = false;
+            try { ResourcePolicy.ValidateLaunchItem(Item("bad", ["--a"], planning: 1), policy, total); }
+            catch (InvalidDataException) { tiny = true; }
+            if (!tiny) throw new Exception("explicit planning=1 accepted");
+            ResourcePolicy.ValidateLaunchItem(Item("legacy", ["--a"], planning: null), policy, total);
+            var overTotal = false;
+            try { ResourcePolicy.ValidateLaunchItem(Item("cap", ["--a"], planning: ResourcePolicy.DefaultPlanningBytes, cap: 8 * ResourcePolicy.GiB), policy, 4 * ResourcePolicy.GiB); }
+            catch (InvalidDataException) { overTotal = true; }
+            if (!overTotal) throw new Exception("cap above machine total accepted");
+            var mismatch = false;
+            try { ResourcePolicy.ValidateLaunchItem(Item("mis", ["--a"], planning: ResourcePolicy.DefaultPlanningBytes, cap: 4 * ResourcePolicy.GiB), policy, total); }
+            catch (InvalidDataException) { mismatch = true; }
+            if (!mismatch) throw new Exception("item cap disagreed with approved policy");
+        });
+
+        Test("ACC-R05 begin hard-only check ignores conservative soft overage from later batches", () =>
+        {
+            var conservative = policy with { Mode = "conservative" };
+            var first = Enumerable.Range(0, 2).Select(i => new BudgetItem(Guid.NewGuid(), "agent", policy.PlanningBytes, policy.JobMemoryLimit)).ToArray();
+            var later = Enumerable.Range(0, 3).Select(i => new BudgetItem(Guid.NewGuid(), "agent", policy.PlanningBytes, policy.JobMemoryLimit)).ToArray();
+            var sample = new MemorySnapshot(total, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 10, DateTimeOffset.UtcNow);
+            var full = ResourcePolicy.Evaluate(sample, conservative, later, []);
+            if (full.Kind != AdmissionKind.Deny) throw new Exception("setup: conservative soft overage should deny full evaluate, got " + full.Kind);
+            var hardOnly = ResourcePolicy.Evaluate(sample, conservative, later.Concat(first).ToArray(), [], includeSoftBudget: false);
+            if (hardOnly.Kind != AdmissionKind.Allow) throw new Exception("begin hard-only failed: " + hardOnly.Kind + " " + hardOnly.Reason);
+        });
+
+        Test("ACC-R03 pressure requires three consecutive high samples and five healthy recoveries", () =>
+        {
+            var floor = ResourcePolicy.DefaultPhysicalFloor(total);
+            var tracker = new PressureTracker();
+            MemorySnapshot Sample(ulong avail, double cpu, int ageMs = 0) => new(total, avail, 32 * ResourcePolicy.GiB, 20 * ResourcePolicy.GiB, cpu, DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(ageMs));
+            tracker.Observe(Sample(12 * ResourcePolicy.GiB, 85), floor);
+            tracker.Observe(Sample(12 * ResourcePolicy.GiB, 85), floor);
+            if (tracker.Pressure) throw new Exception("pressure latched after two CPU highs");
+            tracker.Observe(Sample(12 * ResourcePolicy.GiB, 85), floor);
+            if (!tracker.Pressure) throw new Exception("pressure not latched after three CPU highs");
+            var reset = new PressureTracker();
+            reset.Observe(Sample(ResourcePolicy.GiB, 10), floor);
+            if (reset.Pressure) throw new Exception("single low-physical sample latched pressure");
+            reset.Observe(Sample(ResourcePolicy.GiB, 10), floor);
+            reset.Observe(Sample(ResourcePolicy.GiB, 10), floor);
+            if (!reset.Pressure) throw new Exception("pressure not latched after three low-physical samples");
+            var healthyCpuHigh = new PressureTracker();
+            healthyCpuHigh.Observe(Sample(12 * ResourcePolicy.GiB, 85), floor);
+            healthyCpuHigh.Observe(Sample(12 * ResourcePolicy.GiB, 85), floor);
+            healthyCpuHigh.Observe(Sample(12 * ResourcePolicy.GiB, 85), floor);
+            healthyCpuHigh.Observe(Sample(12 * ResourcePolicy.GiB, 85), floor);
+            if (!healthyCpuHigh.Pressure) throw new Exception("setup failed");
+            if (healthyCpuHigh.HealthyStreak != 0) throw new Exception("CPU 80+ sample was counted healthy");
+            for (var i = 0; i < 4; i++) healthyCpuHigh.Observe(Sample(12 * ResourcePolicy.GiB, 10), floor);
+            if (!healthyCpuHigh.Pressure) throw new Exception("pressure cleared before five healthy samples");
+            healthyCpuHigh.Observe(Sample(12 * ResourcePolicy.GiB, 10), floor);
+            if (healthyCpuHigh.Pressure) throw new Exception("pressure not cleared after five healthy samples");
+            var invalid = new PressureTracker();
+            invalid.Observe(Sample(ResourcePolicy.GiB, 10), floor);
+            invalid.Observe(Sample(ResourcePolicy.GiB, 10), floor);
+            invalid.Observe(Sample(12 * ResourcePolicy.GiB, 10, ageMs: 4000), floor);
+            if (invalid.HighStreak == 3 || invalid.Pressure) throw new Exception("invalid sample counted toward pressure");
+        });
+
+        Test("waiver table prunes expired grants and enforces a capacity bound", () =>
+        {
+            var clock = new DateTimeOffset(2026, 11, 10, 14, 0, 0, TimeSpan.Zero);
+            var table = new WaiverTable(() => clock);
+            var require = new AdmissionDecision(AdmissionKind.RequireWaiver, "soft", 0, 0, 0, 0, ResourcePolicy.SoftCap(total), policy.PhysicalFloor, policy.CommitFloor, true);
+            for (var i = 0; i < WaiverTable.MaxActive; i++)
+            {
+                var issued = table.Issue(require, 1, "hash", "digest-" + i, [Guid.NewGuid()], clock);
+                if (issued.WaiverId is null) throw new Exception("issue failed before capacity");
+            }
+            var overflow = table.Issue(require, 1, "hash", "overflow", [Guid.NewGuid()], clock);
+            if (overflow.WaiverId is not null) throw new Exception("capacity was not enforced");
+            if (table.Count != WaiverTable.MaxActive) throw new Exception("count drifted");
+            clock = clock.AddSeconds(46);
+            table.PruneExpired();
+            if (table.Count != 0) throw new Exception("expired grants were not pruned: " + table.Count);
+            var again = table.Issue(require, 1, "hash", "after-prune", [Guid.NewGuid()], clock);
+            if (again.WaiverId is null) throw new Exception("issue failed after prune");
+        });
+    }
 }
