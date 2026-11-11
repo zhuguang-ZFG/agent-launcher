@@ -374,7 +374,7 @@ internal sealed class Monitor : IDisposable
         var unchanged=request?.StatusEpoch==epoch&&request.StatusSignature==signature;
         return new(blocked==null&&withheld.Length==0,omittedReason??blocked??"监控器已核对",unchanged?null:active.Where(entry=>!withheld.Contains(entry)).Concat(kept).ToArray(),sample,epoch,reason,Unchanged:unchanged,StatusSignature:signature,RootCpuRate:rootCpuRate,ReconcileOffered:reconcileOffered);
     }
-    // Fail-closed, user-confirmed release: settle only entries whose resource group provably no longer exists and whose recorded process is provably exited.
+    // Fail-closed, user-confirmed release: settle only entries whose resource group provably no longer exists and whose receipt already proves the whole managed tree exited (Finished) or never ran (FailedBeforeStart). A dead recorded parent alone is not proof: jobs have no KILL_ON_JOB_CLOSE, so descendants may survive the handle loss and cannot be enumerated without it.
     private Response ReconcileRequests()
     {
         var settled=0;var changed=false;var refusals=new List<(ControlEntry Entry,string Reason)>();
@@ -402,7 +402,8 @@ internal sealed class Monitor : IDisposable
                     settled++;changed=true;continue;
                 }
                 if(receipt.Pid>0&&ProcessAlive(receipt.Pid,receipt.ProcessTime)){refusals.Add((e,$"记录的进程（PID {receipt.Pid}）仍在运行"));continue;}
-                e.State="Settled";e.Detail=$"经确认的核对释放：资源组不存在且记录进程（PID {receipt.Pid}）按 PID 与创建时间核对确已退出；原阶段 {receipt.Phase}。";settled++;changed=true;
+                // A dead recorded parent is not tree proof: jobs have no KILL_ON_JOB_CLOSE, so the object can be gone while descendants survive, and without the handle they cannot be enumerated.
+                refusals.Add((e,$"记录的父进程（PID {receipt.Pid}）已退出，但资源组句柄丢失使其派生进程无法枚举核对"));continue;
             }
             catch(Exception ex)when(ex is not OutOfMemoryException){refusals.Add((e,"核对失败："+ex.Message));}
             finally{gate.ReleaseMutex();}
@@ -419,7 +420,7 @@ internal sealed class Monitor : IDisposable
         if(!ok&&refusals.Count==0&&snapshot.AdmissionBlockedReason!=null)message+="当前仍阻塞："+snapshot.AdmissionBlockedReason;
         return snapshot with{Ok=ok,Message=message};
     }
-    // PID reuse is not survival: the recorded start time (FILETIME UTC) must match exactly. When the start time cannot be read, treat the process as alive and refuse release.
+    // PID reuse is not survival: the recorded start time (FILETIME UTC) must match exactly. When the start time cannot be read, treat the process as alive and refuse release. Only used to refine the refusal reason; a dead parent never proves the tree exited.
     private static bool ProcessAlive(int pid,long processTimeUtc)
     {
         try

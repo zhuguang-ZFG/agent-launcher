@@ -535,17 +535,16 @@ powershell -NoProfile -File scripts/test.ps1
 ### 设计与实现
 
 - 协议：`Response` 追加可选 `ReconcileOffered`（旧客户端忽略新字段；新客户端遇旧 monitor 得到 null，不显示入口）；分页帧一致性比较纳入该字段。新增 IPC 操作 `reconcile`，App 侧经 `Ipc.EnsureAsync`（必要时拉起 monitor）发送。
-- monitor：Refresh 在「资源组句柄丢失」阻塞分支置 `reconcileOffered=true`（每次 Refresh 重置），`BuildStatus` 上报并纳入状态签名。`ReconcileRequests()` 对每条非终态非 Pending 记录依次证明：取得 attempt gate（创建者不在运行；持不到即拒绝）、打开资源组返回 Win32=2（对象确不存在；可打开则不属本流程，交常规恢复）、回执存在且为 `Finished`/`FailedBeforeStart` 直接落终态，否则按 PID 与创建时间（FILETIME UTC）核对记录进程已退出——**PID 复用不算存活**，启动时间读不出时按存活处理拒绝。证明全部满足才置 `Settled`/`FailedBeforeStart` 并把证明写入 Detail 后原子保存；任一不满足保持阻塞并写明「核对释放被拒绝：…」。随后 Refresh 重算阻塞并返回含记录快照的响应。
+- monitor：Refresh 在「资源组句柄丢失」阻塞分支置 `reconcileOffered=true`（每次 Refresh 重置），`BuildStatus` 上报并纳入状态签名。`ReconcileRequests()` 对每条非终态非 Pending 记录依次证明：取得 attempt gate（创建者不在运行；持不到即拒绝）、打开资源组返回 Win32=2（对象确不存在；可打开则不属本流程，交常规恢复）、回执存在且为 `Finished`（运行器已按 Job 成员枚举证明全部受管进程退出）或 `FailedBeforeStart`（进程从未运行）。证明全部满足才置 `Settled`/`FailedBeforeStart` 并把证明写入 Detail 后原子保存；其余一律保持阻塞并写明「核对释放被拒绝：…」——记录进程仍存活是一类，**仅父进程退出但派生进程无法枚举核对**是另一类（产品 Job 不设 KILL_ON_JOB_CLOSE，句柄销毁后作业对象可在后代存活时消失，无句柄即无法枚举）。随后 Refresh 重算阻塞并返回含记录快照的响应。
 - App：资源面板新增 `ReconcileButton`（`QuietButton`，默认隐藏），仅当 `status.ReconcileOffered==true` 且非 busy 时显示；点击先弹 YesNo 确认（说明证明内容、不结束进程、不删除记录），确认后调用 `reconcile` 并刷新状态，结果写入进度/错误区。确认走既有 `TestConfirm` 测试钩子。
 - 文档：CONTRACTS C4 增加该恢复路径的 fail-closed 合同。
 
 ### 回归证据（红 → 绿）
 
-- 新增集成回归「R-handle-lost reconcile releases provably dead entry and refuses live process」：合成两条 `Creating` 条目（资源组从未存在）——死进程（真实 PID+FILETIME，回执 `Exited`）与活进程（`--hold 30000`，回执 `Started`）。断言死条目释放为 `Settled`、活条目保持 `Creating` 且 Detail 含「拒绝」、响应 `Ok=false` 且已释放条目在 Entries 中。
-- 红：旧 Worker 二进制上该用例失败（反射包装「未知协议操作。」），同套件其余全部通过（发布件哈希可核对）。
-- 绿：修复后集成套件 **0 失败**（证据根 `D:\temp\User\AgentLauncher-tests-integration-green4-1794373927`）；期间发现并修复一处派发落点错误——`reconcile` 原写在条目查找之后，被「启动请求不存在或已过期」拦截，移到查找之前，单因修复后通过，未放宽任何断言。
-- 完整门禁 `scripts/test.ps1`：模型 **65/65**、集成 **0 失败**、UI 检查 **142 通过 / 0 失败**、原型 **5/5**、浏览器检查通过。
-- `UiReviewChecks` 新增 4 项断言（全部通过）：压力阻塞不提供入口、句柄丢失阻塞提供入口且启动仍禁用、busy 时隐藏、健康状态隐藏；UI 检查总数由 138 增至 142。
+- 集成回归「R-handle-lost reconcile releases finished-tree proof and refuses unprovable trees」用**真实内核语义**构造三类条目：`Finished` 回执（运行器已排干 Job 成员）应释放；真实 Job 中父进程被杀、同作业后代仍存活、最后句柄关闭后按名打开返回 Win32=2 的 `Exited` 条目**必须拒绝**（合成 Job 从不存在的情形不足以覆盖该语义）；记录进程真实存活的 `Started` 条目必须拒绝。断言含「幸存者进程在核对后仍存活」——证明若释放即为错误。
+- 红（第一版弱实现）：该用例失败于「dead parent with a live surviving tree member was released: Settled …原阶段 Exited」——精确复现了评审指出的缺陷；断言失败留下的幸存者进程还导致后续 27 项级联失败（污染真实 monitor 根 Job 枚举），已在测试中改为 try/finally 即时清理。其余用例不受本变更影响。
+- 绿：收紧后集成套件 **0 失败**（证据根 `D:\temp\User\AgentLauncher-tests-integration-green5-1794376392`）——`Finished` 条目释放、真实树场景拒绝且幸存者核对后仍存活、活进程条目拒绝。
+- 早期版本（仅合成死进程 PID+FILETIME 核对即释放）曾全绿（模型 65/65、集成 0 失败、UI 142/0、原型 5/5、浏览器通过、E2E 13/13、生产健康），随后评审意见指出父进程死亡不等于进程树死亡，本轮据此收紧；UI 可见性断言（4 项）与 App 交互流程不变。
 
 ### 固定输入变更披露
 
@@ -553,14 +552,17 @@ powershell -NoProfile -File scripts/test.ps1
 
 ### 端到端与生产验证
 
-- 隔离 E2E（`artifacts/reconcile-e2e/inputs/e2e_reconcile.py`，INTEGRATION_TESTS 构建，真实按钮与原生确认框，win32 `#32770` 级交互）**13/13 通过**：句柄丢失阻塞显示按钮；确认框出现；**答「否」条目保持 Creating 且不发 IPC**；按钮继续提供；答「是」后条目 `Settled`，Detail 含完整证明（资源组不存在、PID 与创建时间核对、原阶段）；BootId 保留（非重启恢复）；回执与配置哈希不变；健康后按钮隐藏。探针（`probe_dialog.py`）另证实 invoke 后 0.319 秒出现对话框且未应答期间条目保持 Creating，确认门真实有效。
-- 探针稳定性记录：UIA `invoke` 在个别运行被吞（无异常、无对话框），重试后稳定；`capture_as_image` 抓的是屏幕区域，窗口在后台时会抓到前台他窗内容，生产截图改为先置前台并核验前台句柄。run-5/run-6 的释放发生在探针失败后的用户实时点击（受控 No/Yes 证据以 run-8 为准）。
+- 收紧后的隔离 E2E（`artifacts/reconcile-e2e/inputs/e2e_reconcile.py`，INTEGRATION_TESTS 构建，真实按钮与原生确认框，win32 `#32770` 级交互）**21/21 通过**（证据 `artifacts/reconcile-e2e/run-12/result.json`），按真实内核语义分两个场景：
+  - **场景 A（自动恢复）**：`Finished` 回执 + 资源组不存在 → 监控器常规 Refresh 直接 `Settled`（整树证明来自运行器，无需用户操作），且按钮全程不出现；回执哈希不变。同时以活动管道名验证 Python 复制的 Scope 与产品一致（管道 `AgentLauncher-<scope>` 实测存在）。
+  - **场景 B（拒绝路径）**：真实作业树——`CreateJobObjectW` 按产品命名建组、挂起创建的父进程 `AssignProcessToJobObject` 入组、父进程派生长命孙进程（默认继承作业）、杀父、关闭最后句柄——实测按名打开返回 **Win32=2** 且孙进程仍存活（句柄丢失≠后代退出，真实内核证据）；`Exited` 回执条目楔住后：按钮出现；**答「否」条目保持 Creating 且不发 IPC**；按钮继续提供；答「是」后 reconcile **拒绝**——条目保持 `Creating`，Detail 写明「核对释放被拒绝：…派生进程无法枚举核对」；**孙进程核对后仍存活**；BootId 保留；回执与配置哈希不变；阻塞保持且按钮再次提供。重启仍是该情形的唯一兜底，与合同一致。
+- 设计澄清（run-9 暴露）：第一版 E2E 以 `Exited` 回执验证「死父释放」，收紧后该情形属必须拒绝类；而 `Finished` 回执条目在常规 Refresh 即自动落终态，根本不会楔住——经用户确认的释放路径仅兜底非常规情形（如 Refresh 因 IO 异常跳过的记录），日常恢复无需按钮。run-10/11 为脚本自身问题（UTF-8 解码系统代码页输出失败、管道检查时序过早），与产品无关。
+- 早期 13 步版 E2E（run-8，弱实现 + `Exited` 死父释放正向路径）记录作废，不代表当前语义。
 - 生产实测（真实用户数据，只读交互）：健康账本不显示按钮；`SetWindowPos` 三尺寸（1120×800/1400×1000/900×700，前台句柄均为本窗口）布局正常——宽版双栏资源面板、窄版单栏滚动且底部警告正确换行；App 优雅退出 exit 0；用户 `configuration.json`/`control.json`/`.bak` 哈希前后不变。UIA 改尺寸两法（`move_window`、TransformPattern）在本窗口不可用，按两次失败规则改用 Win32 `SetWindowPos`，未再重试 UIA。
-- 生产 DLL marker 扫描（`AGENT_LAUNCHER_TEST_ROOT`/`FAKE_SAMPLE`/`INTEGRATION_TESTS`/`--ui-check`/`--idle-check` 等）四个程序集全部 CLEAN。预览已替换：`artifacts/preview-before-reconcile` 完整备份，`artifacts/preview` 为新构建（15 文件，含使用说明），桌面快捷方式目标路径不变；验证清单 `artifacts/preview-delivery-reconcile/verification.json`。
-- 评审归档：`artifacts/reconcile-e2e/review-inputs.zip`（15 项：3 个脚本、E2E/生产/探针证据、UI 报告、manifest）。`task_verify run` 仍为 **unverified / project-or-git-baseline-unavailable，checks=[]**；手动绿色不替代 operator 基线。PR #3，CI 全绿后合并。
+- 生产 DLL marker 扫描（`AGENT_LAUNCHER_TEST_ROOT`/`FAKE_SAMPLE`/`INTEGRATION_TESTS`/`TestConfirm`）四个程序集全部 CLEAN（收紧构建复扫：`marker-scan-tighten.json`）。预览再次替换：`artifacts/preview-before-tighten` 备份收紧前构建，`artifacts/preview` 为收紧构建（15 文件，含使用说明），桌面快捷方式目标路径不变；哈希清单 `artifacts/preview-delivery-reconcile/verification-tighten.json`。
+- 评审归档：`artifacts/reconcile-e2e/review-inputs.zip`（收紧后重建，含脚本与场景证据）。`task_verify run` 仍为 **unverified / project-or-git-baseline-unavailable，checks=[]**；手动绿色不替代 operator 基线。PR #3，CI 全绿后合并。
 
 ### 限制
 
-- 核对释放在「资源组可打开但无进程」等常规可恢复情形下不介入（常规 Refresh 已处理）；仅覆盖句柄丢失类阻塞。无法证明的记录（回执缺失、进程存活、创建者仍在、其它 Win32 错误）一律保持阻塞，只能等系统重启或人工按 .bak 核对。
+- 核对释放在「资源组可打开但无进程」等常规可恢复情形下不介入（常规 Refresh 已处理）；仅覆盖句柄丢失类阻塞。释放只接受回执级整树证明（`Finished`/`FailedBeforeStart`）；无法证明的记录（回执缺失、回执仅为 `Started`/`Exited` 等父进程级证据、进程存活、创建者仍在、其它 Win32 错误）一律保持阻塞，只能等系统重启或人工按 .bak 核对。
 - 生产环境上一轮人工修复的条目维持原样（Detail 已含证明）；本轮不改动用户 `control.json`/`.bak`/回执。
 - 历史 15/16 部分启动仍未归因，与本流程无关，不因本轮绿色而关闭。
