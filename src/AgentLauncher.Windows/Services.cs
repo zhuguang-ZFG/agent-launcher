@@ -74,48 +74,143 @@ public static class Store
 }
 public static class Ipc
 {
-    public static async Task<Response> SendAsync(Request request,CancellationToken ct=default)
+    public static Task<Response> SendAsync(Request request,CancellationToken ct=default)=>SendCoreAsync(request,ct,false);
+    private static async Task<Response> SendCoreAsync(Request request,CancellationToken ct,bool ensureMonitor)
     {
         using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);timeout.CancelAfter(TimeSpan.FromSeconds(8));
         await using var pipe=new NamedPipeClientStream(".",Store.Pipe,PipeDirection.InOut,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly);
-        await pipe.ConnectAsync(timeout.Token);await WriteAsync(pipe,request,timeout.Token);
+        if(ensureMonitor)
+        {
+            using var connect=CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);connect.CancelAfter(400);
+            try{await pipe.ConnectAsync(connect.Token);}
+            catch(OperationCanceledException)when(!timeout.IsCancellationRequested)
+            {
+                // A busy single-instance pipe also times out here, so only start a monitor when the pid file does not name a live
+                // Worker. No request bytes have been written either way, so this can never replay an authorization.
+                if(!MonitorRunning())StartMonitor();
+                return await SendCoreAsync(request,timeout.Token,false);
+            }
+        }
+        else await pipe.ConnectAsync(timeout.Token);
+        await WriteAsync(pipe,request,timeout.Token);
 #if INTEGRATION_TESTS
         // Fault injection: the request may already be committed server-side while the client observes a timeout.
         if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND")=="1"){Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND",null);throw new TimeoutException("模拟客户端超时（请求已发送）。");}
 #endif
-        return await ReadAsync<Response>(pipe,timeout.Token);
+        return await ReadResponseAsync(pipe,timeout.Token);
     }
-    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default)
+    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default,Action? beforeCleanup=null,ResourcePolicySnapshot? policy=null,long? draftRevision=null,string? policyHash=null,string? planDigest=null,IReadOnlyList<Guid>? enabledSlotIds=null,Guid? waiverId=null)
     {
-        try{return await SendAsync(new("reserve",Guid.NewGuid(),items),ct);}
+        try{return await SendCoreAsync(new("reserve",Guid.NewGuid(),items,WaiverId:waiverId,DraftRevision:draftRevision,PolicyHash:policyHash,PlanDigest:planDigest,EnabledSlotIds:enabledSlotIds,Policy:policy),ct,true);}
         catch(Exception e)when(e is IOException or TimeoutException or OperationCanceledException)
         {
             // The server may have committed the reservation before the client saw a failure; revoke best-effort so the workspace is not held.
+            beforeCleanup?.Invoke();
             foreach(var item in items){try{await SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));}catch(Exception inner)when(inner is IOException or TimeoutException or OperationCanceledException){}}
             throw new IOException("预约结果未确认，已尝试撤销全部启动项；请在运行记录中核对。",e);
         }
     }
-    public static async Task WriteAsync<T>(Stream stream,T message,CancellationToken ct)
+    public const int FrameLimit=1024*1024;
+    private const int MaxResponseFrames=64;
+    private const long MaxResponseBytes=16L*1024*1024;
+    public static async Task WriteResponseAsync(Stream stream,Response response,CancellationToken ct)
     {
-        var bytes=JsonSerializer.SerializeToUtf8Bytes(message,Store.Json);if(bytes.Length>1024*1024)throw new IOException("请求过大。");
+        // Validate every frame before the first write so a failure never publishes a partial page set.
+        foreach(var frame in SplitResponse(response))await WriteFrameAsync(stream,frame,ct);
+    }
+    public static async Task<Response> ReadResponseAsync(Stream stream,CancellationToken ct)
+    {
+        var firstFrame=await ReadFrameAsync<Response>(stream,ct);var first=firstFrame.Message;if(!first.More)return first;
+        if(first.Entries is not {Length:>0})throw new IOException("协议分页帧缺少记录。");
+        var entries=new List<ControlEntry>(first.Entries!);var frames=1;long bytes=firstFrame.Size;var current=first;
+        while(current.More)
+        {
+            if(++frames>MaxResponseFrames)throw new IOException("协议分页帧数量超出边界。");
+            var nextFrame=await ReadFrameAsync<Response>(stream,ct);var next=nextFrame.Message;
+            if(next.Ok!=first.Ok||next.Message!=first.Message||next.Memory!=first.Memory||next.Epoch!=first.Epoch||next.AdmissionBlockedReason!=first.AdmissionBlockedReason||next.StatusSignature!=first.StatusSignature||next.Unchanged!=first.Unchanged||next.RootCpuRate!=first.RootCpuRate)throw new IOException("协议分页帧不一致，已拒绝混合响应。");
+            if(next.Entries is not {Length:>0})throw new IOException("协议分页帧缺少记录。");
+            bytes+=nextFrame.Size;
+            if(bytes>MaxResponseBytes)throw new IOException("协议分页响应超出边界。");
+            entries.AddRange(next.Entries!);current=next;
+        }
+        return first with{Entries=[..entries],More=false};
+    }
+    public static bool EntryRepresentable(ControlEntry entry)
+    {
+        // One record must fit with a conservative status envelope; otherwise Save must fail closed before any grant exists.
+        // Reserve room for the sample and bounded failure/omission messages as well as the entry itself.
+        var probe=new Response(true,new string('x',4096),[entry],null,new string('0',64),new string('r',64),false);
+        return JsonSerializer.SerializeToUtf8Bytes(probe,Store.Json).Length<=FrameLimit;
+    }
+    public static void EnsureEntryRepresentable(ControlEntry entry)
+    {
+        if(!EntryRepresentable(entry))throw new IOException("控制记录参数过大，无法在协议边界内完整传输；已拒绝保存或读取该记录。");
+    }
+    private static List<byte[]> SplitResponse(Response response)
+    {
+        var single=JsonSerializer.SerializeToUtf8Bytes(response with{More=false},Store.Json);if(single.Length<=FrameLimit)return [single];
+        if(response.Entries is not {Length:>0})throw new IOException("响应超出单帧边界且没有可分页记录。");
+        var header=response with{Entries=null,More=true};var frames=new List<Response>();var chunk=new List<ControlEntry>();
+        var empty=JsonSerializer.SerializeToUtf8Bytes(header,Store.Json).LongLength;var bytes=empty;
+        foreach(var entry in response.Entries!)
+        {
+            var size=JsonSerializer.SerializeToUtf8Bytes(entry,Store.Json).LongLength+8;
+            if(chunk.Count>0&&bytes+size>FrameLimit){frames.Add(header with{Entries=chunk.ToArray()});chunk.Clear();bytes=empty;}
+            chunk.Add(entry);bytes+=size;
+        }
+        frames.Add(header with{Entries=chunk.ToArray(),More=false});
+        var encoded=new List<byte[]>(frames.Count);long total=0;
+        foreach(var frame in frames){var data=JsonSerializer.SerializeToUtf8Bytes(frame,Store.Json);if(data.Length>FrameLimit)throw new IOException("控制记录参数过大，无法在协议边界内完整传输；已拒绝保存或读取该记录。");total+=data.Length;encoded.Add(data);}
+        if(encoded.Count>MaxResponseFrames||total>MaxResponseBytes)throw new IOException("协议分页响应超出边界。");return encoded;
+    }
+    public static Task WriteAsync<T>(Stream stream,T message,CancellationToken ct)=>WriteFrameAsync(stream,JsonSerializer.SerializeToUtf8Bytes(message,Store.Json),ct);
+    private static async Task WriteFrameAsync(Stream stream,byte[] bytes,CancellationToken ct)
+    {
+        if(bytes.Length>FrameLimit)throw new IOException("请求过大。");
         await stream.WriteAsync(BitConverter.GetBytes(bytes.Length),ct);await stream.WriteAsync(bytes,ct);await stream.FlushAsync(ct);
     }
-    public static async Task<T> ReadAsync<T>(Stream stream,CancellationToken ct)
+    public static async Task<T> ReadAsync<T>(Stream stream,CancellationToken ct)=>(await ReadFrameAsync<T>(stream,ct)).Message;
+    private static async Task<(T Message,int Size)> ReadFrameAsync<T>(Stream stream,CancellationToken ct)
     {
         var length=new byte[4];await stream.ReadExactlyAsync(length,ct);var size=BitConverter.ToInt32(length);
-        if(size is <1 or >1024*1024)throw new IOException("协议帧长度无效。");
-        var bytes=new byte[size];await stream.ReadExactlyAsync(bytes,ct);return JsonSerializer.Deserialize<T>(bytes,Store.Json)??throw new IOException("协议帧为空。");
+        if(size is <1 or >FrameLimit)throw new IOException("协议帧长度无效。");
+        var bytes=new byte[size];await stream.ReadExactlyAsync(bytes,ct);return (JsonSerializer.Deserialize<T>(bytes,Store.Json)??throw new IOException("协议帧为空。"),size);
     }
-    public static async Task<Response> EnsureMonitorAsync()
+    public static async Task<Response> EnsureMonitorAsync(string? statusEpoch=null,string? statusSignature=null)
     {
+        var request=new Request("status",Guid.NewGuid(),StatusEpoch:statusEpoch,StatusSignature:statusSignature);
         using var probe=new CancellationTokenSource(400);
-        try{return await SendAsync(new("status",Guid.NewGuid()),probe.Token);}catch(TimeoutException){}catch(OperationCanceledException){}catch(IOException){}
+        try{return await SendAsync(request,probe.Token);}catch(TimeoutException){}catch(OperationCanceledException){}catch(IOException){}
+        if(!MonitorRunning())StartMonitor();
+        return await SendAsync(request);
+    }
+    public static bool MonitorRunning()
+    {
+        // Deliberately avoids Store.Read: that helper waits up to 2 s for a file mutex, and this probe only decides whether to spawn.
+        try
+        {
+            var path=Store.FilePath("monitor-pid.json");
+            using var file=File.Open(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete);
+            if(file.Length is <1 or >32)return false;
+            using var reader=new StreamReader(file);
+            if(!int.TryParse(reader.ReadToEnd().Trim(),out var pid)||pid<=0)return false;
+            using var process=Process.GetProcessById(pid);
+            return !process.HasExited&&StringComparer.OrdinalIgnoreCase.Equals(process.MainModule?.FileName,Store.WorkerPath);
+        }
+        catch(Exception e)when(e is not OutOfMemoryException){return false;}
+    }
+    private static void StartMonitor()
+    {
         if(!File.Exists(Store.WorkerPath))throw new FileNotFoundException("缺少 Worker，请从完整发布目录启动。");
+        // Test-only evidence counts spawn attempts, including a child that immediately loses the single-instance mutex.
+#if INTEGRATION_TESTS
+        var log=Environment.GetEnvironmentVariable("AGENT_LAUNCHER_MONITOR_SPAWN_LOG");
+        if(!string.IsNullOrEmpty(log))File.AppendAllText(log,"monitor\n");
+#endif
         using var p=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});
-        return await SendAsync(new("status",Guid.NewGuid()));
     }
 }
-public static class Commands
+public static partial class Commands
 {
     private static readonly string[] ExecutableExtensions=[".exe",".cmd"];
     public static string? FindExe(string name)=>EnumerateInstalls(name,null).FirstOrDefault();
@@ -225,18 +320,5 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
         var alias=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Microsoft","WindowsApps","wt.exe");
         if(File.Exists(alias))return alias;
         return TerminalDiscovery.Installs().FirstOrDefault()??throw new FileNotFoundException("未找到可用的 Terminal 入口。请启用执行别名，或在设置中选择已安装的 WindowsTerminal.exe / wt.exe。");
-    }
-    public static void SubmitTerminal(string terminal,IReadOnlyList<LaunchItem> items,string layout)
-    {
-        var start=new ProcessStartInfo(terminal){UseShellExecute=false};start.ArgumentList.Add("-w");start.ArgumentList.Add("agent-"+items[0].BatchId.ToString("N"));
-        for(var i=0;i<items.Count;i++)
-        {
-            if(i>0){start.ArgumentList.Add(";");if(items.Count==4&&i>=2){start.ArgumentList.Add("move-focus");start.ArgumentList.Add(i==2?"left":"right");start.ArgumentList.Add(";");}}
-            start.ArgumentList.Add(i==0?"new-tab":"split-pane");
-            if(i>0)start.ArgumentList.Add(i==1&&(items.Count>2||layout!="horizontal")?"-V":"-H");
-            start.ArgumentList.Add("--title");start.ArgumentList.Add($"{items[i].Position} {items[i].Name}".Replace(";","\\;"));
-            start.ArgumentList.Add(Store.WorkerPath.Replace(";","\\;"));start.ArgumentList.Add("pane");start.ArgumentList.Add(items[i].Id.ToString("D"));
-        }
-        using var process=Process.Start(start)??throw new IOException("无法提交给 Windows Terminal。");
     }
 }

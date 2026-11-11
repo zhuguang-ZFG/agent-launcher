@@ -10,38 +10,48 @@ public static class Agents
 }
 public sealed class AgentProfile
 {
-    public string Executable { get; set; } = "";
-    public string[] Arguments { get; set; } = [];
+    [JsonRequired] public string Executable { get; set; } = "";
+    [JsonRequired] public string[] Arguments { get; set; } = [];
     public AgentProfile Copy() => new() { Executable = Executable, Arguments = [.. Arguments] };
 }
 public sealed class Slot
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public bool Enabled { get; set; }
-    public string AgentId { get; set; } = "pi";
+    [JsonRequired] public Guid Id { get; set; } = Guid.NewGuid();
+    [JsonRequired] public bool Enabled { get; set; }
+    [JsonRequired] public string AgentId { get; set; } = "pi";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? CustomName { get; set; }
     [JsonIgnore] public string DisplayName=>AgentId=="custom"&&!string.IsNullOrWhiteSpace(CustomName)?CustomName:Agents.Get(AgentId).Name;
-    public string Directory { get; set; } = "";
+    [JsonRequired] public string Directory { get; set; } = "";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] public bool RequiresDirectory { get; set; }
     public string Note { get; set; } = "";
-    public Dictionary<string, AgentProfile> Profiles { get; set; } = [];
+    [JsonRequired] public Dictionary<string, AgentProfile> Profiles { get; set; } = [];
     [JsonIgnore] public AgentProfile Current => Profiles.GetValueOrDefault(AgentId) ?? new();
     public Slot Copy() => new() { Id = Id, Enabled = Enabled, AgentId = AgentId, CustomName = CustomName, Directory = Directory, RequiresDirectory = RequiresDirectory, Note = Note, Profiles = Profiles.ToDictionary(p => p.Key, p => p.Value.Copy()) };
 }
 public sealed class Draft
 {
-    [JsonRequired] public int SchemaVersion { get; set; } = 1;
-    public long Revision { get; set; }
-    public string Project { get; set; } = "";
+    [JsonRequired] public int SchemaVersion { get; set; } = ConfigurationCompatibility.CurrentSchemaVersion;
+    [JsonRequired] public long Revision { get; set; }
+    [JsonRequired] public string Project { get; set; } = "";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] public bool IsPortableTemplate { get; set; }
     [JsonRequired] public string DirectoryMode { get; set; } = "isolated";
     [JsonRequired] public string Layout { get; set; } = "vertical";
     [JsonRequired] public List<Slot> Slots { get; set; } = [new() { Enabled = true }, new() { AgentId = "codex" }, new(), new() { AgentId = "hermes" }];
-    public Draft Copy() => new() { SchemaVersion = SchemaVersion, Revision = Revision, Project = Project, IsPortableTemplate = IsPortableTemplate, DirectoryMode = DirectoryMode, Layout = Layout, Slots = Slots.Select(s => s.Copy()).ToList() };
+    public ResourceSettings Resource { get; set; } = new();
+    public Draft Copy() => new() { SchemaVersion = SchemaVersion, Revision = Revision, Project = Project, IsPortableTemplate = IsPortableTemplate, DirectoryMode = DirectoryMode, Layout = Layout, Slots = Slots.Select(s => s.Copy()).ToList(), Resource = (Resource ?? new ResourceSettings()).Copy() };
     public void Validate()
     {
-        if (SchemaVersion != 1 || Slots == null || Slots.Count is < 1 or > 4 || Slots.Any(s => s == null) || Slots.Select(s => s.Id).Distinct().Count() != Slots.Count || !new[] { "isolated", "prepared", "shared" }.Contains(DirectoryMode) || !new[] { "vertical", "horizontal" }.Contains(Layout)) throw new InvalidDataException("配置版本或结构不支持，未修改原配置。");
+        if (SchemaVersion is not (1 or 2) || Slots == null || Slots.Count is < 1 or > ResourcePolicy.MaxSlots || Slots.Any(s => s == null) || Slots.Select(s => s.Id).Distinct().Count() != Slots.Count || !new[] { "isolated", "prepared", "shared" }.Contains(DirectoryMode) || !new[] { "vertical", "horizontal" }.Contains(Layout)) throw new InvalidDataException("配置版本或结构不支持，未修改原配置。");
         if(Project==null)throw new InvalidDataException("项目目录字段缺失，未修改原配置。");
+        if (Resource == null || Resource.Mode is not ("conservative" or "practical" or "custom")) throw new InvalidDataException("资源配置不完整或不支持。");
+        if (Resource.JobMemoryLimit < ResourcePolicy.MinJobMemoryLimit) throw new InvalidDataException("Job 内存上限不能低于 1 GiB。");
+        if (Resource.JobMemoryLimit > ResourcePolicy.MaxJobMemoryLimit) throw new InvalidDataException("Job 内存上限不能超过 8 GiB。");
+        if (Resource.PlanningBytes < ResourcePolicy.MinPlanningBytes || Resource.PlanningBytes > Resource.JobMemoryLimit) throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
+        if (Resource.CpuRate < ResourcePolicy.MinCpuRate || Resource.CpuRate > ResourcePolicy.MaxCpuRate) throw new InvalidDataException("CPU 封顶必须在 15% 到 80% 之间。");
+        if (Resource.PhysicalFloorOverride is {} physicalFloor && physicalFloor < ResourcePolicy.MinCustomPhysicalFloor) throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");
+        if (Resource.PhysicalFloorOverride is {} physicalCeiling && physicalCeiling > ResourcePolicy.MaxCustomPhysicalFloor) throw new InvalidDataException("物理临界余量不能超过 8 GiB。");
+        if (Resource.CommitFloorOverride is {} commitFloor && commitFloor < ResourcePolicy.MinCustomCommitFloor) throw new InvalidDataException("提交临界余量不能低于下限，也不能为 0。");
+        if (Resource.CommitFloorOverride is {} commitCeiling && commitCeiling > ResourcePolicy.MaxCustomCommitFloor) throw new InvalidDataException("提交临界余量不能超过 16 GiB。");
         foreach (var slot in Slots)
         {
             if(!Agents.All.Any(a=>a.Id==slot.AgentId)||slot.Profiles==null||slot.Directory==null||slot.Note==null)throw new InvalidDataException("Agent 配置不完整。");
@@ -52,7 +62,7 @@ public sealed class Draft
 }
 public sealed class Configuration
 {
-    [JsonRequired] public int SchemaVersion { get; set; } = 1;
+    [JsonRequired] public int SchemaVersion { get; set; } = ConfigurationCompatibility.CurrentSchemaVersion;
     [JsonRequired] public Draft Draft { get; set; } = new();
     public Draft? LastEdited { get; set; }
     public bool ManuallyEdited { get; set; } = true;
@@ -86,25 +96,9 @@ public sealed class Configuration
 }
 public sealed record MemorySnapshot(ulong Total, ulong Available, ulong CommitLimit, ulong CommitAvailable, double CpuPercent, DateTimeOffset At);
 public sealed record Admission(bool Allowed, string Reason);
-public static class ResourcePolicy
-{
-    public const ulong GiB = 1024UL * 1024 * 1024;
-    public const ulong AgentBudget = 2 * GiB;
-    public const ulong GitBudget = GiB;
-    public static ulong Reserve(ulong total) => Math.Max(3 * GiB, total / 5);
-    public static Admission Check(MemorySnapshot sample, ulong reserved, ulong requested)
-    {
-        // Conservatively reserve the full budget again. Never subtract paged-out commit from physical headroom.
-        if (!double.IsFinite(sample.CpuPercent) || DateTimeOffset.UtcNow - sample.At > TimeSpan.FromSeconds(3)) return new(false, "资源读数暂时不可信，稍候会自动重新检查。");
-        if (reserved + requested > Math.Min(8 * GiB, sample.Total * 35 / 100)) return new(false, "本次要用的内存超过总预算，请少勾选几个 Agent。");
-        if (sample.Available < Reserve(sample.Total) + reserved + requested) return new(false, "现在可用内存不够：要给系统留余量。请关掉一些应用，或减少启动的 Agent 个数。");
-        if (sample.CommitAvailable < Math.Max(2 * GiB, sample.CommitLimit / 20) + reserved + requested) return new(false, "系统内存余量不足，暂时不能新增任务。");
-        return sample.CpuPercent >= 80 ? new(false, "整机 CPU 正忙，稍等片刻再启动。") : new(true, "资源充足");
-    }
-}
 public sealed record CommandSpec(string Executable, string[] Arguments, string Adapter);
 public sealed record WorkspaceIdentity(string Path, string Key);
-public sealed record LaunchItem(Guid Id, Guid BatchId, int Position, string Name, string Cwd, WorkspaceIdentity Workspace, bool Shared, CommandSpec Command, ulong Budget, string Kind = "agent", [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? RetryOf = null);
+public sealed record LaunchItem(Guid Id, Guid BatchId, int Position, string Name, string Cwd, WorkspaceIdentity Workspace, bool Shared, CommandSpec Command, ulong Budget, string Kind = "agent", [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? RetryOf = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] ulong? PlanningBytes = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? ResourceMode = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? SourceSlotId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? AgentId = null);
 public sealed class ControlEntry
 {
     public required LaunchItem Plan { get; set; }
@@ -113,8 +107,15 @@ public sealed class ControlEntry
     public string Digest { get; set; } = "";
     public DateTimeOffset Created { get; set; } = DateTimeOffset.UtcNow;
     public string Detail { get; set; } = "等待终端启动确认";
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? Mode { get; set; }
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? JobMemoryLimit { get; set; }
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? PlanningBytes { get; set; }
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? PhysicalFloor { get; set; }
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? CommitFloor { get; set; }
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public int? CpuRate { get; set; }
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public Guid? WaiverId { get; set; }
 }
 public sealed class Ledger { public int SchemaVersion { get; set; } = 1; public string BootId { get; set; } = ""; public List<ControlEntry> Entries { get; set; } = []; }
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At);
-public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null);
-public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null);
+public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, Guid? WaiverId = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null);
+public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, Guid? WaiverId = null, DateTimeOffset? WaiverExpiresAt = null, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null);

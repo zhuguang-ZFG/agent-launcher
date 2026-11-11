@@ -5,6 +5,7 @@ using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
 if(args is ["--integration"]) return await Integration.RunAsync();
+if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
 if(args.Length>0&&args[0]=="--echo") { File.WriteAllText(args[1],JsonSerializer.Serialize(new { Cwd=Environment.CurrentDirectory, Args=args.Skip(2).ToArray() }));return 0; }
 if(args.Length>0&&args[0]=="--hold") {Thread.Sleep(int.Parse(args[1]));return 0;}
 if(args.Length>0&&args[0]=="--allocate") {try {var data=new byte[256*1024*1024];for(var i=0;i<data.Length;i+=4096)data[i]=1;return 10;}catch(OutOfMemoryException){return 0;}}
@@ -13,7 +14,7 @@ void Test(string name,Action action){try{action();passed.Add(name);Console.Write
 void Assert(bool value,string message){if(!value)throw new Exception(message);}
 Test("F15 profile switching",()=>{var c=new Configuration();c.Edit(d=>d.Slots[0].Profiles["pi"]=new(){Executable="pi.exe",Arguments=["--pi"]});c.Edit(d=>d.Slots[0].AgentId="codex");Assert(c.Draft.Slots[0].Current.Executable=="","stale executable");c.Edit(d=>d.Slots[0].AgentId="pi");Assert(c.Draft.Slots[0].Current.Arguments[0]=="--pi","lost profile");});
 Test("F16/F17 full snapshots and LastEdited",()=>{var c=new Configuration();c.Edit(d=>{d.Slots.ForEach(s=>s.Enabled=false);d.Slots[3].Enabled=true;d.DirectoryMode="prepared";});c.SaveTemplate("a");c.Restore(new());c.Restore(new());c.Restore(c.LastEdited!);Assert(c.Draft.Slots[3].Enabled&&!c.Draft.Slots[0].Enabled&&c.Draft.DirectoryMode=="prepared","snapshot lost");c.Edit(d=>d.DirectoryMode="shared");Assert(c.Templates["a"].DirectoryMode=="prepared","snapshot aliases draft");});
-Test("P low memory rejects without spawning",()=>{var s=new MemorySnapshot(16*ResourcePolicy.GiB,ResourcePolicy.GiB,32*ResourcePolicy.GiB,20*ResourcePolicy.GiB,10,DateTimeOffset.UtcNow);Assert(!ResourcePolicy.Check(s,0,ResourcePolicy.AgentBudget).Allowed,"low memory allowed");});
+Test("P low memory rejects without spawning",()=>{var total=16*ResourcePolicy.GiB;var policy=new ResourcePolicySnapshot("practical",ResourcePolicy.DefaultJobMemoryLimit,ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultPhysicalFloor(total),ResourcePolicy.DefaultCommitFloor(32*ResourcePolicy.GiB),ResourcePolicy.DefaultCpuRate,ResourcePolicy.GitJobMemoryLimit,ResourcePolicy.DefaultGitPlanningBytes);var d=ResourcePolicy.Evaluate(new MemorySnapshot(total,ResourcePolicy.GiB,32*ResourcePolicy.GiB,20*ResourcePolicy.GiB,10,DateTimeOffset.UtcNow),policy,[],[new BudgetItem(Guid.NewGuid(),"agent",ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultJobMemoryLimit)]);Assert(d.Kind==AdmissionKind.Deny,"low memory allowed");});
 Test("F atomic persistence and backup",()=>{var p=Path.Combine(temp,"config.json");Store.Save(p,new Configuration());var c=new Configuration();c.Draft.Project=temp;Store.Save(p,c);Assert(Store.Read<Configuration>(p)!.Draft.Project==temp&&File.Exists(p+".bak"),"save/backup failed");});
 Test("R11 required schema fields refuse partial configuration",()=>{bool rejected=false;try{JsonSerializer.Deserialize<Configuration>("{}",Store.Json);}catch(JsonException){rejected=true;}Assert(rejected,"empty config accepted");});
 Test("R12 receipt atomic replacement concurrent reader",()=>{
@@ -39,6 +40,20 @@ Test("G1 Job survives monitor handle close while runner retains ownership",()=>{
  using var p=new ProtectedProcess(new(Environment.ProcessPath!,["--hold","1200"],"exe"),temp,root,job);p.Resume();job.Dispose();using var reopened=new Job(name,openOnly:true);Assert(reopened.Members().Contains(p.Process.Id),"Job lost after monitor close");Assert(p.Process.WaitForExit(4000),"child timeout");
 });
 Test("G1 CPU cap configured at aggregate root",()=>{using var root=new Job(@"Local\AL-cap-"+Guid.NewGuid(),root:true);var size=Marshal.SizeOf<Native.CpuRate>();var buffer=Marshal.AllocHGlobal(size);try{Native.Check(Native.QueryInformationJobObject(root.Handle,15,buffer,(uint)size,IntPtr.Zero));var rate=Marshal.PtrToStructure<Native.CpuRate>(buffer);Assert(rate.Rate==3500&&(rate.Flags&4)!=0,"CPU cap not configured");}finally{Marshal.FreeHGlobal(buffer);}});
+Test("ACC-R05 reopening an existing root Job does not change CPU limits",()=>{
+ var name=@"Local\AL-reuse-"+Guid.NewGuid();
+ using var first=new Job(name,root:true,cpuRate:ResourcePolicy.DefaultCpuRate);
+ using var second=new Job(name,root:true,cpuRate:4000);
+ var size=Marshal.SizeOf<Native.CpuRate>();var buffer=Marshal.AllocHGlobal(size);
+ try
+ {
+  Native.Check(Native.QueryInformationJobObject(second.Handle,15,buffer,(uint)size,IntPtr.Zero));
+  var rate=Marshal.PtrToStructure<Native.CpuRate>(buffer);
+  Assert(rate.Rate==3500&&(rate.Flags&4)!=0,"reopened root Job CPU was changed to "+rate.Rate);
+  Assert(second.CreatedNew==false&&first.CreatedNew,"existing root Job was not detected");
+ }
+ finally{Marshal.FreeHGlobal(buffer);}
+});
 // F9 regression: each shim template's own node-selection semantics. Template text mirrors the private consts in Commands.Resolve; drift here means the adapter contract changed.
 const string piShimTemplate="""
 @ECHO off
@@ -117,5 +132,12 @@ Test("F12 portable templates inherit new project without weakening directory pol
  Assert(c.Draft.Slots[3].RequiresDirectory,"portable restore silently dropped an explicit directory requirement");
  var restored=JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(c,Store.Json),Store.Json)!;Assert(restored.Templates["portable"].IsPortableTemplate&&restored.Draft.Slots[3].RequiresDirectory,"directory binding lost during persistence");
 });
+ResourcePolicyChecks.RunMigration(Test,temp);
+ResourcePolicyChecks.RunReviewFixes(Test,temp);
+ResourcePolicyChecks.RunDecisions(Test);
+ResourcePolicyChecks.RunWaivers(Test);
+ResourcePolicyChecks.RunAuthorityFixes(Test);
+ConfigurationReviewChecks.Run(Test,temp);
+AgentLauncher.Tests.PaneLayoutChecks.Run(Test);
 Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");
 Store.Save(Path.Combine(temp,"results.json"),new{passed,failures});return failures.Count==0?0:1;

@@ -36,6 +36,7 @@ public static class Native
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInfo info);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
     [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int which);
+    [DllImport("kernel32.dll")] public static extern void SetLastError(uint error);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
     public static void Check(bool value) { if (!value) throw new Win32Exception(Marshal.GetLastWin32Error()); }
 }
@@ -81,16 +82,36 @@ public static class PhysicalDirectory
 public sealed class Job : IDisposable
 {
     public SafeFileHandle Handle { get; }
-    public Job(string name, ulong memory=0, bool root=false, bool openOnly=false)
+    public bool CreatedNew { get; }
+    public Job(string name, ulong memory=0, bool root=false, bool openOnly=false, int cpuRate=ResourcePolicy.DefaultCpuRate)
     {
-        Handle=openOnly?Native.OpenJobObject(0x001F003F,false,name):Native.CreateJobObject(IntPtr.Zero,name);
+        if(openOnly)
+        {
+            Handle=Native.OpenJobObject(0x001F003F,false,name);
+            if(Handle.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+            CreatedNew=false;
+            return;
+        }
+        Native.SetLastError(0);
+        Handle=Native.CreateJobObject(IntPtr.Zero,name);
         if(Handle.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+        CreatedNew=Marshal.GetLastWin32Error()!=183;
         try
         {
-            if(!openOnly && root) Set(15,new Native.CpuRate{Flags=1|4,Rate=3500});
-            if(!openOnly && memory>0)Set(9,new Native.ExtendedLimits{Basic=new Native.BasicLimits{Flags=0x200},JobMemory=(UIntPtr)memory});
+            if(CreatedNew && root) Set(15,new Native.CpuRate{Flags=1|4,Rate=(uint)cpuRate});
+            if(CreatedNew && memory>0)Set(9,new Native.ExtendedLimits{Basic=new Native.BasicLimits{Flags=0x200},JobMemory=(UIntPtr)memory});
         }
         catch { Handle.Dispose();throw; }
+    }
+    public Native.CpuRate? QueryCpuRate()
+    {
+        var size=Marshal.SizeOf<Native.CpuRate>();var p=Marshal.AllocHGlobal(size);
+        try
+        {
+            if(!Native.QueryInformationJobObject(Handle,15,p,(uint)size,IntPtr.Zero))return null;
+            return Marshal.PtrToStructure<Native.CpuRate>(p);
+        }
+        finally{Marshal.FreeHGlobal(p);}
     }
     private void Set<T>(int kind,T data) where T:struct
     {
