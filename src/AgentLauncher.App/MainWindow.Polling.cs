@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using System.Windows;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
@@ -15,6 +16,28 @@ public partial class MainWindow
 
     private bool HasActiveEntries => status?.Entries?.Any(e => !Store.IsTerminal(e)) == true;
     private bool IsPreviewStale => previewOnly && status?.Memory is {} memory && DateTimeOffset.UtcNow - memory.At > TimeSpan.FromSeconds(ResourcePolicy.SampleTtlSeconds);
+
+    private async void ReconcileClick(object sender, RoutedEventArgs e) => await GuardAsync(ReconcileAsync);
+    private async Task ReconcileAsync()
+    {
+        if (string.IsNullOrWhiteSpace(status?.AdmissionBlockedReason) || status.ReconcileOffered != true) return;
+        const string prompt = "将逐条核对陈旧占用：仅当资源组对象已不存在、创建者不在运行、且回执已证明全部受管进程退出（Finished）或进程从未运行（FailedBeforeStart）时，才将该记录标记为已结束并释放其预约预算；仅父进程退出但派生进程无法枚举核对的记录保持阻塞。不会结束任何进程，也不会删除记录。是否继续？";
+#if INTEGRATION_TESTS
+        var confirmed = TestConfirm != null ? TestConfirm(prompt, "核对并释放占用", MessageBoxButton.YesNo) : MessageBox.Show(this, prompt, "核对并释放占用", MessageBoxButton.YesNo, MessageBoxImage.Question);
+#else
+        var confirmed = MessageBox.Show(this, prompt, "核对并释放占用", MessageBoxButton.YesNo, MessageBoxImage.Question);
+#endif
+        if (confirmed != MessageBoxResult.Yes) return;
+        ReconcileButton.IsEnabled = false;
+        try
+        {
+            var response = await Ipc.EnsureAsync(new("reconcile", Guid.NewGuid()));
+            await RefreshAsync();
+            if (response.Ok) ProgressText.Text = response.Message;
+            else ErrorText.Text = response.Message;
+        }
+        finally { ReconcileButton.IsEnabled = true; }
+    }
 
     private void UpdatePollingInterval()
     {

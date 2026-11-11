@@ -352,6 +352,7 @@ public partial class MainWindow : Window
             commandsChecking?"正在检查命令和目录":
             LaunchButton.IsEnabled?previewOnly?"本机预览不是启动授权；点击后由监控器重新核验":admission.Kind==AdmissionKind.RequireWaiver?"硬保护通过；准备完成后需要一次性资源确认":"检查全部通过，可以启动":"本次配置已提交，暂不能再次启动";
         LaunchHint.Foreground=(Brush)FindResource(LaunchButton.IsEnabled?"Ink":"Muted");
+        ReconcileButton.Visibility=status?.ReconcileOffered==true&&!busy?Visibility.Visible:Visibility.Collapsed;
         if(status?.Entries?.Any(e=>!Store.IsTerminal(e))==true)SessionExpander.IsExpanded=true;
         UpdateMultipaneSummary(admission);UpdatePollingInterval();
     }

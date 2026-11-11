@@ -34,6 +34,50 @@ internal static class Integration
             }
             await Task.CompletedTask;
         });
+        await Test("R-handle-lost reconcile releases finished-tree proof and refuses unprovable trees",async()=>{
+            var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
+            const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            System.Reflection.FieldInfo Field(string name)=>type.GetField(name,flags)??throw new MissingFieldException(type.FullName,name);
+            var handle=type.GetMethod("Handle",flags)??throw new MissingMethodException(type.FullName,"Handle");
+            var finItem=Item("lost-finished",["--hold","1"]);var deadTreeItem=Item("lost-dead-tree",["--hold","1"]);var liveItem=Item("lost-live",["--hold","1"]);
+            using var rootJob=new Job(Store.RootJob,root:true);
+            using(var treeJob=new Job(Store.JobName(deadTreeItem.Id),ResourcePolicy.AgentBudget))
+            {
+                using var parent=new ProtectedProcess(new(Environment.ProcessPath!,["--hold","30000"],"exe"),cwd,rootJob,treeJob);
+                using var survivor=new ProtectedProcess(new(Environment.ProcessPath!,["--hold","60000"],"exe"),cwd,rootJob,treeJob);
+                parent.Resume();survivor.Resume();
+                for(var i=0;i<50&&treeJob.Members().Length<2;i++)await Task.Delay(100);
+                Assert(treeJob.Members().Length==2,"tree job did not contain both children: "+string.Join(",",treeJob.Members()));
+                parent.Process.Kill();await parent.Process.WaitForExitAsync();
+                var parentPid=parent.Process.Id;var parentTime=parent.CreationTime;
+                var survivorPid=survivor.Process.Id;var survivorTime=survivor.CreationTime;
+                treeJob.Dispose();
+                var openFailed=false;try{using var probe=new Job(Store.JobName(deadTreeItem.Id),openOnly:true);}catch(System.ComponentModel.Win32Exception e)when(e.NativeErrorCode==2){openFailed=true;}
+                Assert(openFailed,"scenario broken: job object still openable after last handle closed");
+                Assert(!survivor.Process.HasExited,"scenario broken: surviving tree member exited with the job object");
+                try
+                {
+                    var finEntry=new ControlEntry{Plan=finItem,Digest=Store.Digest(finItem),State="Creating",Detail="正在创建进程"};
+                    var deadTreeEntry=new ControlEntry{Plan=deadTreeItem,Digest=Store.Digest(deadTreeItem),State="Creating",Detail="正在创建进程"};
+                    var liveEntry=new ControlEntry{Plan=liveItem,Digest=Store.Digest(liveItem),State="Creating",Detail="正在创建进程"};
+                    Store.Save(Store.ReceiptPath(finItem.Id),new Receipt("Finished",parentPid,parentTime,1,"全部受管进程已退出，退出码 1",DateTimeOffset.UtcNow));
+                    Store.Save(Store.ReceiptPath(deadTreeItem.Id),new Receipt("Exited",parentPid,parentTime,-1073740791,"进程已退出，退出码 -1073740791",DateTimeOffset.UtcNow));
+                    Store.Save(Store.ReceiptPath(liveItem.Id),new Receipt("Started",survivorPid,survivorTime,null,"已启动进程（不代表任务完成）",DateTimeOffset.UtcNow));
+                    using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;
+                    Field("sample").SetValue(monitor,new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow));
+                    Field("ledger").SetValue(monitor,new Ledger{Entries=[finEntry,deadTreeEntry,liveEntry]});
+                    Field("ledgerPath").SetValue(monitor,Path.Combine(Store.Root,"reconcile-"+Guid.NewGuid().ToString("N")+".json"));
+                    Field("root").SetValue(monitor,new Job(Store.RootJob,root:true));
+                    var response=(Response)handle.Invoke(monitor,[new Request("reconcile",Guid.NewGuid())])!;
+                    Assert(finEntry.State=="Settled"&&finEntry.Detail.Contains("核对释放"),"finished-tree receipt was not released: "+finEntry.State+" "+finEntry.Detail);
+                    Assert(deadTreeEntry.State=="Creating"&&deadTreeEntry.Detail.Contains("拒绝"),"dead parent with a live surviving tree member was released: "+deadTreeEntry.State+" "+deadTreeEntry.Detail);
+                    Assert(liveEntry.State=="Creating"&&liveEntry.Detail.Contains("仍在运行"),"entry with a live recorded process did not refuse: "+liveEntry.State+" "+liveEntry.Detail);
+                    Assert(response.Ok==false&&response.Entries?.SingleOrDefault(e=>e.Plan.Id==finItem.Id)!=null,"reconcile outcome did not keep refusals while reporting the release");
+                    Assert(!survivor.Process.HasExited,"reconcile killed the surviving tree member");
+                }
+                finally{try{survivor.Process.Kill();await survivor.Process.WaitForExitAsync();}catch(System.InvalidOperationException){}}
+            }
+        });
         await Test("R13 synchronous ResumeThread rejection reclaims never-run child",async()=>{
             var output=Path.Combine(Store.Root,"resume-rejection-must-not-exist.json");var item=Item("resume-rejected",["--echo",output]);var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserved.Ok,reserved.Message);
             try

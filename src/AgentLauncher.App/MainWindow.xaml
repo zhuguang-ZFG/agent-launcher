@@ -80,6 +80,7 @@
         </Grid>
         <TextBlock x:Name="ResourceText" Style="{StaticResource Caption}" Margin="0,6,0,0" AutomationProperties.LiveSetting="Polite"/>
         <TextBlock x:Name="CpuLimitText" Style="{StaticResource Caption}" Margin="0,4,0,0"/>
+        <Button x:Name="ReconcileButton" Content="核对并释放占用" Style="{StaticResource QuietButton}" HorizontalAlignment="Left" Margin="0,6,0,0" Padding="12,4" Visibility="Collapsed" Click="ReconcileClick" AutomationProperties.Name="核对并释放占用" ToolTip="核对无存活进程的陈旧占用并释放其预约预算；仍在运行或无法证明的记录保持阻塞"/>
         <TextBlock Text="Job 上限是提交上限，不是当前占用；运行中仍可能分配失败或系统变卡。16 个可配置槽不表示 16 个 Agent 满载安全。" Style="{StaticResource Caption}" Margin="0,6,0,0"/>
         <Expander x:Name="ResourceDetailsExpander" Margin="0,6,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" AutomationProperties.Name="规划与余量明细" ToolTip="展开查看规划合计、硬保护余量、Job 上限对照与每项预算">
          <Expander.Header><TextBlock Text="规划与余量明细" FontWeight="SemiBold" Margin="4,0" MinHeight="36" VerticalAlignment="Center"/></Expander.Header>
