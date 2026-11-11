@@ -551,6 +551,14 @@ powershell -NoProfile -File scripts/test.ps1
 
 - 本轮为新增回归修改了两个 pinned 测试输入：`tests/AgentLauncher.Tests/Integration.cs`（+1 用例）与 `src/AgentLauncher.App/UiReviewChecks.cs`（+4 断言），两者哈希随之变化；只增不改，既有断言与阈值原样。与 `artifacts/preview-delivery-6ce19ec/verification.json` 基线逐项核对：21 项固定输入中其余 19 项 SHA-256 不变（含 `.github/workflows/ci.yml`、`Directory.Build.props`）。新用例与断言在 operator 建立基线前属待评审输入；手动绿色不替代 operator 基线。
 
+### 端到端与生产验证
+
+- 隔离 E2E（`artifacts/reconcile-e2e/inputs/e2e_reconcile.py`，INTEGRATION_TESTS 构建，真实按钮与原生确认框，win32 `#32770` 级交互）**13/13 通过**：句柄丢失阻塞显示按钮；确认框出现；**答「否」条目保持 Creating 且不发 IPC**；按钮继续提供；答「是」后条目 `Settled`，Detail 含完整证明（资源组不存在、PID 与创建时间核对、原阶段）；BootId 保留（非重启恢复）；回执与配置哈希不变；健康后按钮隐藏。探针（`probe_dialog.py`）另证实 invoke 后 0.319 秒出现对话框且未应答期间条目保持 Creating，确认门真实有效。
+- 探针稳定性记录：UIA `invoke` 在个别运行被吞（无异常、无对话框），重试后稳定；`capture_as_image` 抓的是屏幕区域，窗口在后台时会抓到前台他窗内容，生产截图改为先置前台并核验前台句柄。run-5/run-6 的释放发生在探针失败后的用户实时点击（受控 No/Yes 证据以 run-8 为准）。
+- 生产实测（真实用户数据，只读交互）：健康账本不显示按钮；`SetWindowPos` 三尺寸（1120×800/1400×1000/900×700，前台句柄均为本窗口）布局正常——宽版双栏资源面板、窄版单栏滚动且底部警告正确换行；App 优雅退出 exit 0；用户 `configuration.json`/`control.json`/`.bak` 哈希前后不变。UIA 改尺寸两法（`move_window`、TransformPattern）在本窗口不可用，按两次失败规则改用 Win32 `SetWindowPos`，未再重试 UIA。
+- 生产 DLL marker 扫描（`AGENT_LAUNCHER_TEST_ROOT`/`FAKE_SAMPLE`/`INTEGRATION_TESTS`/`--ui-check`/`--idle-check` 等）四个程序集全部 CLEAN。预览已替换：`artifacts/preview-before-reconcile` 完整备份，`artifacts/preview` 为新构建（15 文件，含使用说明），桌面快捷方式目标路径不变；验证清单 `artifacts/preview-delivery-reconcile/verification.json`。
+- 评审归档：`artifacts/reconcile-e2e/review-inputs.zip`（15 项：3 个脚本、E2E/生产/探针证据、UI 报告、manifest）。`task_verify run` 仍为 **unverified / project-or-git-baseline-unavailable，checks=[]**；手动绿色不替代 operator 基线。PR #3，CI 全绿后合并。
+
 ### 限制
 
 - 核对释放在「资源组可打开但无进程」等常规可恢复情形下不介入（常规 Refresh 已处理）；仅覆盖句柄丢失类阻塞。无法证明的记录（回执缺失、进程存活、创建者仍在、其它 Win32 错误）一律保持阻塞，只能等系统重启或人工按 .bak 核对。
