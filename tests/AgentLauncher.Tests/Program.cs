@@ -8,6 +8,9 @@ if(args is ["--integration"]) return await Integration.RunAsync();
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
 if(args.Length>0&&args[0]=="--echo") { File.WriteAllText(args[1],JsonSerializer.Serialize(new { Cwd=Environment.CurrentDirectory, Args=args.Skip(2).ToArray() }));return 0; }
 if(args.Length>0&&args[0]=="--hold") {Thread.Sleep(int.Parse(args[1]));return 0;}
+if(args.Length>2&&args[0]=="--spawn-late") {var psi=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false};psi.ArgumentList.Add("--write-after");psi.ArgumentList.Add(args[1]);psi.ArgumentList.Add(args[2]);_ = Process.Start(psi);return 0;}
+if(args.Length>2&&args[0]=="--write-after"){Thread.Sleep(int.Parse(args[1]));File.WriteAllText(args[2],"late");return 0;}
+if(args.Length>0&&args[0]=="--spam"){for(var i=0;i<2000;i++)Console.WriteLine("0123456789012345678901234567890123456789012345678901234567890123");return 0;}
 if(args.Length>0&&args[0]=="--allocate") {try {var data=new byte[256*1024*1024];for(var i=0;i<data.Length;i+=4096)data[i]=1;return 10;}catch(OutOfMemoryException){return 0;}}
 var failures=new List<string>();var passed=new List<string>();var temp=Path.Combine(Path.GetTempPath(),"AgentLauncher-tests-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temp);
 void Test(string name,Action action){try{action();passed.Add(name);Console.WriteLine("PASS "+name);}catch(Exception e){failures.Add(name+": "+e);Console.WriteLine("FAIL "+name+": "+e.Message);}}
@@ -86,6 +89,47 @@ Test("P02 Job memory evidence survives child exit and never invents crash cause"
  var receipt=new Receipt("Finished",1,2,-1073740791,"test",DateTimeOffset.UtcNow,evidence);
  Assert(JsonSerializer.Deserialize<Receipt>(JsonSerializer.Serialize(receipt,Store.Json),Store.Json)?.JobMemory==evidence,"receipt lost evidence");
  Assert(JsonSerializer.Deserialize<Receipt>("{\"Phase\":\"Finished\",\"Pid\":1,\"ProcessTime\":2,\"ExitCode\":0,\"Detail\":\"old\",\"At\":\"2026-11-11T00:00:00Z\"}",Store.Json)?.JobMemory==null,"legacy receipt compatibility lost");
+});
+Test("ACC-A01 preset argv keeps every argument exact and isolated per agent",()=>{
+ var omp=AgentPresets.For("omp",AgentPresets.OmpVerifiedVersion);
+ Assert(omp.Count==5&&AgentPresets.For("omp","19.0.0").Count==0,"unknown version exposed presets");
+ Assert(AgentPresets.All.All(AgentPresets.StructurallyValid)&&AgentPresets.All.Select(p=>p.Id).Distinct().Count()==AgentPresets.All.Count,"preset table invalid or ids collide");
+ Assert(AgentPresets.For("claude",AgentPresets.CodexVerifiedVersion).Count==0&&AgentPresets.For("codex",AgentPresets.CodexVerifiedVersion).All(p=>p.AgentId=="codex"),"preset leaked across agents");
+ var resume=omp.Single(p=>p.Id=="omp-resume");
+ var filled=resume.Fill("会话 id; --x");
+ Assert(filled.Arguments.SequenceEqual(new[]{"--resume","会话 id; --x"})&&resume.Arguments.Contains(ArgumentPreset.ValueToken),"preset fill corrupted arguments or aliased the table");
+ Assert(AgentPresets.All.All(p=>!p.Preview.Contains(ArgumentPreset.ValueToken))&&resume.Preview.Contains("会话 ID 前缀或路径"),"preset preview leaked the fill token or lost its value label");
+ var rejected=false;try{resume.Fill("  ");}catch(InvalidDataException){rejected=true;}
+ Assert(rejected,"empty preset value accepted");
+ var plain=omp.Single(p=>p.Id=="omp-continue");Assert(plain.Fill("ignored").Arguments.SequenceEqual(new[]{"--continue"}),"preset without value changed arguments");
+ var cwd=Path.Combine(temp,"argv space 中文");Directory.CreateDirectory(cwd);var output=Path.Combine(temp,"preset-args.json");
+ var expected=new[]{"--resume","会话 id; --x","--","-x","--name=value","a b","中文","第一行\n第二行","tail\\","","a;split-pane"};
+ using var root=new Job(@"Local\AL-preset-root-"+Guid.NewGuid(),root:true);using var job=new Job(@"Local\AL-preset-child-"+Guid.NewGuid(),128*1024*1024);
+ using var p=new ProtectedProcess(new(Environment.ProcessPath!,["--echo",output,..expected],"exe"),cwd,root,job);
+ p.Resume();Assert(p.Process.WaitForExit(5000),"child timeout");
+ using var data=JsonDocument.Parse(File.ReadAllText(output));Assert(data.RootElement.GetProperty("Args").EnumerateArray().Select(x=>x.GetString()).SequenceEqual(expected),"preset argv corrupt");
+});
+Test("ACC-A02 version parsing and bounded probe leave no descendant",()=>{
+ Assert(AgentVersion.Parse("omp/18.18.8\n")=="18.18.8"&&AgentVersion.Parse("codex-cli 0.167.1")=="0.167.1"&&AgentVersion.Parse("v1.2.3")=="1.2.3","real version output not parsed");
+ Assert(AgentVersion.Parse(null)==null&&AgentVersion.Parse("")==null&&AgentVersion.Parse("Codex CLI")==null&&AgentVersion.Parse(new string('9',64))==null,"noise became a version");
+ var git=Commands.FindExe("git.exe");
+ if(git!=null)
+ {
+  var result=AgentProbe.RunAsync(new(git,["--version"],"exe"),temp,TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+  Assert(result is{TimedOut:false,ExitCode:0}&&result.Output.Contains("git version"),"real version probe failed: "+result.Error);
+  var fingerprint=AgentProbe.Fingerprint(git);Assert(fingerprint.Length==64&&fingerprint==AgentProbe.Fingerprint(git)&&fingerprint!=AgentProbe.Fingerprint(Environment.ProcessPath!),"fingerprint unstable or not content based");
+ }
+ var cmd=Environment.ProcessPath!;
+ var marker=Path.Combine(temp,"probe-descendant.txt");
+ if(File.Exists(marker))File.Delete(marker);
+ var timed=AgentProbe.RunAsync(new(cmd,["--hold","3000"],"exe"),temp,TimeSpan.FromMilliseconds(500)).GetAwaiter().GetResult();
+ Assert(timed.TimedOut&&timed.ExitCode!=0,$"probe did not report a timeout: timedOut={timed.TimedOut} exit={timed.ExitCode} out={timed.Output} err={timed.Error}");
+ var spawned=AgentProbe.RunAsync(new(cmd,["--spawn-late","2500",marker],"exe"),temp,TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+ Assert(spawned is{TimedOut:false,ExitCode:0},"descendant fixture did not start");
+ Thread.Sleep(3500);
+ Assert(!File.Exists(marker),"probe left a descendant writing after the main process exited");
+ var capped=AgentProbe.RunAsync(new(cmd,["--spam"],"exe"),temp,TimeSpan.FromSeconds(5),1024).GetAwaiter().GetResult();
+ Assert(capped.Truncated&&capped.Output.Length<=1024,$"probe output was not bounded: truncated={capped.Truncated} timedOut={capped.TimedOut} exit={capped.ExitCode} len={capped.Output.Length} errlen={capped.Error.Length}");
 });
 Test("G1 Job survives monitor handle close while runner retains ownership",()=>{
  var name=@"Local\AL-survive-"+Guid.NewGuid();using var root=new Job(@"Local\AL-survive-root-"+Guid.NewGuid(),root:true);var job=new Job(name,128*1024*1024);using var runnerHandle=new Job(name,openOnly:true);

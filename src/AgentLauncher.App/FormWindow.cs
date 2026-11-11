@@ -10,6 +10,13 @@ public sealed class FormWindow : Window
 {
     public Dictionary<string,string> Values { get; }=[];
     public Dictionary<string,string[]> ArgumentValues { get; }=[];
+    private readonly Dictionary<string,ArgumentEditor> argumentEditors=[];
+    /// <summary>Replaces one argument list in place so actions apply to the same editor the user sees.</summary>
+    public void SetArguments(string key,string[] arguments)
+    {
+        if(!argumentEditors.TryGetValue(key,out var editor))throw new ArgumentException("没有该参数编辑器："+key,nameof(key));
+        editor.Replace(arguments);ArgumentValues[key]=[..arguments];
+    }
     public FormWindow(Window owner,string title,(string Key,string Label,string Value,bool Multiline)[] fields,string note,Dictionary<string,(string Value,string Label)[]>? choices=null,string[]? bools=null,Dictionary<string,string[]>? suggestions=null,Dictionary<string,string[]>? argumentLists=null,Dictionary<string,Action<Window>>? actions=null)
     {
         Owner=owner;Title=title;Width=Math.Min(660,SystemParameters.WorkArea.Width-32);Height=Math.Min(620,SystemParameters.WorkArea.Height-32);WindowStartupLocation=WindowStartupLocation.CenterOwner;
@@ -23,12 +30,11 @@ public sealed class FormWindow : Window
         if(!string.IsNullOrEmpty(note))panel.Children.Add(new TextBlock{Text=note,Margin=new(0,0,0,16),Foreground=(Brush)FindResource("Muted")});
         if(actions!=null){var actionRow=new WrapPanel{Margin=new(0,0,0,12)};foreach(var action in actions){var button=new Button{Content=action.Key,Margin=new(0,0,8,4)};button.Click+=(_,_)=>action.Value(this);actionRow.Children.Add(button);}panel.Children.Add(actionRow);}
         var readers=new Dictionary<string,Func<string>>();Control? first=null;
-        var argumentReaders=new Dictionary<string,ArgumentEditor>();
         foreach(var f in fields)
         {
             if(argumentLists?.TryGetValue(f.Key,out var arguments)==true)
             {
-                var editor=new ArgumentEditor(arguments);argumentReaders[f.Key]=editor;
+                var editor=new ArgumentEditor(arguments);argumentEditors[f.Key]=editor;
                 panel.Children.Add(new TextBlock{Text=f.Label,FontWeight=FontWeights.SemiBold,Margin=new(0,8,0,8)});panel.Children.Add(editor);continue;
             }
             if(choices?.TryGetValue(f.Key,out var options)==true)
@@ -68,7 +74,7 @@ public sealed class FormWindow : Window
         }
         root.Children.Add(new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled});Content=root;
         UiScale.Apply(this);
-        apply.Click+=(_,_)=>{foreach(var pair in readers)Values[pair.Key]=pair.Value();foreach(var pair in argumentReaders)ArgumentValues[pair.Key]=pair.Value.Arguments;DialogResult=true;};
+        apply.Click+=(_,_)=>{foreach(var pair in readers)Values[pair.Key]=pair.Value();foreach(var pair in argumentEditors)ArgumentValues[pair.Key]=pair.Value.Arguments;DialogResult=true;};
         Loaded+=(_,_)=>first?.Focus();
         Label FieldLabel(string text,Control? target)=>new(){Target=target,Padding=new(0,4,0,0),Content=Wrapping(text)};
         Grid FieldRow(Control input,params Button[] buttons)

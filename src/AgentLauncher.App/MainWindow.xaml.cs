@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<Guid,TextBlock> commandLabels=[];
     private readonly string configPath=Store.FilePath("configuration.json");
     private bool commandsChecking,commandsRunning;
+    private bool editingSlot;
 #if INTEGRATION_TESTS
     private bool uiChecksStarted;
     private Task? commandCheckPause;
@@ -591,15 +592,46 @@ public partial class MainWindow : Window
         var dialog=new FormWindow(this,"保存完整组合",[("name","组合名称","",false),("binding","项目目录","bound",false)],"保存勾选项、程序/参数、目录策略与布局，不覆盖同名组合。通用组合不保存路径；原本单独指定的目录需要在新项目下重新选择。",choices:new(){["binding"]=[("bound","绑定当前项目与目录"),("portable","通用组合：使用时继承新项目")]});
         if(dialog.ShowDialog()==true){try{config.SaveTemplate(dialog.Values["name"],portable:dialog.Values["binding"]=="portable");QueueSave();Render();}catch(ArgumentException ex){ErrorText.Text=ex.Message;}}
     }
-    private void EditSlot(Guid id)
+    private async void EditSlot(Guid id)=>await GuardAsync(()=>EditSlotAsync(id));
+    private async Task EditSlotAsync(Guid id)
     {
-        var slot=config.Draft.Slots.Single(s=>s.Id==id);var revision=config.Draft.Revision;var profile=slot.Current;
-        var discovered=(slot.AgentId=="custom"?discoveredInstalls.Values.SelectMany(paths=>paths):discoveredInstalls.GetValueOrDefault(slot.AgentId)??[]).Concat(config.Draft.Slots.Select(s=>s.Profiles.GetValueOrDefault(slot.AgentId)?.Executable??"")).Append(profile.Executable).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var fields=new List<(string Key,string Label,string Value,bool Multiline)>();
-        if(slot.AgentId=="custom")fields.Add(("name","自定义 Agent 名称",slot.CustomName??"",false));
-        fields.AddRange([("exe","程序路径（留空自动查找）",profile.Executable,false),("args","启动参数","",false),("cwd","覆盖工作目录（留空继承项目）",slot.Directory,false),("note","分工备注（不会自动发给 Agent）",slot.Note,true)]);
-        var dialog=new FormWindow(this,$"{Agents.Get(slot.AgentId).Name} · 参数与目录",fields.ToArray(),"切换 Agent 会保留各自的程序和参数。取消不修改配置。",suggestions:new(){["exe"]=[..discovered]},argumentLists:new(){["args"]=profile.Arguments});
-        if(dialog.ShowDialog()==true){if(revision!=config.Draft.Revision){ErrorText.Text="配置已改变，请重新打开编辑。";return;}Edit(d=>{var target=d.Slots.Single(s=>s.Id==id);target.Profiles[target.AgentId]=new(){Executable=dialog.Values["exe"].Trim(),Arguments=dialog.ArgumentValues["args"]};if(target.AgentId=="custom")target.CustomName=string.IsNullOrWhiteSpace(dialog.Values["name"])?null:dialog.Values["name"].Trim();target.Directory=dialog.Values["cwd"].Trim();if(dialog.Values.GetValueOrDefault("inheritDirectory")=="true")target.RequiresDirectory=false;target.Note=dialog.Values["note"];});}
+        if(editingSlot)return;
+        editingSlot=true;
+        try
+        {
+            var slot=config.Draft.Slots.Single(s=>s.Id==id);var revision=config.Draft.Revision;var profile=slot.Current;
+            AgentCapability? capability=null;string? probeError=null;
+            ProgressText.Text="正在核对 CLI 版本与预设…";
+            try{capability=await AgentProbe.ProbeCapabilityAsync(slot.AgentId,profile,string.IsNullOrWhiteSpace(config.Draft.Project)?Store.Root:config.Draft.Project,TimeSpan.FromSeconds(8));}
+            catch(Exception e)when(e is not OutOfMemoryException){probeError=e.Message;}
+            finally{ProgressText.Text="";}
+            if(revision!=config.Draft.Revision){ErrorText.Text="检查版本期间配置已改变，请重新打开详情。";return;}
+            var presets=capability?.Presets??[];
+            var discovered=(slot.AgentId=="custom"?discoveredInstalls.Values.SelectMany(paths=>paths):discoveredInstalls.GetValueOrDefault(slot.AgentId)??[]).Concat(config.Draft.Slots.Select(s=>s.Profiles.GetValueOrDefault(slot.AgentId)?.Executable??"")).Append(profile.Executable).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var fields=new List<(string Key,string Label,string Value,bool Multiline)>();
+            if(slot.AgentId=="custom")fields.Add(("name","自定义 Agent 名称",slot.CustomName??"",false));
+            fields.AddRange([("exe","程序路径（留空自动查找）",profile.Executable,false),("args","启动参数","",false),("cwd","覆盖工作目录（留空继承项目）",slot.Directory,false),("note","分工备注（不会自动发给 Agent）",slot.Note,true)]);
+            var capabilityNote=capability is null?$"版本探测失败：{probeError??"未知原因"}。预设不可用，仍可手动填写参数。":$"{Agents.Get(slot.AgentId).Name} {capability.Version??"版本未知"} · {capability.Note}";
+            var actions=new Dictionary<string,Action<Window>>();
+            if(presets.Count>0)actions["套用预设…"]=window=>ApplyPreset(window,presets);
+            var dialog=new FormWindow(this,$"{Agents.Get(slot.AgentId).Name} · 参数与目录",fields.ToArray(),"切换 Agent 会保留各自的程序和参数。取消不修改配置。\n"+capabilityNote,suggestions:new(){["exe"]=[..discovered]},argumentLists:new(){["args"]=profile.Arguments},actions:actions.Count==0?null:actions);
+            if(dialog.ShowDialog()==true){if(revision!=config.Draft.Revision){ErrorText.Text="配置已改变，请重新打开编辑。";return;}Edit(d=>{var target=d.Slots.Single(s=>s.Id==id);target.Profiles[target.AgentId]=new(){Executable=dialog.Values["exe"].Trim(),Arguments=dialog.ArgumentValues["args"]};if(target.AgentId=="custom")target.CustomName=string.IsNullOrWhiteSpace(dialog.Values["name"])?null:dialog.Values["name"].Trim();target.Directory=dialog.Values["cwd"].Trim();if(dialog.Values.GetValueOrDefault("inheritDirectory")=="true")target.RequiresDirectory=false;target.Note=dialog.Values["note"];});}
+        }
+        finally{editingSlot=false;}
+    }
+    private static void ApplyPreset(Window owner,IReadOnlyList<ArgumentPreset> presets)
+    {
+        var pick=new FormWindow(owner,"参数预设",[("preset","预设",presets[0].Id,false)],"预设是一组完整参数，仅对已验证版本提供；套用后仍可逐项修改或全部替换。取消不改变参数。",choices:new(){["preset"]=[..presets.Select(preset=>(preset.Id,$"{preset.Name} · {preset.Preview}"))]});
+        if(pick.ShowDialog()!=true)return;
+        var chosen=presets.FirstOrDefault(preset=>preset.Id==pick.Values["preset"]);if(chosen is null)return;
+        string? value=null;
+        if(chosen.NeedsValue)
+        {
+            var ask=new FormWindow(owner,"填写预设值",[("value",chosen.ValueLabel!,"",false)],"该值作为单个参数精确传递，不添加 shell 引号。");
+            if(ask.ShowDialog()!=true)return;value=ask.Values["value"];
+        }
+        try{(owner as FormWindow)?.SetArguments("args",chosen.Fill(value).Arguments);}
+        catch(InvalidDataException e){MessageBox.Show(owner,e.Message,"参数预设",MessageBoxButton.OK,MessageBoxImage.Warning);}
     }
     private async void ResourceClick(object sender,RoutedEventArgs e)=>await GuardAsync(ShowResourceSettingsAsync);
     private FormWindow CreateSettingsDialog()=>new(this,"设置",[("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates});

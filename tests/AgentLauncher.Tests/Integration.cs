@@ -133,6 +133,20 @@ internal static class Integration
             CommandSpec command;try{command=Commands.Resolve("pi",new(){Arguments=["--version"]});}catch(Exception e){throw new Exception($"pi resolved path: {found??"<null>"}; {e.Message}");}
             var result=await ControlledCommand.RunAsync(command,cwd);Assert(result.Code==0&&result.Output.Trim().Length>0,result.Error);evidence.Add(new{name="pi-version",output=result.Output.Trim()});
         });
+        await Test("Real Omp and Codex capability probes gate presets by version",async()=>{
+            foreach(var agent in new[]{"omp","codex"})
+            {
+                var found=Commands.FindExe(Agents.Get(agent).Command);evidence.Add(new{name=agent+"-found",path=found});
+                if(found==null){evidence.Add(new{name=agent+"-probe",result="not installed"});continue;}
+                var capability=await AgentProbe.ProbeCapabilityAsync(agent,new(),cwd,TimeSpan.FromSeconds(15));
+                evidence.Add(new{name=agent+"-capability",version=capability.Version,note=capability.Note,fingerprint=capability.Fingerprint[..12]});
+                Assert(capability.Fingerprint.Length==64,$"{agent} fingerprint missing");
+                if(capability.Version==null)continue;
+                var verified=capability.Version is AgentPresets.OmpVerifiedVersion or AgentPresets.CodexVerifiedVersion;
+                Assert(capability.Presets.Count>0==verified&&capability.Presets.All(p=>p.AgentId==agent),$"{agent} presets offered outside its verified version");
+                if(verified)Assert(capability.Note.Contains("版本与预设已按此安装核对"),$"{agent} verified version not reported: {capability.Note}");
+            }
+        });
         await Test("Client timeout after committed reserve auto-revokes",async()=>{
             var item=Item("cleanup",["--hold","100"]);var cleanupNotifications=0;
             Environment.SetEnvironmentVariable("AGENT_LAUNCHER_IPC_DROP_AFTER_SEND","1");

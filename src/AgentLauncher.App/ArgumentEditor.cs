@@ -38,4 +38,5 @@ public sealed class ArgumentEditor : StackPanel
         }
     }
     private void Move(int from,int to){(values[from],values[to])=(values[to],values[from]);Render(to);}
+    public void Replace(IEnumerable<string> arguments){values.Clear();values.AddRange(arguments);Render();}
 }

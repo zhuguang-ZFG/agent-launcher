@@ -183,6 +183,13 @@ public partial class MainWindow
             FindLogical<Button>(reorderDialog).Single(b=>b.Content as string=="应用").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         }));
         Check("F05 argument reorder and removal preserve remaining values",reorderDialog.ShowDialog()==true&&reorderDialog.ArgumentValues["args"].SequenceEqual(new[]{"second",""}));
+        var presetDialog=new FormWindow(this,"预设套用",[("args","启动参数","",false)],"",argumentLists:new(){["args"]=["--stale"]});
+        var presetArgs=AgentPresets.For("omp",AgentPresets.OmpVerifiedVersion).Single(p=>p.Id=="omp-resume").Fill("session-中文").Arguments;
+        presetDialog.SetArguments("args",presetArgs);
+        var presetRows=FindLogical<TextBox>(presetDialog).Select(t=>t.Text).ToArray();
+        presetDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>FindLogical<Button>(presetDialog).Single(b=>b.Content as string=="应用").RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
+        Check("ACC-A01 applied preset previews and saves every argument exactly",presetDialog.ShowDialog()==true&&presetDialog.ArgumentValues["args"].SequenceEqual(presetArgs)&&presetRows.SequenceEqual(presetArgs));
+        Check("ACC-A02 presets stay unavailable without the exact verified version",AgentPresets.For("omp","19.0.0").Count==0&&AgentPresets.For("omp",AgentPresets.OmpVerifiedVersion).Count>0);
         var priorProject=config.Draft.Project;config.Draft.Project="C:\\PrivateProject\\DoNotExport";config.Draft.Slots[0].Profiles[config.Draft.Slots[0].AgentId]=new(){Arguments=["SECRET_ARGUMENT_SENTINEL"]};
         var redacted=DiagnosticText(false);var explicitPaths=DiagnosticText(true);
         Check("diagnostics excludes arguments and redacts paths by default",!redacted.Contains("DoNotExport")&&!redacted.Contains("SECRET_ARGUMENT_SENTINEL")&&!explicitPaths.Contains("SECRET_ARGUMENT_SENTINEL"));
