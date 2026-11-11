@@ -273,6 +273,8 @@ Task<RecoveryReport> RecoverAsync(CancellationToken ct);
 
 写操作先记录 Intent，再运行 Git，再核对 `git worktree list --porcelain`、分支、OID、路径，最后记录完成。Git 已成功但记录未写完时，恢复执行核对而非再创建。准备失败保留已创建目录；不自动删除以模拟回滚。Git 自身 hooks/filters 等既有行为可能触发项目配置，启动器不额外执行“初始化脚本”；不能绝对宣称 Git 不执行任何配置逻辑。
 
+Git 创建命令为 `git worktree add -b <branch> <targetArg> <oid>`，工作目录固定为已解析的物理源仓库根。`targetArg` 采用 `Path.GetRelativePath(root,target)` 与绝对 `target` 中更短的表示；跨卷不能相对化时保留绝对路径。只改变命令参数写法，落盘目标、碰撞检查和身份核对仍使用原绝对目录。Git 会把该参数形成的 `<targetArg>/.git` 传给检出子进程；不必要的长绝对参数可触发 `'$GIT_DIR' too big`，`core.longpaths=true` 不足以消除这个限制。失败仍保留原有诊断与准备状态，不修改用户 Git 配置、缩短实际目录或拆成可破坏恢复语义的额外 reset。
+
 配置/记录位于 `%LOCALAPPDATA%\AgentLauncher\`：
 
 | 路径 | 内容 / 生命周期 |
@@ -317,6 +319,8 @@ Task<RecoveryReport> RecoverAsync(CancellationToken ct);
 ### 6. 必要测试
 
 F09～F14、R09～R12、R16：大小写/别名路径、同 worktree 子目录跨批次占用、脏目录、创建后中断、磁盘写失败、配置损坏、schema 升级、多实例冲突。
+
+CR12 合法兄弟目录及非重叠活动目录还须覆盖长临时根（与 Windows CI 路径长度相当），验证原物理目标、分支/OID与隔离身份保持不变；不能以缩短测试根或跳过 Git 来获得通过。
 
 ### 7. 错误与正确做法
 

@@ -205,7 +205,12 @@ public sealed class WorkspacePreparer
                 if((ulong)drive.AvailableFreeSpace<reserve+estimated)throw new IOException("目标盘空间不足以保留余量和检出文件。");
                 if(!known&&!targetExists)Store.Save(workspacePath,new{State="Intent",Root=root,Target=target,Branch=branch,Oid=oid});
                 progress($"正在准备/核对第 {plan.Position} 项独立目录 · {oid[..8]}。取消只停止后续步骤，已创建目录保留。");
-                if(!targetExists)await Git(root,["worktree","add","-b",branch,target,oid],ct);
+                if(!targetExists)
+                {
+                    // Git exports <target>/.git to its checkout child; avoid its absolute GIT_DIR length limit when the same target has a shorter relative spelling.
+                    var gitTarget=Path.GetRelativePath(root,target);if(gitTarget.Length>target.Length)gitTarget=target;
+                    await Git(root,["worktree","add","-b",branch,gitTarget,oid],ct);
+                }
                 var actual=(await Git(target,["rev-parse","HEAD"],ct)).Trim();if(actual!=oid)throw new IOException("已有准备目录基线已变化，请改用“使用已准备目录”。");
                 var actualBranch=(await Git(target,["symbolic-ref","--short","HEAD"],ct)).Trim();if(actualBranch!=branch)throw new IOException("已有目录分支不匹配，禁止复用。");
                 // Same OID/branch is not proof of identity: a separate clone can satisfy both, so validate the repository and worktree registry.

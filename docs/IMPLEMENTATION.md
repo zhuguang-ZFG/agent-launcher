@@ -515,3 +515,12 @@ powershell -NoProfile -File scripts/test.ps1
 - 已打开实际 Terminal 和 WPF 截图核对：WPF 四计数均为 16；Terminal 的 4×4 排布可见，但保存画面时右下角部分被其他应用通知遮挡，不能称为无遮挡的全格视觉证据。16 格 UIA 文本/几何及右下角标题检查已通过；未修改通知设置，也未重复启动来重拍。
 - 本轮关闭的是“同步记录器的 16 窗格端到端未验证”缺口，**没有复现或修复历史 15/16**。插桩改变命令和进程层级/时序，不能据此证明未插桩长期稳定。原失败记录、校准失败、内存阻断及原评审包保留；本轮新增结果见 `artifacts/p0-sync-start/run-8e502b86d4/verified-lifecycle.json`，诊断输入仍待评审。未改产品源码，未重跑全套测试或重建预览，未 commit/push。
 - 本轮手动场景 passed=25、failed=0；最终 `task_verify run` 仍返回 **unverified / project-or-git-baseline-unavailable，checks=[]**，operator passed/failed 均无执行项，原样结果保存于本次运行目录的 `operator-verification.json`。7 个恢复源文件与原归档逐一匹配后已清理，生成的诊断运行时也已移除；原 `review-inputs.zip` 未改写。
+
+## 19. CI worktree 长路径失败的单因修复（2026-11-11）
+
+- 用户明确授权 commit/push 并在 CI 绿色后合并；P0 提交 `6123b79` 已推送 PR #2。其 [gate run 42940773058](https://github.com/zhuguang-ZFG/agent-launcher/actions/runs/42940773058) 模型检查 **65/65**，集成阶段两个 CR12 合法目录用例失败于 `Git 准备失败（128）：fatal: '$GIT_DIR' too big`；WPF/浏览器未到达，未合并该失败 head。
+- 根因是跨层路径表示假设，不是继承了错误 Git 环境变量。本机 Git 2.54.0.windows.1 的隔离对照：160 字符绝对目标成功，225 字符绝对目标失败；同长目标加 `-c core.longpaths=true` 仍失败；改用指向同一目标的 178 字符相对参数成功。上游 [builtin/worktree.c](https://github.com/git-for-windows/git/blob/v2.54.0.windows.1/builtin/worktree.c#L585) 将 `<target>/.git` 导出为检出子进程的 `GIT_DIR`，因此绝对目标写法会额外触发其长度限制。
+- 产品仅修改 `WorkspacePreparer.PrepareAsync` 的 `worktree add` 参数：在固定物理源仓库 cwd 下选择更短的等价相对目标；跨卷或相对表示更长时保持绝对目标。实际目标、Intent/Completed 记录、源仓库身份、分支/OID、碰撞与恢复核对均不改，没有全局 Git/注册表设置变更，也没有分拆 checkout/reset。
+- 通过独立窄执行器链接**未改动的** `WorkspaceReviewChecks.cs`，只执行 CI 中失败的原两个用例。测试根长度同 CI 均为 **104 字符**：旧版 **0 通过 / 2 失败，exit 1**；修正后 **2 通过 / 0 失败，exit 0**。测试源 SHA-256 和窄执行器 DLL 哈希一致；本轮 19 个固定测试/runner/策略输入及 CI 工作流均未修改。复现不是重新跑旧 CI 求偶然绿色，而是在本机等长路径上区分原因并验证同一断言。
+- 原始 `red.json`、`green.json`、Git 参数对照及窄执行器归档 `artifacts/ci-git-path/review-inputs.zip`，新增诊断输入待评审，不接入或替换固定测试集；源码和临时编译输出清理。`task_verify run` 仍为 **unverified / project-or-git-baseline-unavailable，checks=[]**；手动红绿不替代 [PR #2](https://github.com/zhuguang-ZFG/agent-launcher/pull/2) 当前提交的完整 Windows gate。
+- 本修复只针对已复现的 Git 创建边界，与第 18 节未归因的 15/16 部分启动不同；不宣称后者已修复。现有 CI 阈值、测试断言和工作流保持不变，完整 CI 成功后才允许合并。
