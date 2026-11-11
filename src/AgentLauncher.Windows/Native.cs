@@ -26,6 +26,7 @@ public static class Native
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool SetInformationJobObject(SafeFileHandle job, int kind, IntPtr data, uint size);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool QueryInformationJobObject(SafeFileHandle job, int kind, IntPtr data, uint size, IntPtr returned);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool IsProcessInJob(IntPtr process, SafeFileHandle job, out bool result);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, uint flags, ref UIntPtr size);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, UIntPtr attribute, IntPtr value, UIntPtr size, IntPtr previous, IntPtr returned);
     [DllImport("kernel32.dll")] public static extern void DeleteProcThreadAttributeList(IntPtr list);
@@ -135,6 +136,11 @@ public sealed class Job : IDisposable
         }
         finally{Marshal.FreeHGlobal(p);}
     }
+    public void SetMemoryLimit(ulong bytes)
+    {
+        if(Handle.IsClosed||Handle.IsInvalid)throw new InvalidOperationException("任务组句柄不可用，无法调整内存额度。");
+        Set(9,new Native.ExtendedLimits{Basic=new Native.BasicLimits{Flags=bytes>0?0x200u:0u},JobMemory=(UIntPtr)bytes});
+    }
     private void Set<T>(int kind,T data) where T:struct
     {
         var size=Marshal.SizeOf<T>();var p=Marshal.AllocHGlobal(size);
@@ -158,16 +164,18 @@ public sealed class ProtectedProcess : IDisposable
     private Native.ProcessInfo info;
     public Process Process { get; }
     public long CreationTime { get; }
-    public ProtectedProcess(CommandSpec command,string cwd,Job root,Job child,bool redirected=false)
+    public ProtectedProcess(CommandSpec command,string cwd,Job root,Job child,bool redirected=false):this(command,cwd,[root,child],redirected){}
+    public ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,bool redirected=false)
     {
+        if(chain.Count<1)throw new ArgumentException("启动链至少需要一个任务组。",nameof(chain));
         var attributeCount=redirected?2:1;
         UIntPtr size=UIntPtr.Zero;Native.InitializeProcThreadAttributeList(IntPtr.Zero,attributeCount,0,ref size);
-        var attrs=Marshal.AllocHGlobal(checked((int)size));var jobs=Marshal.AllocHGlobal(2*IntPtr.Size);var handles=Marshal.AllocHGlobal(3*IntPtr.Size);var initialized=false;
+        var attrs=Marshal.AllocHGlobal(checked((int)size));var jobs=Marshal.AllocHGlobal(chain.Count*IntPtr.Size);var handles=Marshal.AllocHGlobal(3*IntPtr.Size);var initialized=false;
         try
         {
             Native.Check(Native.InitializeProcThreadAttributeList(attrs,attributeCount,0,ref size));initialized=true;
-            Marshal.WriteIntPtr(jobs,root.Handle.DangerousGetHandle());Marshal.WriteIntPtr(jobs,IntPtr.Size,child.Handle.DangerousGetHandle());
-            Native.Check(Native.UpdateProcThreadAttribute(attrs,0,(UIntPtr)0x0002000D,jobs,(UIntPtr)(2*IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
+            for(var i=0;i<chain.Count;i++)Marshal.WriteIntPtr(jobs,i*IntPtr.Size,chain[i].Handle.DangerousGetHandle());
+            Native.Check(Native.UpdateProcThreadAttribute(attrs,0,(UIntPtr)0x0002000D,jobs,(UIntPtr)(chain.Count*IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
             var startup=new Native.StartupInfoEx{Info=new(){Size=Marshal.SizeOf<Native.StartupInfoEx>()},Attributes=attrs};
             if(redirected)
             {
@@ -178,8 +186,7 @@ public sealed class ProtectedProcess : IDisposable
             }
             var line=new StringBuilder(string.Join(" ",new[]{command.Executable}.Concat(command.Arguments).Select(Quote)));
             Native.Check(Native.CreateProcess(command.Executable,line,IntPtr.Zero,IntPtr.Zero,redirected,0x00080000|0x4,IntPtr.Zero,cwd,ref startup,out info));
-            Native.Check(Native.IsProcessInJob(info.Process,root.Handle,out var inRoot));Native.Check(Native.IsProcessInJob(info.Process,child.Handle,out var inChild));
-            if(!inRoot||!inChild)throw new IOException("进程未进入要求的资源组。");
+            foreach(var level in chain){Native.Check(Native.IsProcessInJob(info.Process,level.Handle,out var joined));if(!joined)throw new IOException("进程未进入要求的资源组。");}
             Process=Process.GetProcessById((int)info.Pid);_ = Process.Handle;CreationTime=Process.StartTime.ToUniversalTime().ToFileTimeUtc();
         }
         catch { if(info.Process!=IntPtr.Zero){Native.TerminateProcess(info.Process,1);DisposeHandles();}throw; }

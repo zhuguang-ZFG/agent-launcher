@@ -11,6 +11,19 @@ if(args.Length>0&&args[0]=="--hold") {Thread.Sleep(int.Parse(args[1]));return 0;
 if(args.Length>2&&args[0]=="--spawn-late") {var psi=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false};psi.ArgumentList.Add("--write-after");psi.ArgumentList.Add(args[1]);psi.ArgumentList.Add(args[2]);_ = Process.Start(psi);return 0;}
 if(args.Length>2&&args[0]=="--write-after"){Thread.Sleep(int.Parse(args[1]));File.WriteAllText(args[2],"late");return 0;}
 if(args.Length>0&&args[0]=="--spam"){for(var i=0;i<2000;i++)Console.WriteLine("0123456789012345678901234567890123456789012345678901234567890123");return 0;}
+if(args.Length>4&&args[0]=="--nested-setup") {
+    var pool=new Job(args[1]);
+    AgentLauncher.Windows.Native.Check(AgentLauncher.Windows.Native.AssignProcessToJobObject(pool.Handle,Process.GetCurrentProcess().Handle));
+    for(var i=0;i<int.Parse(args[3]);i++)_ = new Job(args[2]+i);
+    File.WriteAllText(args[4],"ready");
+    if(args.Length>5&&args[5]=="exit")return 0;
+    Thread.Sleep(30000);return 0;
+}
+if(args.Length>1&&args[0]=="--allocate-mib") {
+    var hold=args.Length>2?int.Parse(args[2]):0;
+    try {var data=new byte[int.Parse(args[1])*1024*1024];for(var i=0;i<data.Length;i+=4096)data[i]=1;if(args.Length>3)File.WriteAllText(args[3],"ok");if(hold>0)Thread.Sleep(hold);return 10;}
+    catch(OutOfMemoryException){return 0;}
+}
 if(args.Length>0&&args[0]=="--allocate") {try {var data=new byte[256*1024*1024];for(var i=0;i<data.Length;i+=4096)data[i]=1;return 10;}catch(OutOfMemoryException){return 0;}}
 var failures=new List<string>();var passed=new List<string>();var temp=Path.Combine(Path.GetTempPath(),"AgentLauncher-tests-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temp);
 void Test(string name,Action action){try{action();passed.Add(name);Console.WriteLine("PASS "+name);}catch(Exception e){failures.Add(name+": "+e);Console.WriteLine("FAIL "+name+": "+e.Message);}}
@@ -236,5 +249,6 @@ ResourcePolicyChecks.RunAuthorityFixes(Test);
 ConfigurationReviewChecks.Run(Test,temp);
 AgentLauncher.Tests.PaneLayoutChecks.Run(Test);
 AgentLauncher.Tests.TaskChecks.Run(Test,temp);
+AgentLauncher.Tests.PoolPrototypeChecks.Run(Test,temp);
 Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");
 Store.Save(Path.Combine(temp,"results.json"),new{passed,failures});return failures.Count==0?0:1;
