@@ -213,6 +213,7 @@ internal static class PoolPrototypeChecks
                 child?.Dispose();
             }
         });
+        PoolComparisonChecks.Run(test, temp);
     }
 
     private static void Stop(ProtectedProcess process)
