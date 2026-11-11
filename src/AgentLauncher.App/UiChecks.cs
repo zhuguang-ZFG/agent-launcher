@@ -221,6 +221,7 @@ public partial class MainWindow
             Check($"F12 named template {name} restores its own snapshot",config.Draft.DirectoryMode=="prepared"&&config.Draft.Slots[3].Enabled&&!config.Draft.Slots[0].Enabled);
         }
         await RunTaskChecksAsync(Check);
+        ReviewUiChecks.Run(Check);
         await RunReviewUiChecksAsync(Check);
         await RunMultipaneChecksAsync(Check);
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);

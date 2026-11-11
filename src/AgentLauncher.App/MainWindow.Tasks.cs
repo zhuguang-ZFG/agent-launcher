@@ -167,6 +167,13 @@ public partial class MainWindow
             resume.Click += async (_, _) => await GuardAsync(() => ResumeTaskAsync(task.Id));
             actions.Children.Add(resume);
         }
+        if (last is { } reviewed)
+        {
+            var review = TaskButton("审查改动 " + task.Name, $"审查改动 {task.Name}");
+            // The window prefers these polled monitor entries and falls back to the on-disk ledger; it never starts a task to resolve the workspace.
+            review.Click += async (_, _) => await GuardAsync(() => { new TaskReviewWindow(this, task, reviewed, status?.Entries).Show(); return Task.CompletedTask; });
+            actions.Children.Add(review);
+        }
         stack.Children.Add(actions);
         card.Child = stack;
         return card;

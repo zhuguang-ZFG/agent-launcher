@@ -676,4 +676,26 @@ powershell -NoProfile -File scripts/test.ps1
 
 - 峰值按内核原值记录；触顶场景观察到峰值超过配置限额，不能据此把峰值当当前占用或“限额内使用量”。独立模式的池字段为 null，绝不把不同时间的单项峰值求和冒充池峰值。系统余量是同时受其它主机负载影响的观测值，不据差值推导内存收益。这里只证明额度约束的行为差异，不证明进程复用节省、吞吐改善或长期稳定。
 - 回归只保留真实 Job 分配/拒绝、归属、根 CPU 不变、内核额度与峰值断言；删除子代理新增的重复序列化/字段默认值 P11 检查，测量 JSON 仍在两场景后保存，未删除实际行为断言。测试变更保持 unverified，需操作员审查；`task_verify` 无项目基线，未执行配置检查。
+- 独立阶段提交 `020febe480533bb3490329c102d254876d9bccb3` 已推送；对应完整 GitHub gate run [`43071700940`](https://github.com/zhuguang-ZFG/agent-launcher/actions/runs/43071700940) 成功（10 分 50 秒）。该 SHA 仅包含 S3.5 测量与文档，不包含后续 S4 实现。
+
+## 26. 本地审查、命名检查与精确 SHA CI（S4，2026-11-12）
+
+- 任务卡新增「审查改动」，打开独立原生 WPF 窗口。窗口以 AttemptId/BatchId/WorkspaceKey 匹配 monitor/ledger 的真实计划目录；仅在计划缺失且当前项目物理键仍一致时回退项目目录，拒绝把旧尝试映射到新目录。显示完整基准与 HEAD SHA；受限宽度使用滚动布局。用户编辑任务后，不能沿用不匹配修订的基准。
+- `ReviewService.CaptureAsync` 获取 Git 基准→工作区最终内容、索引和未跟踪文件。指纹绑定物理键、基准/HEAD、索引以及路径完整 SHA-256；不使用 mtime/size 冒充内容。最多 2000 个变更文件、1 GiB 流式哈希；冲突/符号链接/gitlink/类型变化明确拒绝。diff 禁用 external diff/textconv，以二进制摘要或超过 4000 行/512 KiB 的有界输出处理大变更；未跟踪默认不选，只有显式勾选才会进入提交。
+- 命名检查由用户在 FormWindow 明确配置 EXE、逐项 argv、超时（1–3600 秒），保存本身不执行，也不自动读取 package scripts。执行通过 monitor reserve→Worker→原有 CPU 根与独立 Job（Git 准备预算）保护，检查与 Git 准备串行；超时/取消仅终止本次检查 Job，日志每路保留 64 KiB。结果记录运行/任务/命令身份、完整 SHA、工作区物理键、内容指纹、退出码/状态/耗时；命令成功但运行期间输入变化即 Stale。窗口监视文件变更立即将旧结果标为待刷新，检查结束后重采快照，不用旧快照误显示“当前有效”。
+- 独立 `review.json` schema 1 原子保存；必需字段缺失、null、重复 ID、过量记录、未来版本和损坏文件拒绝覆盖。命名配置/结果各最多 100，受跨进程互斥保护。新合同尚未正式发布，缺工作区物理键的试制检查记录拒绝使用。
+- 提交是显式文件列表与消息：取得真实 index.lock 后再次核对 HEAD/index，锁住选中文件，按已审查内容流式写 blob，构建临时索引树，以 old-HEAD CAS 发布分支；真实索引通过独立准备副本原子发布，保留未选 staged/untracked 工作。遇到并发写锁在 HEAD 变化前拒绝。遵循 pre-commit/prepare-commit-msg/commit-msg/post-commit 与 commit.gpgsign；hook 改写内容/消息时拒绝并要求重新审查。提交已发布但后续索引/post-hook失败明确报告提交 SHA，避免重复提交。推送不带 `--no-verify`、不 force；PR/推送均需要按钮与二次确认，不自动合并/清理。
+- CI 同时读取完整目标 SHA 的 Actions workflows、check-runs 和 commit statuses；按 workflow/check提供者与名称取最新运行，旧 SHA 不匹配，部分/超界数据不判通过，只有实际 success 且没有等待/失败才绿色。无权限、网络、无 workflow 与未知分别显示。生产读取真实 GitHub：目标 `b65d313365bddaedd01a2104488268f276b2302f` 返回 Passed，含 run `43055929687` 与 check `130645252574`；未执行远程推送/建 PR 冒烟，以免制造用户外部副作用。
+- 本机预览仅列该 Attempt Job 成员的 IPv4/IPv6 loopback TCP 监听，用户点默认浏览器打开；非本机/带凭据/非 HTTP(S) URL 拒绝。不存在 Job 明确报错，不把未知伪装成空端口。
+
+### 26.1 回归与证据
+
+- 根因回归：真实临时仓库证明初版持有 index.lock 时仍移动 HEAD、初版 `--no-verify` 绕过 pre-push、commit-tree 初版绕过 pre-commit（均 RED）。修复后窄 Git/Store 九项全部通过：`AgentLauncher-tests-review-45a76582e1f34ef09fedcc3779549a2f`。另发现成功命令改写输入后仍显示 Passed，新增回归先失败、完成时重采快照后通过。
+- 受管窄集成 **5/5**：检查结果绑定/内容变化过期、结束时输入变化 Stale、超时收尽子孙、取消不报通过、真实 Node TCP 监听发现；隔离根 `AgentLauncher-tests-review-30bb7ee003ba457599353acee5b797fb`。原 PowerShell 监听夹具两次仅进程存活但未就绪，直接脚本可成功；改用现有已验证 Node 进程路径，未改变端口断言或延长超时。
+- 真实 WPF 端到端 **9/9**：锁定目录→有界 diff→新增逐参数检查→受管执行→外部改动自动过期→仅选中文件提交→无远程 CI 未知；最终证据 `artifacts/review-window-final-d89d3852/result.json`，同目录 `profile-dialog.png`、`review-wide.png`、`review-narrow.png`。一次临时冒烟误把“不会视为当前有效”的警告文本当成功标签，截图证明实际条目已过期；限定匹配实际结果行后通过，未改产品或门禁断言。
+- 新 WPF 身份回归先失败于结果无独立 WorkspaceKey；补齐模型/工厂/存储/调用方后原断言通过。WPF 窄检查 **205/205**、Dpi 120：`artifacts/queue-review-review-contract-fix-2e3f6c83/ui-checks.json`。首次完整门禁原生/集成通过，在该 WPF 断言失败后由原 runner 30秒超时终止；未调整 runner 上限。
+- CI 聚合临时回归 **4/4**（不同 app 同名失败不被成功遮盖、同 app 新运行替代旧运行、外部 pending 阻止绿、部分列表拒绝）和 Core 结果/精确 SHA 策略 **2/2**。先前 skipped-only 误绿、跨 app 名称合并、部分列表误接受均由 RED→GREEN 证明修正。临时脚本完成后删除源文件；长期回归保留行为/边界检查，不保留仅文字/格式/字段拷贝的断言。
+- `task_verify` 仍为 **unverified / project-or-git-baseline-unavailable**、checks=[]。新增/修改测试以及临时 runner 输入需要审查；人工绿色与远程 CI 不替代操作员基线。未改 `scripts/test.ps1`、CI policy 或原断言阈值。
+- 最终完整门禁：`TEMP=D:/temp/User TMP=D:/temp/User powershell -NoProfile -File scripts/test.ps1` exit 0（332.50 秒）。原生/模型 **108/108**，集成 **0 失败**（104 条带 passed 的断言，另有诊断测量记录），WPF **205/205**、Dpi 120，原型 **5/5**，浏览器检查通过。原生根 `AgentLauncher-tests-f8b0dc47aeb74551b6ca8a9911cc23ff`；集成根 `AgentLauncher-tests-integration-bfb8013d7ac84a9f92509d7ad8374ac9`；最终文件 `artifacts/ui/ui-checks.json`、`artifacts/integration-results.json`。
+- 完整候选发布：`artifacts/preview-vibe-review/AgentLauncher.App.exe`，App/Worker 及依赖同目录；UTF-8/UTF-16LE 测试标记扫描四个程序集均 CLEAN。SHA-256：App `b94c43e25b1d5a819246f4e5db13767ce85502e4da20950a9ab3fe789e662fc9`、Windows `6acf0880c3f61ac159d1b8c21e5bae7f38279d3855a4f59c5bca9a1a9f269c20`、Core `e1fd0956e90518a8c3c5d4fe05500a8edab749e4216c8ea3fcac26c7f4f41a0b`、Worker `c1dadc095fcacde281c3cbdf808443f103af7605c53e9986c57db58074836786`；清单 `artifacts/preview-vibe-review/verification.json`。未替换现有入口，未终止用户 Agent；S0.6 长时观察与生产切换仍未完成，因此 S5 按计划前置门槛保持未实现/未启用。
 
