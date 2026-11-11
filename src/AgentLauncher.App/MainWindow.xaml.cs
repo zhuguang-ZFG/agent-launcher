@@ -62,6 +62,7 @@ public partial class MainWindow : Window
         SizeChanged+=(_,_)=>ArrangePanels();
         Loaded+=async (_,_)=>await GuardAsync(LoadAsync);
         timer.Tick+=async (_,_)=>await GuardAsync(PollResourcesAsync);
+        taskTimer.Tick+=async (_,_)=>await GuardAsync(PumpQueueAsync);
         PreviewKeyDown+=(_,e)=>{if(Keyboard.Modifiers==ModifierKeys.Control&&e.Key==Key.O){ChooseClick(this,new());e.Handled=true;}else if(Keyboard.Modifiers==ModifierKeys.Control&&e.Key==Key.Enter&&LaunchButton.IsEnabled){LaunchClick(this,new());e.Handled=true;}};
         Closing+=ClosingWindow;
         SystemParameters.StaticPropertyChanged+=SystemAppearanceChanged;Closed+=(_,_)=>SystemParameters.StaticPropertyChanged-=SystemAppearanceChanged;
@@ -82,7 +83,7 @@ public partial class MainWindow : Window
         catch(Exception e)when(e is IOException or JsonException or InvalidOperationException or UnauthorizedAccessException or InvalidDataException)
         {readOnly=true;config=new Configuration();ErrorText.Text="配置无法读取，已禁止覆盖和启动。请在设置中检查配置文件及 .bak 备份。\n"+e.Message;}
         if(configMissing){readOnly=true;ErrorText.Text="配置文件丢失，检测到 .bak 备份。请核对后使用「恢复备份」；当前不会写入配置。";}
-        loading=false;RestoreBackupButton.Visibility=readOnly?Visibility.Visible:Visibility.Collapsed;ApplyTheme();Render();_=GuardAsync(DiscoverCatalogAsync);await LoadResourceViewAsync();timer.Start();
+        loading=false;RestoreBackupButton.Visibility=readOnly?Visibility.Visible:Visibility.Collapsed;ApplyTheme();Render();_=GuardAsync(DiscoverCatalogAsync);await LoadResourceViewAsync();await LoadTasksAsync();timer.Start();
 #if INTEGRATION_TESTS
         if(arguments is ["--idle-check",var reportPath])
         {

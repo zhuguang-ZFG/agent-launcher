@@ -220,6 +220,7 @@ public partial class MainWindow
             Templates.SelectedItem=Templates.Items.OfType<ComboBoxItem>().Single(item=>item.Content as string==name);
             Check($"F12 named template {name} restores its own snapshot",config.Draft.DirectoryMode=="prepared"&&config.Draft.Slots[3].Enabled&&!config.Draft.Slots[0].Enabled);
         }
+        await RunTaskChecksAsync(Check);
         await RunReviewUiChecksAsync(Check);
         await RunMultipaneChecksAsync(Check);
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);

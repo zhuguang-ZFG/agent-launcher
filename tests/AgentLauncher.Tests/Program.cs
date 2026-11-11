@@ -235,5 +235,6 @@ ResourcePolicyChecks.RunWaivers(Test);
 ResourcePolicyChecks.RunAuthorityFixes(Test);
 ConfigurationReviewChecks.Run(Test,temp);
 AgentLauncher.Tests.PaneLayoutChecks.Run(Test);
+AgentLauncher.Tests.TaskChecks.Run(Test,temp);
 Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");
 Store.Save(Path.Combine(temp,"results.json"),new{passed,failures});return failures.Count==0?0:1;

@@ -595,7 +595,7 @@ powershell -NoProfile -File scripts/test.ps1
 - 设置改为可调整**之后批次**的内存参数；活动 Job 不改，活动期间共享根 CPU 继续锁定。解释额度包括工具子进程。旧 Receipt 无新字段仍可读取，旧 profile 和配置默认值不改。
 - 新增/增强 P02 原生、Receipt 往返和跨批次集成检查；真实夹具先运行 2 GiB 作业，在配置改成 4 GiB 后走正常 waiver/reserve，再启动下一项，最终回执分别证明 2/4 GiB 且都有非零 OS 峰值。新增 WPF 检查验证内存可编辑、CPU 禁改且不能由程序赋值绕过。
 - 验证：完整 `scripts/test.ps1`（含浏览器）exit 0，原生/模型 **69/69**、集成 **0 失败**、WPF **143/143**、原型 **5/5**、浏览器检查全部通过；证据 `artifacts/startup-diagnosis/vibe-s0-gate.txt`、`artifacts/ui/ui-checks.json`（Dpi 120）、`artifacts/integration-results.json`。本轮之前 `-SkipBrowser` 的同套结果见 `omp-authorized-gate.txt`。中间失败保留在 `omp-final-gate.txt` / `omp-sequential-gate.txt`：新夹具启用槽不匹配、软授权缺失已经修正；一次 Git 准备 pipe broken 在后续顺序执行中未再出现，尚无独立根因结论。
-- 生产候选目录 `artifacts/preview-omp-stability` 按当前工作区重建（15 文件），四个程序集 marker 扫描 CLEAN；SHA-256（含参数预设与版本探测）：App `DBC7A46CA0D2DDAFACEA156C4796E5CCF3C018EAB8B0F88BCDE104A1F06FCA5C`、Windows `971872BC74AC26472BD2F9FB0FC77F352DBD073CE22FC1875958F759C64BFAA2`、Worker `26EA949DD75B0F99962E4756CF16E759D558EEED291BCE4922DE1DFC4F2B3F7E`。当前生产进程与用户配置未替换/修改，仍可能使用 2 GiB 旧限制；交付切换、对应最终提交 CI 与 30 分钟 × 3 轮代表性负载仍属待完成事项。本轮不宣称频繁退出已彻底解决。
+- 生产候选目录 `artifacts/preview-omp-stability` 按当前工作区重建（15 文件），四个程序集 marker 扫描 CLEAN；SHA-256（含参数预设、版本探测与任务队列）：App `85412716DA0F9B061F0DECB33ACDA95DF17B6F8798BC7A3248E182C2AFD84A69`、Windows `98F157605A27B7F5E352FC9DF959CFC1FAB30C13B0420F56871162364AB10F95`、Worker `0FF29233A4045FD42F75E8BB37EB1C3260111D6D36B5EBC975FC5650AABF0483`。当前生产进程与用户配置未替换/修改，仍可能使用 2 GiB 旧限制；交付切换、对应最终提交 CI 与 30 分钟 × 3 轮代表性负载仍属待完成事项。本轮不宣称频繁退出已彻底解决。
 - 用户随后要求进入扩展规划阶段，新增 [扩展规格](superpowers/specs/2026-11-11-vibe-workbench-spec.md) 与 [实施计划](superpowers/plans/2026-11-11-vibe-workbench-plan.md)。参数预设、任务队列、共享池、审查中心和 Omp 多会话均为后续计划；稳定性封板为 S0 前置门槛。
 
 ## 23. 参数预设与 CLI 能力核对（2026-11-11）
@@ -606,3 +606,14 @@ powershell -NoProfile -File scripts/test.ps1
 - UI：详情对话框在版本核对后显示“套用预设…”入口；选择框逐个显示参数预览，需要值的预设再单独询问一次，值始终作为单个 argv 元素传递。套用只替换当前 Agent 的参数数组，立即按行显示，仍可逐项修改或全部删除；取消不修改配置。活动任务、只读与既有保存门禁不变。
 - 验证：完整 `scripts/test.ps1`（含浏览器）exit 0，原生/模型 **71/71**、集成 **0 失败**、WPF **145/145**、原型 **5/5**、浏览器检查全部通过；证据 `artifacts/startup-diagnosis/vibe-s1-final2-gate.txt`、`artifacts/ui/ui-checks.json`、`artifacts/integration-results.json`。新增 ACC-A01 用真实子进程回显 `--`、`-x`、`--name=value`、空字符串、中文、空格、换行、分号、末尾反斜杠与预设填充；ACC-A02 覆盖真实 git 版本探测、指纹稳定性、探测超时、超时后后代不再写入、输出上限。集成新增真实 Omp/Codex 能力探测（未安装时记录跳过），WPF 检查新增预设套用后的逐参数显示与保存。
 - 限制：本轮只验证上述两个安装版本；模型与恢复目标值由用户填写，不自动发现模型或会话列表；`/plan` 等会话内输入仍需在终端手动完成；探测读数是版本证据，不代表该版本所有参数组合都被验证。
+
+## 24. 任务卡片、队列与安全续接（2026-11-11）
+
+- 数据合同（`src/AgentLauncher.Core/Tasks.cs`）：`TaskCard` 保存项目、Agent、参数、验收清单、目录策略、优先级、依赖与修订号；`QueueEntry` 在入队时冻结任务修订、已解析命令与程序指纹；`TaskRun` 记录尝试、状态、工作区物理键、程序指纹与可空的 `ResumeOf`/`SessionRef`。`tasks.json` 带 SchemaVersion、修订号、入队序号与数量上限；版本或结构不符即拒绝读写，不覆盖原文件。
+- 持久化：`TaskStore` 把读-改-写放在同一跨进程命名互斥内，调用方必须持有当前修订号，过期修订返回“已被其他窗口修改”，不会静默覆盖；保存沿用既有原子替换与 `.bak`。队列分发另有独立互斥 `Local\AgentLauncher-queue-<Scope>`，另一个窗口正在分发时本窗口跳过，避免同一排队项被两个窗口同时领取。
+- 调度（`QueuePolicy`）：优先级降序、同优先级按入队序号，一次只派发一项；`MaxRunning` 默认 1；依赖任务必须已被人工完成；同一任务不允许重复入队。修订号只在影响启动的编辑（项目、Agent、目录策略、优先级、依赖、参数、资源）时递增，并同时移除该任务的排队项；只改名称、说明或勾选验收不改变修订号，也不影响排队。
+- 执行：分发前重新解析命令并比对冻结的程序指纹、可执行文件与参数，任一变化即挂起并提示重新入队，不启动。随后用任务自己的单槽草稿走既有 `WorkspacePreparer`（共享/独立目录语义与活动目录冲突检查）、资源准入与 `reserve`，再用既有 `SubmitTerminal` 提交。队列沿用当前保存的资源策略；软预算需要一次性确认时不自动确认，转为挂起原因。
+- 结果核对：监控记录 `Settled`（回执 Finished）→ 任务进入“等待验收”，必须人工点“标记完成”；`FailedBeforeStart`/`Revoked` → 失败；`Pending` 超过 5 分钟先撤销，确认撤销成功后才标记失败。无法证明结束的尝试保持“运行中”，不猜测终态，也不会自动重放。
+- 续接：只对已终态、同工作区物理键、同程序指纹、且没有被其他未结束尝试占用同一 `SessionRef` 的上次尝试开放；版本探测必须精确命中已验证版本，参数来自 S1 预设表（Omp `--resume <会话>`，Codex `resume <会话>`）。任务参数中已有续接/继续项时拒绝，避免双重恢复；会话标识由用户核对填写，不自动猜测。
+- 验证：完整 `scripts/test.ps1`（含浏览器）exit 0，原生/模型 **75/75**、集成 **0 失败**、WPF **155/155**、原型 **5/5**、浏览器检查通过；证据 `artifacts/startup-diagnosis/vibe-s2-gate-2.txt`、`artifacts/ui/ui-checks.json`（Dpi 120）、`artifacts/integration-results.json`。新增原生 ACC-B01–B04 覆盖优先级/FIFO/并发与依赖门禁、仅启动相关编辑使排队失效、续接的四重门禁、修订冲突与损坏任务文件不被覆盖；WPF 新增 ACC-B05/B06 覆盖卡片渲染、验收勾选持久化、续接按钮仅在已结算会话出现、队列默认暂停、并发 1–4 调整、程序指纹变化时只挂起不启动、损坏任务文件停用队列且保留原文件。期间修正了验收勾选在后台线程读取 WPF 控件导致的跨线程失败，以及并发调整时陈旧修订号覆盖的问题。
+- 限制：队列由 App 进程消费，关闭窗口后不再分发（已运行的进程不受影响），重启后按文件状态继续核对。任务级资源设置只决定该项的 Job/规划值，监控准入策略仍取当前保存配置，任务不会绕过配置边界。`prepared` 目录策略对任务未开放（任务没有逐槽目录字段）。App 崩溃在“已提交 Terminal、未写回执”窗口内会留下需人工核对的尝试，队列不会自动重试。多窗口依靠任务文件修订与分发互斥避免重复领取，但两次领取之间仍可能出现短暂双预约，后到者会撤销自己的预约。
