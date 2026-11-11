@@ -429,8 +429,8 @@ public partial class MainWindow
             await HoldEntryAsync(entry, "任务资源设置无效：" + e.Message);
             return;
         }
-        var reserved = status.Entries?.Where(candidate => !Store.IsTerminal(candidate)).Select(candidate => ResourcePolicy.BudgetOf(candidate.Plan)).ToArray() ?? [];
-        var admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, [ResourcePolicy.BudgetOf(plan)]);
+        var reserved = status.Entries?.Where(candidate => !Store.IsTerminal(candidate)).Select(candidate => ResourcePolicy.BudgetOf(candidate.Plan, candidate.PoolMemoryLimit)).ToArray() ?? [];
+        var admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, [ResourcePolicy.BudgetOf(plan, plan.PoolId is null ? null : policy.PoolMemoryLimit)]);
         if (admission.Kind == AdmissionKind.Deny) { await HoldEntryAsync(entry, "资源不足：" + admission.Reason); return; }
         if (admission.Kind == AdmissionKind.RequireWaiver) { await HoldEntryAsync(entry, "需要一次性资源确认；队列不会自动确认，请降低规划或稍后重试。"); return; }
 

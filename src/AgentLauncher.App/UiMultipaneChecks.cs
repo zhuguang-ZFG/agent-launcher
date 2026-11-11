@@ -113,6 +113,16 @@ public partial class MainWindow
             poolDialog.ModeChoice.SelectedIndex=1;poolDialog.TryApplySettings();
             check("ACC-U03 leaving custom keeps the pool choice and limit",poolDialog.Value is {Mode:"practical",Pool:ResourcePolicy.PoolShared,PoolMemoryLimit:6UL*ResourcePolicy.GiB});poolDialog.Close();
 
+            var v1Ledger=new Ledger{SchemaVersion=1,BootId="ui-check"};v1Ledger.Entries.Add(new(){Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"legacy",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new CommandSpec(Path.Combine(Environment.SystemDirectory,"cmd.exe"),[],"exe"),ResourcePolicy.AgentBudget),State="Settled"});
+            check("ACC-S3A08 a version 1 terminal ledger needs no monitor recovery",!LedgerNeedsRecovery(v1Ledger));
+            var poolLedger=new Ledger{SchemaVersion=2,BootId="ui-check",Pools=[new(){Id=Guid.NewGuid(),MemoryLimit=4*ResourcePolicy.GiB,PolicyHash="HASH",BatchId=Guid.NewGuid()}]};
+            check("ACC-S3A08 retained pools force recovery even without active entries",LedgerNeedsRecovery(poolLedger));
+            var futureLedger=new Ledger{SchemaVersion=3,BootId="ui-check"};var futureRejected=false;
+            try{LedgerNeedsRecovery(futureLedger);}catch(InvalidDataException){futureRejected=true;}
+            check("ACC-S3A08 an unknown ledger version still fails closed",futureRejected);
+            var brokenLedger=new Ledger{SchemaVersion=2,BootId="ui-check"};brokenLedger.Entries.Add(new(){Plan=null!});var brokenRejected=false;
+            try{LedgerNeedsRecovery(brokenLedger);}catch(Exception error)when(error is InvalidDataException or NullReferenceException){brokenRejected=true;}
+            check("ACC-S3A08 a ledger entry without a plan fails closed",brokenRejected);
             config=Fixture();Healthy();Render();var dropped=Enumerable.Repeat(Store.Root,ResourcePolicy.MaxSlots).ToArray();await ApplyDroppedDirectoriesAsync(dropped,null,config.Draft.Revision);
             check("ACC-L02 sixteen dropped directories are applied atomically",config.Draft.Slots.Count==ResourcePolicy.MaxSlots&&config.Draft.Slots.All(s=>s.Directory==Store.Root));
             var dropRevision=config.Draft.Revision;var dropSnapshot=JsonSerializer.Serialize(config.Draft,Store.Json);var rejected=false;

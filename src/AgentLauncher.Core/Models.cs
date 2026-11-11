@@ -52,7 +52,7 @@ public sealed class Draft
         {
             var poolLimit = ResourcePolicy.PoolLimitOf(Resource);
             if (poolLimit < ResourcePolicy.MinJobMemoryLimit || poolLimit > ResourcePolicy.MaxJobMemoryLimit) throw new InvalidDataException("资源池上限不能低于 1 GiB 或超过 8 GiB。");
-            if (poolLimit < Resource.PlanningBytes) throw new InvalidDataException("资源池上限不能低于规划估算。");
+            if (poolLimit < Resource.JobMemoryLimit) throw new InvalidDataException("资源池上限不能低于单项 Job 上限。");
         }
         if (Resource.CpuRate < ResourcePolicy.MinCpuRate || Resource.CpuRate > ResourcePolicy.MaxCpuRate) throw new InvalidDataException("CPU 封顶必须在 15% 到 80% 之间。");
         if (Resource.PhysicalFloorOverride is {} physicalFloor && physicalFloor < ResourcePolicy.MinCustomPhysicalFloor) throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");

@@ -364,7 +364,7 @@ public partial class MainWindow : Window
         if(memory is null)return new(AdmissionKind.Deny,"等待资源检测",0,0,0,0,0,0,0,false);
         var settings=draft.Resource??new ResourceSettings();
         var policy=ResourcePolicy.SnapshotFor(settings,memory.Total,memory.CommitLimit);
-        var reserved=(entries??[]).Where(e=>!Store.IsTerminal(e)).Select(e=>ResourcePolicy.BudgetOf(e.Plan)).ToList();
+        var reserved=(entries??[]).Where(e=>!Store.IsTerminal(e)).Select(e=>ResourcePolicy.BudgetOf(e.Plan,e.PoolMemoryLimit)).ToList();
         var requested=draft.Slots.Where(s=>s.Enabled).Select(s=>new BudgetItem(s.Id,"agent",settings.PlanningBytes,settings.JobMemoryLimit)).ToList();
         if(includeGitPreparation)
         {

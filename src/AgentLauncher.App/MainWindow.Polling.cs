@@ -39,6 +39,14 @@ public partial class MainWindow
         finally { ReconcileButton.IsEnabled = true; }
     }
 
+    internal static bool LedgerNeedsRecovery(Ledger? ledger)
+    {
+        if (ledger == null) return false;
+        var accepted = LedgerMigration.Accept(ledger);
+        // Retained pools must reach the monitor even when every entry is terminal: only it can prove the members are gone.
+        return accepted.Entries.Any(e => !Store.IsTerminal(e)) || accepted.Pools.Count > 0;
+    }
+
     private void UpdatePollingInterval()
     {
         var inProgress = busy || launchFinalizing || launchCancellation != null || !cancelTask.IsCompleted || submittedAttempts.Length > 0 || status?.Entries?.Any(e => e.State is "Pending" or "Creating") == true;
@@ -49,13 +57,7 @@ public partial class MainWindow
     {
         try
         {
-            var recover = await Task.Run(() =>
-            {
-                var ledger = Store.Read<Ledger>(Store.FilePath("control.json"));
-                if (ledger == null) return false;
-                if (ledger.SchemaVersion != 1 || ledger.Entries == null || ledger.Entries.Any(e => e?.Plan == null)) throw new InvalidDataException("控制账本损坏或版本不支持，需核对后再启动。");
-                return ledger.Entries.Any(e => !Store.IsTerminal(e));
-            });
+            var recover = await Task.Run(() => LedgerNeedsRecovery(Store.Read<Ledger>(Store.FilePath("control.json"))));
             if (recover || Ipc.MonitorRunning()) await RefreshAsync();
             else await RefreshLocalPreviewAsync();
         }

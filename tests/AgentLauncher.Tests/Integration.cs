@@ -516,6 +516,41 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             else Assert(cleared,"pool record removed before its hold cleared");
             Store.Save(Store.FilePath("configuration.json"),new Configuration());
         });
+        await Test("ACC-S3B04 the real preparation path assigns one shared pool and launches through reserve",async()=>{
+            var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
+            var slotA=new Slot{Id=Guid.NewGuid(),Enabled=true,AgentId="custom",CustomName="pool-real-a",Directory=cwd,Profiles=new(){{"custom",new AgentProfile{Executable=Environment.ProcessPath!,Arguments=["--hold","2000"]}}}};
+            var slotB=new Slot{Id=Guid.NewGuid(),Enabled=true,AgentId="custom",CustomName="pool-real-b",Directory=cwd,Profiles=new(){{"custom",new AgentProfile{Executable=Environment.ProcessPath!,Arguments=["--hold","2000"]}}}};
+            var draft=new Draft{SchemaVersion=2,Revision=config.Draft.Revision,Project=cwd,DirectoryMode="shared",Layout="vertical",Resource=settings.Copy(),Slots=[slotA,slotB]};
+            var preparer=new WorkspacePreparer(config.WorktreeDirectory);
+            var plans=(await Task.Run(()=>preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(true),CancellationToken.None))).ToArray();
+            var batchPool=plans.Length==2?plans[0].PoolId:null;
+            Assert(batchPool is {} firstPool&&plans[1].PoolId==firstPool,"prepared batch items do not share one pool id");
+            var second=(await Task.Run(()=>preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(true),CancellationToken.None))).ToArray();
+            var nextPool=second.Length==2?second[0].PoolId:null;
+            Assert(nextPool is {} secondPool&&second[1].PoolId==secondPool&&secondPool!=batchPool,"re-preparing reused the previous batch pool");
+            var preparedPool=batchPool;
+            var memory=(await Ipc.SendAsync(new("status",Guid.NewGuid()))).Memory!;
+            var policy=ResourcePolicy.SnapshotFor(settings,memory.Total,memory.CommitLimit);
+            var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),plans,Policy:policy,PolicyHash:ResourcePolicy.PolicyHash(policy),PlanDigest:ResourcePolicy.PlanDigest(plans),DraftRevision:config.Draft.Revision));
+            Assert(reserved.Ok,reserved.Message);
+            var ledger=Store.Read<Ledger>(Store.FilePath("control.json"))!;
+            Assert(ledger.Pools.Any(p=>p.Id==preparedPool&&p.MemoryLimit==4*ResourcePolicy.GiB),"prepared pool record missing");
+            using var root=new Job(Store.RootJob,openOnly:true);
+            using var attempt=new Mutex(false,Store.AttemptLock(plans[0].Id));attempt.WaitOne();
+            try
+            {
+                var began=Sync(Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:plans[0].Id)));Assert(began.Ok,began.Message);
+                using var process=LaunchPooled(root,preparedPool!.Value,plans[0].Id,["--hold","2000"]);
+                Assert(process.Process.WaitForExit(10000),"prepared pool item timed out");
+                Store.Save(Store.ReceiptPath(plans[0].Id),new Receipt("Finished",process.Process.Id,0,0,"全部受管进程已退出。",DateTimeOffset.UtcNow));
+            }
+            finally { attempt.ReleaseMutex(); }
+            var settled=false;for(var i=0;i<60&&!settled;i++){var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));settled=status.Entries?.Any(e=>e.Plan.Id==plans[0].Id&&e.State=="Settled")==true;if(!settled)await Task.Delay(100);}
+            Assert(settled,"prepared shared item never settled");
+            await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:plans[1].Id));
+            Store.Save(Store.FilePath("configuration.json"),new Configuration());
+        });
         var monitorId=Store.Read<int>(Store.FilePath("monitor-pid.json"));using(var monitor=Process.GetProcessById(monitorId)){monitor.Refresh();evidence.Add(new{name="idle-monitor-memory",privateBytes=monitor.PrivateMemorySize64,workingSet=monitor.WorkingSet64});}
         await Ipc.EnsureMonitorAsync();await WorkspaceReviewChecks.RunAsync(Test,cwd);
         await RuntimeReviewChecks.RunAsync(Test,cwd);

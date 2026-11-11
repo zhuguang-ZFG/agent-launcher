@@ -128,12 +128,14 @@ public sealed class WorkspacePreparer
         var active=draft.Slots.Where(s=>s.Enabled).ToArray();if(active.Length==0)throw new IOException("先勾选本次启动项。");
         if(active.Any(s=>s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory)))throw new IOException("通用组合中有需要单独指定的工作目录，请先在对应 Agent 详情中选择文件夹。");
         var batch=Guid.NewGuid();var plans=new List<LaunchItem>();
+        // One shared pool per prepared batch: every agent item joins it, Git preparation stays independently billed.
+        var poolId=ResourcePolicy.PoolModeOf(resourceSettings)==ResourcePolicy.PoolShared?Guid.NewGuid():(Guid?)null;
         foreach(var slot in active)
         {
             ct.ThrowIfCancellationRequested();var cwd=PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(slot.Directory)?draft.Project:slot.Directory).Path;
             var position=draft.Slots.IndexOf(slot)+1;
             var resource=draft.Resource??new ResourceSettings();
-            plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),resource.JobMemoryLimit,PlanningBytes:resource.PlanningBytes,ResourceMode:resource.Mode,SourceSlotId:slot.Id,AgentId:slot.AgentId));
+            plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),resource.JobMemoryLimit,PlanningBytes:resource.PlanningBytes,ResourceMode:resource.Mode,SourceSlotId:slot.Id,AgentId:slot.AgentId,PoolId:poolId));
         }
         var defaultRoot=Store.FilePath("worktrees");var worktreeRoot=defaultRoot;var nondefaultRoot=false;
         var isolatedGroups=plans.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1&&draft.DirectoryMode=="isolated").ToArray();
@@ -224,7 +226,10 @@ public sealed class WorkspacePreparer
             }
         }
         // Prepared directories are reusable; launch authorization IDs are always fresh.
-        var launchBatch=Guid.NewGuid();return plans.Select(p=>p with{Id=Guid.NewGuid(),BatchId=launchBatch}).ToList();
+        var launchBatch=Guid.NewGuid();
+        // Launch authorization IDs are always fresh; a shared pool belongs to exactly one launch batch.
+        var launchPool=ResourcePolicy.PoolModeOf(resourceSettings)==ResourcePolicy.PoolShared?Guid.NewGuid():(Guid?)null;
+        return plans.Select(p=>p.Kind=="git"?p with{Id=Guid.NewGuid(),BatchId=launchBatch}:p with{Id=Guid.NewGuid(),BatchId=launchBatch,PoolId=launchPool}).ToList();
     }
     private static void EnsureBatchTargetsDistinct(IReadOnlyList<LaunchItem> plans,Guid batch,string worktreeRoot,string mode,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces)
     {

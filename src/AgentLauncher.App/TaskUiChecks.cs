@@ -50,7 +50,7 @@ public partial class MainWindow
         check("ACC-B05 queue starts paused and only runs when asked", queueEnabled && QueueToggleButton.Content as string == "暂停队列");
         var attemptsBefore = taskStore.Load().Attempts.Count;
         var detail = "";
-        for (var i = 0; i < 150; i++)
+        for (var i = 0; i < 300; i++)
         {
             detail = taskStore.Load().Queue.Single().Detail;
             if (detail.Contains("程序或参数已变化")) break;
