@@ -19,6 +19,13 @@ if(args.Length>4&&args[0]=="--nested-setup") {
     if(args.Length>5&&args[5]=="exit")return 0;
     Thread.Sleep(30000);return 0;
 }
+if(args.Length>3&&args[0]=="--spawn-child") {
+    var psi=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false};
+    psi.ArgumentList.Add("--hold");psi.ArgumentList.Add(args[2]);
+    using var child=Process.Start(psi)!;
+    File.WriteAllText(args[3],child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    Thread.Sleep(int.Parse(args[1],System.Globalization.CultureInfo.InvariantCulture));return 0;
+}
 if(args.Length>1&&args[0]=="--allocate-mib") {
     var hold=args.Length>2?int.Parse(args[2]):0;
     try {var data=new byte[int.Parse(args[1])*1024*1024];for(var i=0;i<data.Length;i+=4096)data[i]=1;if(args.Length>3)File.WriteAllText(args[3],"ok");if(hold>0)Thread.Sleep(hold);return 10;}
@@ -244,6 +251,7 @@ Test("F12 portable templates inherit new project without weakening directory pol
 ResourcePolicyChecks.RunMigration(Test,temp);
 ResourcePolicyChecks.RunReviewFixes(Test,temp);
 ResourcePolicyChecks.RunDecisions(Test);
+ResourcePolicyChecks.RunPoolAccounting(Test);
 ResourcePolicyChecks.RunWaivers(Test);
 ResourcePolicyChecks.RunAuthorityFixes(Test);
 ConfigurationReviewChecks.Run(Test,temp);

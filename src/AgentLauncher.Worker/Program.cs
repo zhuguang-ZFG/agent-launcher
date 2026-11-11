@@ -116,7 +116,7 @@ internal sealed class Monitor : IDisposable
         try
         {
             Directory.CreateDirectory(Store.Root);Store.Save(Store.FilePath("monitor-pid.json"),Environment.ProcessId);
-            try{ledger=Store.Read<Ledger>(ledgerPath)??new();if(ledger.SchemaVersion!=1||ledger.Entries==null||ledger.Entries.Any(e=>e==null||e.Plan==null))throw new InvalidDataException();}
+            try{ledger=LedgerMigration.Accept(Store.Read<Ledger>(ledgerPath)??new());}
             catch(Exception e)when(e is JsonException or InvalidDataException or IOException){ledgerBroken=true;ledger=new();blocked="控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。";}
             var boot=Store.BootId();
             if(!ledgerBroken&&ledger.BootId!=boot){foreach(var e in ledger.Entries.Where(e=>!Store.IsTerminal(e))){e.State="Settled";e.Detail="系统已重新启动，未重放旧请求";}ledger.BootId=boot;Save();}

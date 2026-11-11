@@ -47,6 +47,13 @@ public sealed class Draft
         if (Resource.JobMemoryLimit < ResourcePolicy.MinJobMemoryLimit) throw new InvalidDataException("Job 内存上限不能低于 1 GiB。");
         if (Resource.JobMemoryLimit > ResourcePolicy.MaxJobMemoryLimit) throw new InvalidDataException("Job 内存上限不能超过 8 GiB。");
         if (Resource.PlanningBytes < ResourcePolicy.MinPlanningBytes || Resource.PlanningBytes > Resource.JobMemoryLimit) throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
+        if (ResourcePolicy.PoolModeOf(Resource) is not (ResourcePolicy.PoolIndependent or ResourcePolicy.PoolShared)) throw new InvalidDataException("资源池模式不支持。");
+        if (ResourcePolicy.PoolModeOf(Resource) == ResourcePolicy.PoolShared)
+        {
+            var poolLimit = ResourcePolicy.PoolLimitOf(Resource);
+            if (poolLimit < ResourcePolicy.MinJobMemoryLimit || poolLimit > ResourcePolicy.MaxJobMemoryLimit) throw new InvalidDataException("资源池上限不能低于 1 GiB 或超过 8 GiB。");
+            if (poolLimit < Resource.PlanningBytes) throw new InvalidDataException("资源池上限不能低于规划估算。");
+        }
         if (Resource.CpuRate < ResourcePolicy.MinCpuRate || Resource.CpuRate > ResourcePolicy.MaxCpuRate) throw new InvalidDataException("CPU 封顶必须在 15% 到 80% 之间。");
         if (Resource.PhysicalFloorOverride is {} physicalFloor && physicalFloor < ResourcePolicy.MinCustomPhysicalFloor) throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");
         if (Resource.PhysicalFloorOverride is {} physicalCeiling && physicalCeiling > ResourcePolicy.MaxCustomPhysicalFloor) throw new InvalidDataException("物理临界余量不能超过 8 GiB。");
@@ -98,7 +105,7 @@ public sealed record MemorySnapshot(ulong Total, ulong Available, ulong CommitLi
 public sealed record Admission(bool Allowed, string Reason);
 public sealed record CommandSpec(string Executable, string[] Arguments, string Adapter);
 public sealed record WorkspaceIdentity(string Path, string Key);
-public sealed record LaunchItem(Guid Id, Guid BatchId, int Position, string Name, string Cwd, WorkspaceIdentity Workspace, bool Shared, CommandSpec Command, ulong Budget, string Kind = "agent", [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? RetryOf = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] ulong? PlanningBytes = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? ResourceMode = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? SourceSlotId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? AgentId = null);
+public sealed record LaunchItem(Guid Id, Guid BatchId, int Position, string Name, string Cwd, WorkspaceIdentity Workspace, bool Shared, CommandSpec Command, ulong Budget, string Kind = "agent", [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? RetryOf = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] ulong? PlanningBytes = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? ResourceMode = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? SourceSlotId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? AgentId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? PoolId = null);
 public sealed class ControlEntry
 {
     public required LaunchItem Plan { get; set; }
@@ -115,7 +122,15 @@ public sealed class ControlEntry
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public int? CpuRate { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public Guid? WaiverId { get; set; }
 }
-public sealed class Ledger { public int SchemaVersion { get; set; } = 1; public string BootId { get; set; } = ""; public List<ControlEntry> Entries { get; set; } = []; }
+public sealed class PoolRecord
+{
+    public required Guid Id { get; set; }
+    public required ulong MemoryLimit { get; set; }
+    public required string PolicyHash { get; set; }
+    public required Guid BatchId { get; set; }
+    public DateTimeOffset Created { get; set; } = DateTimeOffset.UtcNow;
+}
+public sealed class Ledger { public int SchemaVersion { get; set; } = LedgerMigration.CurrentSchemaVersion; public string BootId { get; set; } = ""; public List<ControlEntry> Entries { get; set; } = []; public List<PoolRecord> Pools { get; set; } = []; }
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? JobMemory = null);
 public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, Guid? WaiverId = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null);
 public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, Guid? WaiverId = null, DateTimeOffset? WaiverExpiresAt = null, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null, bool? ReconcileOffered = null);

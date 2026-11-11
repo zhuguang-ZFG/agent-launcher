@@ -8,6 +8,8 @@ public sealed class ResourceSettings
     public ulong? PhysicalFloorOverride { get; set; }
     public ulong? CommitFloorOverride { get; set; }
     public int CpuRate { get; set; } = ResourcePolicy.DefaultCpuRate;
+    public string Pool { get; set; } = ResourcePolicy.PoolIndependent;
+    public ulong? PoolMemoryLimit { get; set; }
     public ResourceSettings Copy() => new()
     {
         Mode = Mode,
@@ -15,16 +17,19 @@ public sealed class ResourceSettings
         PlanningBytes = PlanningBytes,
         PhysicalFloorOverride = PhysicalFloorOverride,
         CommitFloorOverride = CommitFloorOverride,
-        CpuRate = CpuRate
+        CpuRate = CpuRate,
+        Pool = Pool,
+        PoolMemoryLimit = PoolMemoryLimit
     };
 }
 
 public sealed record ResourcePolicySnapshot(
     string Mode, ulong JobMemoryLimit, ulong PlanningBytes,
     ulong PhysicalFloor, ulong CommitFloor, int CpuRate,
-    ulong GitJobMemoryLimit, ulong GitPlanningBytes);
+    ulong GitJobMemoryLimit, ulong GitPlanningBytes,
+    string PoolMode = ResourcePolicy.PoolIndependent, ulong PoolMemoryLimit = 0);
 
-public sealed record BudgetItem(Guid Id, string Kind, ulong PlanningBytes, ulong JobMemoryLimit);
+public sealed record BudgetItem(Guid Id, string Kind, ulong PlanningBytes, ulong JobMemoryLimit, Guid? PoolId = null);
 
 public enum AdmissionKind { Allow, RequireWaiver, Deny }
 
@@ -91,6 +96,33 @@ public static class ConfigurationCompatibility
     }
 }
 
+public static class LedgerMigration
+{
+    public const int CurrentSchemaVersion = 2;
+
+    // Version 1 had no pool records: every entry was independently launched, which is still a valid reading.
+    public static Ledger Accept(Ledger ledger)
+    {
+        if (ledger is null) throw new InvalidDataException("控制账本损坏或版本不支持。");
+        if (ledger.SchemaVersion is < 1 or > CurrentSchemaVersion) throw new InvalidDataException("控制账本损坏或版本不支持。");
+        ledger.Entries ??= [];
+        ledger.Pools ??= [];
+        if (ledger.Entries.Any(e => e is null || e.Plan is null)) throw new InvalidDataException("控制账本损坏或版本不支持。");
+        if (ledger.Pools.Any(p => p is null || p.PolicyHash is null)) throw new InvalidDataException("控制账本损坏或版本不支持。");
+        if (ledger.Pools.Select(p => p.Id).Distinct().Count() != ledger.Pools.Count) throw new InvalidDataException("控制账本损坏或版本不支持。");
+        foreach (var entry in ledger.Entries)
+        {
+            if (entry.Plan.PoolId is { } id)
+            {
+                var pool = ledger.Pools.SingleOrDefault(p => p.Id == id) ?? throw new InvalidDataException("控制账本缺少池记录，已停止启动与回收。");
+                if (pool.MemoryLimit == 0) throw new InvalidDataException("控制账本中的池上限不可用。");
+            }
+        }
+        ledger.SchemaVersion = CurrentSchemaVersion;
+        return ledger;
+    }
+}
+
 public static class ResourcePolicy
 {
     public const ulong GiB = 1024UL * 1024 * 1024;
@@ -111,6 +143,8 @@ public static class ResourcePolicy
     public const int IdleTimeoutSeconds = 15;
     public const int CommandLineLimit = 24000;
     public const int MaxSlots = 16;
+    public const string PoolIndependent = "independent";
+    public const string PoolShared = "shared";
     public const ulong AgentBudget = 2 * GiB;
     public const ulong GitBudget = GiB;
     public static ulong DefaultPhysicalFloor(ulong total) => Math.Max(2 * GiB, total / 8);
@@ -126,6 +160,12 @@ public static class ResourcePolicy
     public const ulong MaxCustomCommitFloor = 16 * GiB;
     public static ulong Reserve(ulong total) => Math.Max(3 * GiB, total / 5);
 
+    public static string PoolModeOf(ResourceSettings settings) =>
+        string.IsNullOrWhiteSpace(settings.Pool) ? PoolIndependent : settings.Pool;
+
+    public static ulong PoolLimitOf(ResourceSettings settings) =>
+        settings.PoolMemoryLimit is { } limit && limit > 0 ? limit : settings.JobMemoryLimit;
+
     public static ResourcePolicySnapshot SnapshotFor(ResourceSettings settings, ulong totalPhysical, ulong commitLimit)
     {
         settings ??= new ResourceSettings();
@@ -137,7 +177,9 @@ public static class ResourcePolicy
             settings.CommitFloorOverride ?? DefaultCommitFloor(commitLimit),
             settings.CpuRate,
             GitJobMemoryLimit,
-            DefaultGitPlanningBytes);
+            DefaultGitPlanningBytes,
+            PoolModeOf(settings),
+            PoolLimitOf(settings));
     }
 
     public static AdmissionDecision Evaluate(
@@ -173,7 +215,7 @@ public static class ResourcePolicy
         if (sample.CpuPercent >= CpuBusyPercent)
             return Result(AdmissionKind.Deny, "整机 CPU 正忙，稍等片刻再启动。", true);
 
-        if (includeSoftBudget && SumExceeds(capRequested, capReserved, soft))
+        if (includeSoftBudget && CombinedCapExceeds(policy, reserved, requested, soft))
         {
             if (policy.Mode == "conservative")
                 return Result(AdmissionKind.Deny, "本次要用的内存超过总预算，请少勾选几个 Agent。", true);
@@ -185,7 +227,8 @@ public static class ResourcePolicy
     public static string PolicyHash(ResourcePolicySnapshot policy)
     {
         var mode = System.Text.Json.JsonSerializer.Serialize(policy.Mode);
-        var payload = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{{\"CommitFloor\":{policy.CommitFloor},\"CpuRate\":{policy.CpuRate},\"GitJobMemoryLimit\":{policy.GitJobMemoryLimit},\"GitPlanningBytes\":{policy.GitPlanningBytes},\"JobMemoryLimit\":{policy.JobMemoryLimit},\"Mode\":{mode},\"PhysicalFloor\":{policy.PhysicalFloor},\"PlanningBytes\":{policy.PlanningBytes}}}");
+        var poolMode = System.Text.Json.JsonSerializer.Serialize(policy.PoolMode);
+        var payload = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{{\"CommitFloor\":{policy.CommitFloor},\"CpuRate\":{policy.CpuRate},\"GitJobMemoryLimit\":{policy.GitJobMemoryLimit},\"GitPlanningBytes\":{policy.GitPlanningBytes},\"JobMemoryLimit\":{policy.JobMemoryLimit},\"Mode\":{mode},\"PhysicalFloor\":{policy.PhysicalFloor},\"PlanningBytes\":{policy.PlanningBytes},\"PoolMemoryLimit\":{policy.PoolMemoryLimit},\"PoolMode\":{poolMode}}}");
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
     }
 
@@ -210,6 +253,7 @@ public static class ResourcePolicy
             Budget = item.Budget,
             Adapter = item.Command.Adapter,
             ResourceMode = item.ResourceMode,
+            PoolId = item.PoolId?.ToString("N"),
             PlanningBytes = item.PlanningBytes ?? 0
         }));
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
@@ -230,6 +274,15 @@ public static class ResourcePolicy
             throw new InvalidDataException("CPU 封顶必须在 15% 到 80% 之间。");
         if (policy.GitJobMemoryLimit != GitJobMemoryLimit || policy.GitPlanningBytes != DefaultGitPlanningBytes)
             throw new InvalidDataException("Git 资源上限不可自定义。");
+        if (policy.PoolMode is not (PoolIndependent or PoolShared))
+            throw new InvalidDataException("资源池模式不支持。");
+        if (policy.PoolMode == PoolShared)
+        {
+            if (policy.PoolMemoryLimit < MinJobMemoryLimit || policy.PoolMemoryLimit > maxJob)
+                throw new InvalidDataException("资源池上限不能低于 1 GiB 或超过 8 GiB。");
+            if (policy.PoolMemoryLimit < policy.PlanningBytes)
+                throw new InvalidDataException("资源池上限不能低于规划估算。");
+        }
         if (policy.PhysicalFloor == 0 || policy.PhysicalFloor < MinCustomPhysicalFloor)
             throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");
         if (policy.PhysicalFloor != DefaultPhysicalFloor(totalPhysical))
@@ -262,6 +315,16 @@ public static class ResourcePolicy
             throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
         if (settings.CpuRate < MinCpuRate || settings.CpuRate > MaxCpuRate)
             throw new InvalidDataException("CPU 封顶必须在 15% 到 80% 之间。");
+        if (PoolModeOf(settings) is not (PoolIndependent or PoolShared))
+            throw new InvalidDataException("资源池模式不支持。");
+        if (PoolModeOf(settings) == PoolShared)
+        {
+            var poolLimit = PoolLimitOf(settings);
+            if (poolLimit < MinJobMemoryLimit || poolLimit > maxJob)
+                throw new InvalidDataException("资源池上限不能低于 1 GiB 或超过 8 GiB。");
+            if (poolLimit < settings.PlanningBytes)
+                throw new InvalidDataException("资源池上限不能低于规划估算。");
+        }
         if (settings.PhysicalFloorOverride is { } physical)
         {
             if (physical == 0 || physical < MinCustomPhysicalFloor)
@@ -298,6 +361,10 @@ public static class ResourcePolicy
             throw new InvalidDataException(item.Budget > totalPhysical ? "Job 内存上限不能超过可用机器总量。" : "Job 内存上限不能超过 8 GiB。");
         if (item.Budget != policy.JobMemoryLimit)
             throw new InvalidDataException("启动项 Job 上限与当前策略不一致。");
+        if (policy.PoolMode == PoolShared && item.PoolId is null)
+            throw new InvalidDataException("共享池批次缺少池标识，请重新准备启动计划。");
+        if (policy.PoolMode == PoolIndependent && item.PoolId is not null)
+            throw new InvalidDataException("独立模式不接受池标识，请重新准备启动计划。");
         if (item.PlanningBytes is { } planning && planning != 0)
         {
             if (planning < MinPlanningBytes || planning > item.Budget)
@@ -316,7 +383,8 @@ public static class ResourcePolicy
             plan.Id,
             git ? "git" : (plan.Kind ?? "agent"),
             git ? DefaultGitPlanningBytes : plan.PlanningBytes is null or 0 ? DefaultPlanningBytes : plan.PlanningBytes.Value,
-            git ? GitJobMemoryLimit : plan.Budget);
+            git ? GitJobMemoryLimit : plan.Budget,
+            git ? null : plan.PoolId);
     }
 
     public static bool IsSampleValid(MemorySnapshot? sample)
@@ -350,13 +418,29 @@ public static class ResourcePolicy
     static ulong SumCap(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> items)
     {
         ulong sum = 0;
+        var pools = new HashSet<Guid>();
         foreach (var item in items)
         {
+            if (policy.PoolMode == PoolShared && item.Kind != "git" && item.PoolId is { } poolId)
+            {
+                if (!pools.Add(poolId)) continue;
+                if (sum > ulong.MaxValue - policy.PoolMemoryLimit) return ulong.MaxValue;
+                sum += policy.PoolMemoryLimit;
+                continue;
+            }
             var value = CapOf(policy, item);
             if (sum > ulong.MaxValue - value) return ulong.MaxValue;
             sum += value;
         }
         return sum;
+    }
+
+    static bool CombinedCapExceeds(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> reserved, IReadOnlyList<BudgetItem> requested, ulong cap)
+    {
+        var union = new List<BudgetItem>(reserved.Count + requested.Count);
+        union.AddRange(reserved);
+        union.AddRange(requested);
+        return SumCap(policy, union) > cap;
     }
 
     static bool HasRoom(ulong available, ulong first, ulong second, ulong floor)
@@ -365,12 +449,6 @@ public static class ResourcePolicy
         var used = first + second;
         if (used > ulong.MaxValue - floor) return false;
         return available >= used + floor;
-    }
-
-    static bool SumExceeds(ulong first, ulong second, ulong cap)
-    {
-        if (first > ulong.MaxValue - second) return true;
-        return first + second > cap;
     }
 
     static ulong Min(ulong left, ulong right) => left < right ? left : right;

@@ -595,7 +595,7 @@ powershell -NoProfile -File scripts/test.ps1
 - 设置改为可调整**之后批次**的内存参数；活动 Job 不改，活动期间共享根 CPU 继续锁定。解释额度包括工具子进程。旧 Receipt 无新字段仍可读取，旧 profile 和配置默认值不改。
 - 新增/增强 P02 原生、Receipt 往返和跨批次集成检查；真实夹具先运行 2 GiB 作业，在配置改成 4 GiB 后走正常 waiver/reserve，再启动下一项，最终回执分别证明 2/4 GiB 且都有非零 OS 峰值。新增 WPF 检查验证内存可编辑、CPU 禁改且不能由程序赋值绕过。
 - 验证：完整 `scripts/test.ps1`（含浏览器）exit 0，原生/模型 **69/69**、集成 **0 失败**、WPF **143/143**、原型 **5/5**、浏览器检查全部通过；证据 `artifacts/startup-diagnosis/vibe-s0-gate.txt`、`artifacts/ui/ui-checks.json`（Dpi 120）、`artifacts/integration-results.json`。本轮之前 `-SkipBrowser` 的同套结果见 `omp-authorized-gate.txt`。中间失败保留在 `omp-final-gate.txt` / `omp-sequential-gate.txt`：新夹具启用槽不匹配、软授权缺失已经修正；一次 Git 准备 pipe broken 在后续顺序执行中未再出现，尚无独立根因结论。
-- 生产候选目录 `artifacts/preview-omp-stability` 按当前工作区重建（14 文件），四个程序集 marker 扫描 CLEAN；SHA-256（含参数预设、版本探测与任务队列）：App `85412716DA0F9B061F0DECB33ACDA95DF17B6F8798BC7A3248E182C2AFD84A69`、Windows `98F157605A27B7F5E352FC9DF959CFC1FAB30C13B0420F56871162364AB10F95`、Worker `0FF29233A4045FD42F75E8BB37EB1C3260111D6D36B5EBC975FC5650AABF0483`。当前生产进程与用户配置未替换/修改，仍可能使用 2 GiB 旧限制；交付切换、对应最终提交 CI 与 30 分钟 × 3 轮代表性负载仍属待完成事项。本轮不宣称频繁退出已彻底解决。
+- 生产候选目录 `artifacts/preview-omp-stability` 按当前工作区重建（14 文件），四个程序集 marker 扫描 CLEAN；SHA-256（含参数预设、版本探测、任务队列与共享池原型 API）：App `FCDEFE2F828BD06E295BB153003E67A56FE33BC8DBEFC512903E56A3157B44AB`、Windows `75B2D48A144204ADC53460C2C55BF1D4CA67C742DA9096CEC7EED907EAC9862D`、Worker `DB0D0098449AD26D7956A12DE2BFB26D0B27F44A109D195ACFF9F7A464688802`。当前生产进程与用户配置未替换/修改，仍可能使用 2 GiB 旧限制；交付切换、对应最终提交 CI 与 30 分钟 × 3 轮代表性负载仍属待完成事项。本轮不宣称频繁退出已彻底解决。
 - 用户随后要求进入扩展规划阶段，新增 [扩展规格](superpowers/specs/2026-11-11-vibe-workbench-spec.md) 与 [实施计划](superpowers/plans/2026-11-11-vibe-workbench-plan.md)。参数预设、任务队列、共享池、审查中心和 Omp 多会话均为后续计划；稳定性封板为 S0 前置门槛。
 
 ## 23. 参数预设与 CLI 能力核对（2026-11-11）
@@ -631,5 +631,8 @@ powershell -NoProfile -File scripts/test.ps1
 - ACC-S3P05：同名 `CreateJobObject` 返回既有对象（`CreatedNew=false`），第二个句柄改额度后第一个句柄能看到同一额度，不会产生第二个池。
 - ACC-S3P06：关闭所有池句柄并结束创建者后，池名字无法再用 `OpenJobObject` 打开（Win32=2），但成员仍然存活并正常退出；因此“按名字恢复池并枚举成员”不可行，恢复只能依靠可信句柄或已证明的成员集合。
 - ACC-S3P07：池创建者退出后，成员继续运行并可被已持有句柄的池查询，退出后成员列表清空。
-- 验证：`dotnet run --project tests/AgentLauncher.Tests -c Release` → `RESULT 82 passed, 0 failed`；新增 7 项 ACC-S3P01–P07。完整 `scripts/test.ps1` exit 0：原生/模型 82/82、集成 0 失败、WPF 155/155、原型 5/5、浏览器通过；证据 `artifacts/startup-diagnosis/vibe-s3-proto-gate.txt`、`artifacts/ui/ui-checks.json`（Dpi 120）。
+- ACC-S3P08：在单项内启动的父进程再派生一个子进程后退出；子进程同时保持根/池/单项三级归属，单项成员列表包含它，池的峰值记账包含它，父进程退出后子进程正常跑完。这条覆盖了计划要求的“继承后代归属”和“父退出子存活”，而不只是创建者退出。
+- 记账合同（S3.1）：`ResourceSettings` 增加 `Pool`（独立/共享，默认独立）与 `PoolMemoryLimit`；快照、`PolicyHash`、`PlanDigest` 都带上池模式/池额度/池标识。共享模式下软预算按池计费一次（同一池的已保留项与排队请求不重复计费），Git 仍独立按项计费，规划仍按项累计。`ValidateSettings`/`ValidateLaunchItem` 拒绝未知池模式、低于 1 GiB 或低于规划值的池上限、共享模式缺少池标识、独立模式携带池标识。默认仍是独立模式，UI 尚未暴露切换，因此现有启动路径行为不变。
+- 账本版本（S3.3 前置）：控制账本升为 schema 2，新增 `Pools` 记录（池 ID、上限、策略哈希、批次）；版本 1 读作独立模式并就地升级，版本 3 及更高拒绝，池 ID 找不到记录、池记录重复或上限为 0 都按账本损坏停用启动与回收。旧 Worker 看到 schema 2 会按未知版本拒绝，不会强行接管池。
+- 验证：`dotnet run --project tests/AgentLauncher.Tests -c Release` → `RESULT 89 passed, 0 failed`；新增 8 项 ACC-S3P01–P08 与 6 项 ACC-S3A01–A06。完整 `scripts/test.ps1` exit 0：原生/模型 89/89、集成 0 失败、WPF 155/155、原型 5/5、浏览器通过；证据 `artifacts/startup-diagnosis/vibe-s3-proto-gate.txt`（82/82 阶段）与 `vibe-s3-accounting-gate-2.txt`（89/89，本提交）、`artifacts/ui/ui-checks.json`（Dpi 120）。
 - 结论与边界：嵌套归属与额度调整在本机可用，S3 可以进入第二关；恢复设计必须放弃“名字重开”，且未归属进程只能计入池额度、无法按单项核对。原型未覆盖监控进程崩溃时的两阶段记账、跨进程池恢复和真实 Agent 负载，这些留给 S3.1–S3.3。

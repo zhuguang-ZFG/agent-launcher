@@ -175,6 +175,44 @@ internal static class PoolPrototypeChecks
             Assert(worker.Process.WaitForExit(8000) && worker.Process.ExitCode == 0, "member did not finish under a pool whose creator exited");
             Assert(pool.Members().Length == 0, "pool still listed a member after it exited");
         });
+        Case("ACC-S3P08 a descendant spawned inside an item inherits the chain and survives its parent", () =>
+        {
+            var s = Guid.NewGuid().ToString("N");
+            var poolName = $@"Local\AL-proto8-pool-{s}";
+            var itemPrefix = $@"Local\AL-proto8-item-{s}-";
+            var ready = System.IO.Path.Combine(temp, $"proto8-{s}-ready");
+            var pidFile = System.IO.Path.Combine(temp, $"proto8-{s}-pid");
+            using var root = new Job($@"Local\AL-proto8-root-{s}", root: true);
+            var setup = Start(root, poolName, itemPrefix, 1, ready);
+            setup.Resume();
+            WaitFor(ready, "nested setup never reported a pool hierarchy");
+            using var pool = new Job(poolName, openOnly: true);
+            using var item = new Job(itemPrefix + "0", openOnly: true);
+            pool.SetMemoryLimit(192 * ResourcePolicy.MiB);
+            Process? child = null;
+            try
+            {
+                using var parent = new ProtectedProcess(new(Environment.ProcessPath!, ["--spawn-child", "400", "4000", pidFile], "exe"), temp, [root, pool, item]);
+                parent.Resume();
+                WaitFor(pidFile, "parent never reported its child");
+                Assert(parent.Process.WaitForExit(5000) && parent.Process.ExitCode == 0, "item parent did not exit cleanly");
+                child = Process.GetProcessById(int.Parse(File.ReadAllText(pidFile), System.Globalization.CultureInfo.InvariantCulture));
+                Assert(!child.HasExited, "descendant died with its parent");
+                foreach (var (level, name) in new[] { (root, "root"), (pool, "pool"), (item, "item") })
+                {
+                    Native.Check(Native.IsProcessInJob(child.Handle, level.Handle, out var joined));
+                    Assert(joined, $"descendant lost its {name} membership");
+                }
+                Assert(item.Members().Contains(child.Id), "item did not list its inherited descendant");
+                Assert(pool.QueryMemory() is { PeakBytes: > 0 }, "pool did not account the descendant");
+                Assert(child.WaitForExit(8000) && child.ExitCode == 0, "descendant did not finish after its parent exited");
+            }
+            finally
+            {
+                if (child is { HasExited: false }) { child.Kill(); child.WaitForExit(3000); }
+                child?.Dispose();
+            }
+        });
     }
 
     private static void Stop(ProtectedProcess process)

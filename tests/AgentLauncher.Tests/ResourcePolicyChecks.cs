@@ -359,6 +359,109 @@ internal static class ResourcePolicyChecks
         });
     }
 
+    public static void RunPoolAccounting(Action<string, Action> Test)
+    {
+        var total = 16 * ResourcePolicy.GiB;
+        var jobLimit = 4 * ResourcePolicy.GiB;
+        var poolId = Guid.NewGuid();
+        var shared = new ResourcePolicySnapshot("practical", jobLimit, ResourcePolicy.DefaultPlanningBytes,
+            ResourcePolicy.DefaultPhysicalFloor(total), ResourcePolicy.DefaultCommitFloor(32 * ResourcePolicy.GiB),
+            ResourcePolicy.DefaultCpuRate, ResourcePolicy.GitJobMemoryLimit, ResourcePolicy.DefaultGitPlanningBytes,
+            ResourcePolicy.PoolShared, jobLimit);
+        BudgetItem Pooled(int i) => new(Guid.NewGuid(), "agent", ResourcePolicy.DefaultPlanningBytes, jobLimit, poolId);
+        BudgetItem Git() => new(Guid.NewGuid(), "git", ResourcePolicy.DefaultGitPlanningBytes, ResourcePolicy.GitJobMemoryLimit);
+        MemorySnapshot Ok() => new(total, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 10, DateTimeOffset.UtcNow);
+
+        Test("ACC-S3A01 shared pool bills its limit once instead of summing every item cap", () =>
+        {
+            var independent = shared with { PoolMode = ResourcePolicy.PoolIndependent, PoolMemoryLimit = 0 };
+            var items = new[] { Pooled(0), Pooled(1) };
+            var perItem = independent with { JobMemoryLimit = jobLimit };
+            var summed = ResourcePolicy.Evaluate(Ok(), perItem, [], items.Select(i => i with { PoolId = null }).ToArray());
+            var pooled = ResourcePolicy.Evaluate(Ok(), shared, [], items);
+            if (summed.Kind != AdmissionKind.RequireWaiver) throw new Exception("independent caps did not exceed the soft budget: " + summed.Kind);
+            if (pooled.Kind != AdmissionKind.Allow) throw new Exception("shared pool summed per-item caps: " + pooled.Kind + " " + pooled.Reason);
+            if (pooled.CapSumRequested != jobLimit) throw new Exception("shared pool charged more than one pool limit");
+        });
+
+        Test("ACC-S3A02 a pool already reserved is not charged twice for a queued item in the same pool", () =>
+        {
+            var reserved = new[] { Pooled(0) };
+            var requested = new[] { Pooled(1) };
+            var d = ResourcePolicy.Evaluate(Ok(), shared, reserved, requested);
+            if (d.Kind != AdmissionKind.Allow || d.CapSumReserved != jobLimit) throw new Exception("reserved pool charged twice");
+        });
+
+        Test("ACC-S3A03 git stays independently billed beside a shared pool", () =>
+        {
+            var items = new[] { Pooled(0), Pooled(1), Git() };
+            var d = ResourcePolicy.Evaluate(Ok(), shared, [], items);
+            if (d.Kind != AdmissionKind.Allow || d.CapSumRequested != jobLimit + ResourcePolicy.GitJobMemoryLimit)
+                throw new Exception("git cap leaked into the pool bill");
+        });
+
+        Test("ACC-S3A04 pool identity and limits are part of the launch digest and policy hash", () =>
+        {
+            var item = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,
+                new("C:\agent.exe", [], "exe"), jobLimit, "agent", PoolId: poolId);
+            var other = item with { PoolId = Guid.NewGuid() };
+            if (ResourcePolicy.PlanDigest([item]) == ResourcePolicy.PlanDigest([other])) throw new Exception("plan digest ignored the pool");
+            if (ResourcePolicy.PolicyHash(shared) == ResourcePolicy.PolicyHash(shared with { PoolMemoryLimit = 2 * ResourcePolicy.GiB })) throw new Exception("policy hash ignored the pool limit");
+            if (ResourcePolicy.PolicyHash(shared) == ResourcePolicy.PolicyHash(shared with { PoolMode = ResourcePolicy.PoolIndependent })) throw new Exception("policy hash ignored the pool mode");
+        });
+
+        Test("ACC-S3A06 ledger migration reads version 1 as independent and rejects unknown pool references", () =>
+        {
+            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,
+                new("C:\\agent.exe", [], "exe"), jobLimit, "agent");
+            var legacy = new Ledger { SchemaVersion = 1 };
+            legacy.Entries.Add(new() { Plan = plan });
+            var migrated = LedgerMigration.Accept(legacy);
+            if (migrated.SchemaVersion != 2 || migrated.Pools.Count != 0) throw new Exception("version 1 was not read as independent");
+            var future = new Ledger { SchemaVersion = 3 };
+            var rejected = false;
+            try { LedgerMigration.Accept(future); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("unknown ledger version accepted");
+            var orphan = new Ledger { SchemaVersion = 2 };
+            orphan.Entries.Add(new() { Plan = plan with { PoolId = poolId } });
+            rejected = false;
+            try { LedgerMigration.Accept(orphan); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("entry without its pool record accepted");
+            var duplicate = new Ledger { SchemaVersion = 2 };
+            duplicate.Pools.Add(new() { Id = poolId, MemoryLimit = jobLimit, PolicyHash = "h", BatchId = Guid.NewGuid() });
+            duplicate.Pools.Add(new() { Id = poolId, MemoryLimit = jobLimit, PolicyHash = "h", BatchId = Guid.NewGuid() });
+            rejected = false;
+            try { LedgerMigration.Accept(duplicate); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("duplicate pool records accepted");
+        });
+
+        Test("ACC-S3A05 settings and launch items reject unsupported pool combinations", () =>
+        {
+            var draft = new Draft();
+            draft.Resource.Pool = "shared";
+            draft.Resource.JobMemoryLimit = jobLimit;
+            draft.Resource.PoolMemoryLimit = 512 * ResourcePolicy.MiB;
+            var rejected = false;
+            try { draft.Validate(); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("pool limit below 1 GiB accepted");
+            draft.Resource.PoolMemoryLimit = jobLimit;
+            draft.Resource.Pool = "sometimes";
+            rejected = false;
+            try { draft.Validate(); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("unknown pool mode accepted");
+            draft.Resource.Pool = ResourcePolicy.PoolShared;
+            var item = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,
+                new("C:\agent.exe", [], "exe"), jobLimit, "agent");
+            rejected = false;
+            try { ResourcePolicy.ValidateLaunchItem(item, shared, total); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("shared mode accepted an item without a pool id");
+            var independent = shared with { PoolMode = ResourcePolicy.PoolIndependent, PoolMemoryLimit = 0 };
+            rejected = false;
+            try { ResourcePolicy.ValidateLaunchItem(item with { PoolId = poolId }, independent, total); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("independent mode accepted a pool id");
+        });
+    }
+
     public static void RunWaivers(Action<string, Action> Test)
     {
         var total = 16 * ResourcePolicy.GiB;
