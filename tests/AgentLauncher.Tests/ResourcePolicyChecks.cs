@@ -368,7 +368,7 @@ internal static class ResourcePolicyChecks
             ResourcePolicy.DefaultPhysicalFloor(total), ResourcePolicy.DefaultCommitFloor(32 * ResourcePolicy.GiB),
             ResourcePolicy.DefaultCpuRate, ResourcePolicy.GitJobMemoryLimit, ResourcePolicy.DefaultGitPlanningBytes,
             ResourcePolicy.PoolShared, jobLimit);
-        BudgetItem Pooled(int i) => new(Guid.NewGuid(), "agent", ResourcePolicy.DefaultPlanningBytes, jobLimit, poolId);
+        BudgetItem Pooled(int i) => new(Guid.NewGuid(), "agent", ResourcePolicy.DefaultPlanningBytes, jobLimit, poolId, shared.PoolMemoryLimit);
         BudgetItem Git() => new(Guid.NewGuid(), "git", ResourcePolicy.DefaultGitPlanningBytes, ResourcePolicy.GitJobMemoryLimit);
         MemorySnapshot Ok() => new(total, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 10, DateTimeOffset.UtcNow);
 
@@ -423,16 +423,33 @@ internal static class ResourcePolicyChecks
             try { LedgerMigration.Accept(future); } catch (InvalidDataException) { rejected = true; }
             if (!rejected) throw new Exception("unknown ledger version accepted");
             var orphan = new Ledger { SchemaVersion = 2 };
-            orphan.Entries.Add(new() { Plan = plan with { PoolId = poolId } });
+            orphan.Entries.Add(new() { Plan = plan with { PoolId = poolId }, State = "Pending" });
             rejected = false;
             try { LedgerMigration.Accept(orphan); } catch (InvalidDataException) { rejected = true; }
             if (!rejected) throw new Exception("entry without its pool record accepted");
+            var retired = new Ledger { SchemaVersion = 2 };
+            retired.Entries.Add(new() { Plan = plan with { PoolId = poolId }, State = "Settled" });
+            if (LedgerMigration.Accept(retired).Pools.Count != 0) throw new Exception("finished history invented a pool record");
             var duplicate = new Ledger { SchemaVersion = 2 };
             duplicate.Pools.Add(new() { Id = poolId, MemoryLimit = jobLimit, PolicyHash = "h", BatchId = Guid.NewGuid() });
             duplicate.Pools.Add(new() { Id = poolId, MemoryLimit = jobLimit, PolicyHash = "h", BatchId = Guid.NewGuid() });
             rejected = false;
             try { LedgerMigration.Accept(duplicate); } catch (InvalidDataException) { rejected = true; }
             if (!rejected) throw new Exception("duplicate pool records accepted");
+        });
+
+        Test("ACC-S3A07 boot rollover settles entries and retires pool records", () =>
+        {
+            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,
+                new("C:\\agent.exe", [], "exe"), jobLimit, "agent", PoolId: poolId);
+            var ledger = new Ledger { SchemaVersion = 2, BootId = "old" };
+            ledger.Pools.Add(new() { Id = poolId, MemoryLimit = jobLimit, PolicyHash = "h", BatchId = Guid.NewGuid() });
+            ledger.Entries.Add(new() { Plan = plan, State = "Creating" });
+            var changed = LedgerMigration.Rollover(ledger, "new");
+            if (!changed || ledger.BootId != "new" || ledger.Pools.Count != 0 || ledger.Entries[0].State != "Settled")
+                throw new Exception("boot rollover kept pools or active entries");
+            if (LedgerMigration.Rollover(ledger, "new")) throw new Exception("unchanged boot reported a rollover");
+            LedgerMigration.Accept(ledger);
         });
 
         Test("ACC-S3A05 settings and launch items reject unsupported pool combinations", () =>

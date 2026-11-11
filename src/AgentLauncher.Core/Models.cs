@@ -121,6 +121,8 @@ public sealed class ControlEntry
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? CommitFloor { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public int? CpuRate { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public Guid? WaiverId { get; set; }
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? Pool { get; set; }
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? PoolMemoryLimit { get; set; }
 }
 public sealed class PoolRecord
 {

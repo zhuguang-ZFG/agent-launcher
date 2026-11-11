@@ -29,7 +29,7 @@ public sealed record ResourcePolicySnapshot(
     ulong GitJobMemoryLimit, ulong GitPlanningBytes,
     string PoolMode = ResourcePolicy.PoolIndependent, ulong PoolMemoryLimit = 0);
 
-public sealed record BudgetItem(Guid Id, string Kind, ulong PlanningBytes, ulong JobMemoryLimit, Guid? PoolId = null);
+public sealed record BudgetItem(Guid Id, string Kind, ulong PlanningBytes, ulong JobMemoryLimit, Guid? PoolId = null, ulong? PoolLimit = null);
 
 public enum AdmissionKind { Allow, RequireWaiver, Deny }
 
@@ -112,7 +112,8 @@ public static class LedgerMigration
         if (ledger.Pools.Select(p => p.Id).Distinct().Count() != ledger.Pools.Count) throw new InvalidDataException("控制账本损坏或版本不支持。");
         foreach (var entry in ledger.Entries)
         {
-            if (entry.Plan.PoolId is { } id)
+            // Finished history keeps the pool id for display; only an entry that can still launch needs frozen pool metadata.
+            if (entry.Plan.PoolId is { } id && entry.State is not ("Revoked" or "Settled" or "FailedBeforeStart"))
             {
                 var pool = ledger.Pools.SingleOrDefault(p => p.Id == id) ?? throw new InvalidDataException("控制账本缺少池记录，已停止启动与回收。");
                 if (pool.MemoryLimit == 0) throw new InvalidDataException("控制账本中的池上限不可用。");
@@ -120,6 +121,21 @@ public static class LedgerMigration
         }
         ledger.SchemaVersion = CurrentSchemaVersion;
         return ledger;
+    }
+
+    // A boot id change proves every process from the previous boot is gone, so pool handles and charges may be retired.
+    public static bool Rollover(Ledger ledger, string boot)
+    {
+        if (ledger is null) throw new InvalidDataException("控制账本损坏或版本不支持。");
+        if (ledger.BootId == boot) return false;
+        foreach (var entry in ledger.Entries.Where(e => e.State is not ("Revoked" or "Settled" or "FailedBeforeStart")))
+        {
+            entry.State = "Settled";
+            entry.Detail = "系统已重新启动，未重放旧请求";
+        }
+        ledger.Pools.Clear();
+        ledger.BootId = boot;
+        return true;
     }
 }
 
@@ -280,8 +296,8 @@ public static class ResourcePolicy
         {
             if (policy.PoolMemoryLimit < MinJobMemoryLimit || policy.PoolMemoryLimit > maxJob)
                 throw new InvalidDataException("资源池上限不能低于 1 GiB 或超过 8 GiB。");
-            if (policy.PoolMemoryLimit < policy.PlanningBytes)
-                throw new InvalidDataException("资源池上限不能低于规划估算。");
+            if (policy.PoolMemoryLimit < policy.JobMemoryLimit)
+                throw new InvalidDataException("资源池上限不能低于单项 Job 上限。");
         }
         if (policy.PhysicalFloor == 0 || policy.PhysicalFloor < MinCustomPhysicalFloor)
             throw new InvalidDataException("物理临界余量不能低于下限，也不能为 0。");
@@ -322,8 +338,8 @@ public static class ResourcePolicy
             var poolLimit = PoolLimitOf(settings);
             if (poolLimit < MinJobMemoryLimit || poolLimit > maxJob)
                 throw new InvalidDataException("资源池上限不能低于 1 GiB 或超过 8 GiB。");
-            if (poolLimit < settings.PlanningBytes)
-                throw new InvalidDataException("资源池上限不能低于规划估算。");
+            if (poolLimit < settings.JobMemoryLimit)
+                throw new InvalidDataException("资源池上限不能低于单项 Job 上限。");
         }
         if (settings.PhysicalFloorOverride is { } physical)
         {
@@ -376,7 +392,7 @@ public static class ResourcePolicy
             throw new InvalidDataException("启动项缺少当前策略的规划估算，请重新准备启动计划。");
     }
 
-    public static BudgetItem BudgetOf(LaunchItem plan)
+    public static BudgetItem BudgetOf(LaunchItem plan, ulong? poolLimit = null)
     {
         var git = plan.Kind == "git";
         return new(
@@ -384,7 +400,8 @@ public static class ResourcePolicy
             git ? "git" : (plan.Kind ?? "agent"),
             git ? DefaultGitPlanningBytes : plan.PlanningBytes is null or 0 ? DefaultPlanningBytes : plan.PlanningBytes.Value,
             git ? GitJobMemoryLimit : plan.Budget,
-            git ? null : plan.PoolId);
+            git ? null : plan.PoolId,
+            git || plan.PoolId is null ? null : poolLimit);
     }
 
     public static bool IsSampleValid(MemorySnapshot? sample)
@@ -421,11 +438,11 @@ public static class ResourcePolicy
         var pools = new HashSet<Guid>();
         foreach (var item in items)
         {
-            if (policy.PoolMode == PoolShared && item.Kind != "git" && item.PoolId is { } poolId)
+            if (item.Kind != "git" && item.PoolId is { } poolId && item.PoolLimit is > 0)
             {
                 if (!pools.Add(poolId)) continue;
-                if (sum > ulong.MaxValue - policy.PoolMemoryLimit) return ulong.MaxValue;
-                sum += policy.PoolMemoryLimit;
+                if (sum > ulong.MaxValue - item.PoolLimit.Value) return ulong.MaxValue;
+                sum += item.PoolLimit.Value;
                 continue;
             }
             var value = CapOf(policy, item);

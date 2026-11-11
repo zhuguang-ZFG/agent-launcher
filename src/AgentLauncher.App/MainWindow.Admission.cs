@@ -14,7 +14,7 @@ public partial class MainWindow
         if (status.AdmissionBlockedReason is { Length: > 0 } blockedReason) throw new IOException(blockedReason);
         var binding = ReservationBindings(items);
         var reserved = (status.Entries ?? []).Where(e => !Store.IsTerminal(e)).Select(e => ResourcePolicy.BudgetOf(e.Plan)).ToArray();
-        var requested = items.Select(ResourcePolicy.BudgetOf).ToArray();
+        var requested = items.Select(item => ResourcePolicy.BudgetOf(item)).ToArray();
         var decision = ResourcePolicy.Evaluate(status.Memory, binding.Policy, reserved, requested);
         if (decision.Kind == AdmissionKind.Deny) throw new IOException(decision.Reason);
         if (decision.Kind == AdmissionKind.Allow) return null;

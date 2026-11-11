@@ -15,8 +15,32 @@ internal static class Integration
             var p=Process.Start(start)!;p.StandardInput.Close();return p;
         }
         void Assert(bool ok,string why){if(!ok)throw new Exception(why);}
+        T Sync<T>(Task<T> task)=>task.GetAwaiter().GetResult();
+        string WaitMarker(string path,string expected,int timeoutMs)
+        {
+            var watch=Stopwatch.StartNew();
+            while(watch.ElapsedMilliseconds<timeoutMs)
+            {
+                try{using var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete);using var reader=new StreamReader(stream);var text=reader.ReadToEnd();if(text==expected)return text;}
+                catch(IOException){}
+                System.Threading.Thread.Sleep(20);
+            }
+            throw new Exception("marker timeout: "+path);
+        }
         async Task Test(string name,Func<Task> action){try{await action();Console.WriteLine("PASS "+name);evidence.Add(new{name,passed=true});}catch(Exception e){Console.WriteLine("FAIL "+name+": "+e.Message);evidence.Add(new{name,passed=false,error=e.ToString()});}}
         LaunchItem Item(string name,string[] args,string kind="agent")=>new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),false,new(Environment.ProcessPath!,args,"exe"),kind=="git"?ResourcePolicy.GitBudget:ResourcePolicy.AgentBudget,kind);
+        ProtectedProcess LaunchPooled(Job root,Guid poolId,Guid? itemId,string[] args)
+        {
+            using var pool=new Job(Store.PoolName(poolId),openOnly:true);
+            ProtectedProcess process;
+            if(itemId is {} id)
+            {
+                using var item=new Job(Store.JobName(id),openOnly:true);
+                process=new ProtectedProcess(new(Environment.ProcessPath!,args,"exe"),cwd,[root,pool,item]);
+            }
+            else process=new ProtectedProcess(new(Environment.ProcessPath!,args,"exe"),cwd,[root,pool]);
+            process.Resume();return process;
+        }
         var initial=await Ipc.EnsureMonitorAsync();Assert(initial.Ok,initial.Message);
         await Test("P04 begin rechecks complete resource policy without consuming grant",async()=>{
             var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
@@ -365,6 +389,132 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             for(var i=0;i<100;i++){if(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"))break;await Task.Delay(100);}
             Assert(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"),"Terminal panes did not complete");
             Assert(File.Exists(Path.Combine(Store.Root,"terminal-1.json"))&&File.Exists(Path.Combine(Store.Root,"terminal-2.json")),"terminal command did not execute");await Ipc.SendAsync(new("status",Guid.NewGuid()));
+        });
+        await Test("ACC-S3B01 shared pool bills once, keeps kernel caps and launches on a root-pool-item chain",async()=>{
+            var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
+            var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
+            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId);
+            var items=new[]{Shared("pool-a",1),Shared("pool-b",2)};
+            var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserved.Ok,reserved.Message);
+            var ledger=Store.Read<Ledger>(Store.FilePath("control.json"))!;Assert(ledger.SchemaVersion==2&&ledger.Pools.Count==1&&ledger.Pools[0].MemoryLimit==4*ResourcePolicy.GiB,"shared pool record missing");
+            using var root=new Job(Store.RootJob,openOnly:true);
+            using var attempt=new Mutex(false,Store.AttemptLock(items[0].Id));attempt.WaitOne();
+            try
+            {
+                var began=Sync(Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:items[0].Id)));Assert(began.Ok,began.Message);
+                using var process=LaunchPooled(root,poolId,items[0].Id,["--hold","2000"]);
+                using(var pool=new Job(Store.PoolName(poolId),openOnly:true))using(var item=new Job(Store.JobName(items[0].Id),openOnly:true))
+                { Assert(pool.QueryMemory() is{LimitBytes:4*ResourcePolicy.GiB},"pool kernel cap missing");Assert(item.QueryMemory() is{LimitBytes:ResourcePolicy.GiB},"item kernel cap missing"); }
+                Assert(process.Process.WaitForExit(10000),"pool chain fixture timed out");
+                Store.Save(Store.ReceiptPath(items[0].Id),new Receipt("Finished",process.Process.Id,0,0,"全部受管进程已退出。",DateTimeOffset.UtcNow));
+            }
+            finally { attempt.ReleaseMutex(); }
+            var settled=false;for(var i=0;i<60&&!settled;i++){var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));settled=status.Entries?.Any(e=>e.Plan.Id==items[0].Id&&e.State=="Settled")==true;if(!settled)await Task.Delay(100);}
+            Assert(settled,"shared pool entry never settled");
+            var smallPool=Guid.NewGuid();var smallItem=Store.JobName(Guid.NewGuid());var ready=Store.FilePath(Path.Combine("pools",smallPool.ToString("N")+"-factory.ready"));var release=Store.FilePath(Path.Combine("pools",smallPool.ToString("N")+"-factory.release"));
+            Directory.CreateDirectory(Path.GetDirectoryName(ready)!);File.Delete(ready);File.Delete(release);
+            using(var factory=new ProtectedProcess(new(Store.WorkerPath,["pool-host",Store.PoolName(smallPool),smallItem,ready,release,"1",(192*ResourcePolicy.MiB).ToString(),(96*ResourcePolicy.MiB).ToString()],"exe"),cwd,[root]))
+            {
+                factory.Resume();Assert(WaitMarker(ready,"ready",10000)=="ready","small pool factory failed");
+                using var smallPoolHandle=new Job(Store.PoolName(smallPool),openOnly:true);using var smallItemHandle=new Job(smallItem,openOnly:true);
+                Assert(smallPoolHandle.QueryMemory() is{LimitBytes:192*ResourcePolicy.MiB}&&smallItemHandle.QueryMemory() is{LimitBytes:96*ResourcePolicy.MiB},"factory caps missing");
+                using var refused=new ProtectedProcess(new(Environment.ProcessPath!,["--allocate-mib","256"],"exe"),cwd,[root,smallPoolHandle,smallItemHandle]);
+                refused.Resume();Assert(refused.Process.WaitForExit(20000)&&refused.Process.ExitCode==0,"item cap did not refuse a 256 MiB allocation");
+                File.WriteAllText(release,"1");Assert(factory.Process.WaitForExit(5000),"small pool factory did not exit");
+            }
+            await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:items[1].Id));
+            Store.Save(Store.FilePath("configuration.json"),new Configuration());
+        });
+        await Test("ACC-S3B02 a pool with a direct member keeps its handle and budget after item entries finish",async()=>{
+            var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
+            var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
+            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId);
+            var items=new[]{Shared("member-a",1),Shared("member-b",2)};
+            var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserved.Ok,reserved.Message);
+            using var root=new Job(Store.RootJob,openOnly:true);
+            using var attempt=new Mutex(false,Store.AttemptLock(items[0].Id));attempt.WaitOne();
+            int itemPid;
+            try
+            {
+                var began=Sync(Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:items[0].Id)));Assert(began.Ok,began.Message);
+                using var process=LaunchPooled(root,poolId,items[0].Id,["--hold","2000"]);
+                itemPid=process.Process.Id;
+                var revoked=Sync(Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:items[1].Id)));Assert(revoked.Ok,revoked.Message);
+                using var direct=LaunchPooled(root,poolId,null,["--hold","6000"]);
+                Assert(process.Process.WaitForExit(10000),"item fixture timed out");
+                Store.Save(Store.ReceiptPath(items[0].Id),new Receipt("Finished",itemPid,0,0,"全部受管进程已退出。",DateTimeOffset.UtcNow));
+            }
+            finally { attempt.ReleaseMutex(); }
+            var settled=false;string? holdReason=null;
+            for(var i=0;i<60&&!settled;i++)
+            {
+                var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));settled=status.Entries?.Any(e=>e.Plan.Id==items[0].Id&&e.State=="Settled")==true;holdReason=status.AdmissionBlockedReason;
+                if(status.AdmissionBlockedReason?.Contains("资源池")==true)break;
+                await Task.Delay(100);
+            }
+            Assert(settled,"pooled entry never settled");
+            Assert(holdReason?.Contains("资源池")==true,"direct pool member did not hold the pool: "+holdReason);
+            var released=false;
+            for(var i=0;i<150&&!released;i++)
+            {
+                try{using var probe=new Job(Store.PoolName(poolId),openOnly:true);}catch(System.ComponentModel.Win32Exception e)when(e.NativeErrorCode==2){released=true;}
+                if(!released)await Task.Delay(100);
+            }
+            Assert(released,"pool was not released after its last member exited");
+            var final=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(final.AdmissionBlockedReason?.Contains("资源池")!=true,"pool hold persisted after release: "+final.AdmissionBlockedReason);
+            Store.Save(Store.FilePath("configuration.json"),new Configuration());
+            var pid=Store.Read<int>(Store.FilePath("monitor-pid.json"));using(var stale=Process.GetProcessById(pid)){stale.Kill();stale.WaitForExit(5000);}
+            var restarted=await Ipc.EnsureMonitorAsync();Assert(restarted.Ok,restarted.Message);
+            var after=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(after.AdmissionBlockedReason?.Contains("账本")!=true,"retired pool broke the ledger across restart: "+after.AdmissionBlockedReason);
+        });
+        await Test("ACC-S3B03 a pool with a surviving direct member stays blocked and charged across monitor crash",async()=>{
+            var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
+            var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
+            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId);
+            var items=new[]{Shared("crash-a",1),Shared("crash-b",2)};
+            var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserved.Ok,reserved.Message);
+            using var root=new Job(Store.RootJob,openOnly:true);
+            using var direct=LaunchPooled(root,poolId,null,["--hold","9000"]);
+            using var attempt=new Mutex(false,Store.AttemptLock(items[0].Id));attempt.WaitOne();
+            try
+            {
+                var began=Sync(Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:items[0].Id)));Assert(began.Ok,began.Message);
+                using var process=LaunchPooled(root,poolId,items[0].Id,["--hold","2000"]);
+                Assert(process.Process.WaitForExit(10000),"item fixture timed out");
+                Store.Save(Store.ReceiptPath(items[0].Id),new Receipt("Finished",process.Process.Id,0,0,"全部受管进程已退出。",DateTimeOffset.UtcNow));
+            }
+            finally { attempt.ReleaseMutex(); }
+            var settled=false;for(var i=0;i<60&&!settled;i++){var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));settled=status.Entries?.Any(e=>e.Plan.Id==items[0].Id&&e.State=="Settled")==true;if(!settled)await Task.Delay(100);}
+            Assert(settled,"pooled entry never settled before crash");
+            var pid=Store.Read<int>(Store.FilePath("monitor-pid.json"));using(var monitor=Process.GetProcessById(pid)){monitor.Kill();monitor.WaitForExit(5000);}
+            await Ipc.EnsureMonitorAsync();
+            var after=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            Assert(after.AdmissionBlockedReason?.Contains("资源池")==true,"surviving pool member was not reported after monitor crash: "+after.AdmissionBlockedReason);
+            var ledger=Store.Read<Ledger>(Store.FilePath("control.json"))!;Assert(ledger.Pools.Any(p=>p.Id==poolId),"lost pool record dropped while a direct member may survive");
+            await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:items[1].Id));
+            Assert(direct.Process.WaitForExit(15000),"direct member timed out");
+            var cleared=false;
+            for(var i=0;i<100&&!cleared;i++)
+            {
+                var probe=await Ipc.SendAsync(new("status",Guid.NewGuid()));cleared=probe.AdmissionBlockedReason?.Contains("资源池")!=true;
+                var state=Store.Read<Ledger>(Store.FilePath("control.json"));
+                if(cleared&&state!=null&&state.Pools.All(p=>p.Id!=poolId))break;
+                await Task.Delay(100);
+            }
+            var current=Store.Read<Ledger>(Store.FilePath("control.json"))!;
+            if(current.Pools.Any(p=>p.Id==poolId))
+            {
+                Assert(!cleared,"blocked pool record vanished without proven retirement");
+                current.Pools.RemoveAll(p=>p.Id==poolId);Store.Save(Store.FilePath("control.json"),current);
+                pid=Store.Read<int>(Store.FilePath("monitor-pid.json"));using(var monitor=Process.GetProcessById(pid)){monitor.Kill();monitor.WaitForExit(5000);}
+                var restarted=await Ipc.EnsureMonitorAsync();Assert(restarted.Ok,restarted.Message);
+                var healthy=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(healthy.AdmissionBlockedReason?.Contains("资源池")!=true,"manual pool reconciliation did not clear the hold: "+healthy.AdmissionBlockedReason);
+            }
+            else Assert(cleared,"pool record removed before its hold cleared");
+            Store.Save(Store.FilePath("configuration.json"),new Configuration());
         });
         var monitorId=Store.Read<int>(Store.FilePath("monitor-pid.json"));using(var monitor=Process.GetProcessById(monitorId)){monitor.Refresh();evidence.Add(new{name="idle-monitor-memory",privateBytes=monitor.PrivateMemorySize64,workingSet=monitor.WorkingSet64});}
         await Ipc.EnsureMonitorAsync();await WorkspaceReviewChecks.RunAsync(Test,cwd);

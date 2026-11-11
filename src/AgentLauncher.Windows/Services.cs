@@ -22,6 +22,7 @@ public static class Store
     public static string RootJob => @"Local\AgentLauncher-"+Scope+"-cpu";
     public static string JobName(Guid id)=>@"Local\AgentLauncher-"+Scope+"-"+id.ToString("N");
     public static string AttemptLock(Guid id)=>JobName(id)+"-lock";
+    public static string PoolName(Guid id)=>@"Local\AgentLauncher-"+Scope+"-pool-"+id.ToString("N");
     public static string ReceiptPath(Guid id)=>Path.Combine(Root,"attempts",id.ToString("N"),"receipt.json");
     public static string WorkerPath=>Path.Combine(AppContext.BaseDirectory,"AgentLauncher.Worker.exe");
     public static string FilePath(string name)=>Path.Combine(Root,name);

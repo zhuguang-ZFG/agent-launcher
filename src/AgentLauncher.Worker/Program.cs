@@ -13,17 +13,62 @@ internal static class Program
         try
         {
             if(args is ["monitor"])return new Monitor().Run();
+            if(args.Length>=6&&args[0]=="pool-host")return PoolHost(args);
             if(args.Length==2 && args[0] is "pane" or "run" && Guid.TryParse(args[1],out var id))return RunPane(id,args[0]=="pane");
-            Console.Error.WriteLine("用法: monitor | pane <attempt-guid>");return 2;
+            Console.Error.WriteLine("用法: monitor | pane <attempt-guid> | pool-host <池> <项> <就绪> <释放> <新建池>");return 2;
         }
         catch(Exception e)when(e is not OutOfMemoryException){Console.Error.WriteLine("启动器: "+e.Message);return 1;}
+    }
+    // A job created by a process that is already inside a job becomes its child. The pool therefore needs a short-lived
+    // helper that the monitor starts inside the root job; the helper creates the pool/items, the monitor opens them by
+    // name while the helper still holds handles, and only then is the helper released.
+    private static int PoolHost(string[] args)
+    {
+        Job? pool=null;
+        try
+        {
+            var poolLimit=ulong.Parse(args[6],System.Globalization.CultureInfo.InvariantCulture);
+            var itemLimit=args.Length>7?ulong.Parse(args[7],System.Globalization.CultureInfo.InvariantCulture):0;
+            pool=args[5]=="1"?new Job(args[1]):new Job(args[1],openOnly:true);
+            if(args[5]=="1")
+            {
+                if(!pool.CreatedNew)throw new IOException("资源池已存在，未重复创建。");
+                Native.Check(Native.AssignProcessToJobObject(pool.Handle,Process.GetCurrentProcess().Handle));
+                pool.SetMemoryLimit(poolLimit);
+            }
+            if(pool.QueryMemory() is not { LimitBytes: var probed } || probed!=poolLimit)throw new IOException("资源池上限未生效。");
+            Job? item=null;
+            if(args[2].Length>0)
+            {
+                item=new Job(args[2]);
+                if(itemLimit==0||itemLimit>poolLimit)throw new IOException("单项上限无效。");
+                item.SetMemoryLimit(itemLimit);
+                if(item.QueryMemory() is not { LimitBytes: var itemProbed } || itemProbed!=itemLimit)throw new IOException("单项上限未生效。");
+            }
+            File.WriteAllText(args[3],"ready");
+            var watch=Stopwatch.StartNew();
+            while(!File.Exists(args[4]))
+            {
+                if(watch.ElapsedMilliseconds>15000)return 3;
+                Thread.Sleep(20);
+            }
+            GC.KeepAlive(pool);
+            if(item!=null){GC.KeepAlive(item);item.Dispose();}
+            return 0;
+        }
+        catch(Exception e)when(e is not OutOfMemoryException)
+        {
+            try{File.WriteAllText(args[3],"error:"+e.Message);}catch{}
+            return 1;
+        }
+        finally{pool?.Dispose();}
     }
     private static int RunPane(Guid id,bool interactive)
     {
         using var mutex=new Mutex(false,Store.AttemptLock(id));bool owned;
         try{owned=mutex.WaitOne(0);}catch(AbandonedMutexException){owned=true;}
         if(!owned)throw new IOException("该启动请求正在处理。");
-        ProtectedProcess? child=null;Job? root=null;Job? job=null;var resumeIntent=false;
+        ProtectedProcess? child=null;Job? root=null;Job? pool=null;Job? job=null;var resumeIntent=false;
         JobMemoryEvidence? exitMemory=null;
         try
         {
@@ -36,10 +81,11 @@ internal static class Program
             if(!grant.Ok||grant.Entries is not {Length:1})throw new IOException(grant.Message);
             var entry=grant.Entries[0];var plan=entry.Plan;
             root=new Job(Store.RootJob,openOnly:true);job=new Job(Store.JobName(id),openOnly:true);
+            if(plan.PoolId is {} poolId)pool=new Job(Store.PoolName(poolId),openOnly:true);
             if(PhysicalDirectory.Workspace(plan.Cwd).Key!=plan.Workspace.Key)throw new IOException("工作目录物理身份变化，已阻止启动。");
             if(interactive)TerminalAppearance.WritePaneHeading(plan);
             Write("SpawnIntent",0,0,null,"正在受保护地创建进程");
-            child=new ProtectedProcess(plan.Command,plan.Cwd,root,job,redirected:!interactive);
+            child=pool==null?new ProtectedProcess(plan.Command,plan.Cwd,root,job,redirected:!interactive):new ProtectedProcess(plan.Command,plan.Cwd,[root,pool,job],redirected:!interactive);
             Write("CreatedSuspended",child.Process.Id,child.CreationTime,null,"已创建，尚未运行");
             var resume=Ipc.SendAsync(new("resume",Guid.NewGuid(),Attempt:id,Epoch:grant.Epoch,Digest:entry.Digest)).GetAwaiter().GetResult();
             if(!resume.Ok)throw new IOException(resume.Message);
@@ -57,7 +103,7 @@ internal static class Program
         catch
         {
             if(child!=null&&!resumeIntent){child.AbortBeforeResume();Write("FailedBeforeStart",child.Process.Id,child.CreationTime,null,"未运行的进程已回收");}
-            child?.Dispose();job?.Dispose();root?.Dispose();throw;
+            child?.Dispose();job?.Dispose();pool?.Dispose();root?.Dispose();throw;
         }
         finally{mutex.ReleaseMutex();}
         try
@@ -73,7 +119,7 @@ internal static class Program
 #endif
             return exit;
         }
-        finally{child?.Dispose();job?.Dispose();root?.Dispose();}
+        finally{child?.Dispose();job?.Dispose();pool?.Dispose();root?.Dispose();}
         void Write(string phase,int pid,long time,int? code,string detail)
         {
             Store.Save(Store.ReceiptPath(id),new Receipt(phase,pid,time,code,detail,DateTimeOffset.UtcNow,exitMemory));
@@ -87,6 +133,7 @@ internal sealed class Monitor : IDisposable
 {
     private readonly Sampler sampler=new();
     private readonly Dictionary<Guid,Job> jobs=[];
+    private readonly Dictionary<Guid,Job> pools=[];
     private readonly string epoch=Guid.NewGuid().ToString("N");
     private readonly string ledgerPath=Store.FilePath("control.json");
     private Ledger ledger=new();
@@ -119,7 +166,7 @@ internal sealed class Monitor : IDisposable
             try{ledger=LedgerMigration.Accept(Store.Read<Ledger>(ledgerPath)??new());}
             catch(Exception e)when(e is JsonException or InvalidDataException or IOException){ledgerBroken=true;ledger=new();blocked="控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。";}
             var boot=Store.BootId();
-            if(!ledgerBroken&&ledger.BootId!=boot){foreach(var e in ledger.Entries.Where(e=>!Store.IsTerminal(e))){e.State="Settled";e.Detail="系统已重新启动，未重放旧请求";}ledger.BootId=boot;Save();}
+            if(!ledgerBroken&&LedgerMigration.Rollover(ledger,boot))Save();
             root=new Job(Store.RootJob,root:true,cpuRate:RootCpuRate());
             RefreshRootCpu();
             sampler.Sample();Thread.Sleep(250);Refresh();
@@ -197,6 +244,15 @@ internal sealed class Monitor : IDisposable
             pressureTracker.Observe(sample,floor);
         }
         var changed=false;blocked=ledgerBroken?"控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。":null;reconcileOffered=false;
+        foreach(var record in ledger.Pools.Where(p=>!pools.ContainsKey(p.Id)))
+        {
+            try{pools[record.Id]=new Job(Store.PoolName(record.Id),openOnly:true);}
+            catch(System.ComponentModel.Win32Exception ex) when(ex.NativeErrorCode==2)
+            {
+                blocked="资源池句柄丢失，无法证明整池成员已退出；保留池与预算，需人工核对后释放。";
+                reconcileOffered=true;
+            }
+        }
         foreach(var e in ledger.Entries.Where(e=>!Store.IsTerminal(e)&&e.State!="Pending"))
         {
             using var gate=new Mutex(false,Store.AttemptLock(e.Plan.Id));bool own;
@@ -204,6 +260,15 @@ internal sealed class Monitor : IDisposable
             if(!own)continue;
             try
             {
+                if(e.Plan.PoolId is {} poolId && !pools.ContainsKey(poolId))
+                {
+                    try{pools[poolId]=new Job(Store.PoolName(poolId),openOnly:true);}
+                    catch(System.ComponentModel.Win32Exception ex) when(ex.NativeErrorCode==2)
+                    {
+                        blocked="资源池句柄丢失，无法证明整池成员已退出；保留预算，系统重启后可核对释放。";
+                        e.Detail=blocked;reconcileOffered=true;continue;
+                    }
+                }
                 Job? j=null;
                 if(!jobs.TryGetValue(e.Plan.Id,out j))
                 {
@@ -233,12 +298,19 @@ internal sealed class Monitor : IDisposable
         }
         if(changed)Save();
         foreach(var id in jobs.Keys.Where(id=>Store.IsTerminal(ledger.Entries.Single(e=>e.Plan.Id==id))).ToArray()){jobs[id].Dispose();jobs.Remove(id);receiptCache.Remove(id);}
+        foreach(var id in pools.Keys.Where(id=>!ledger.Entries.Any(e=>!Store.IsTerminal(e)&&e.Plan.PoolId==id)).ToArray())
+        {
+            var pool=pools[id];
+            if(pool.Members().Length>0){blocked="资源池仍有存活或未归属的进程，保留池与预算，等待全部退出。";continue;}
+            pool.Dispose();pools.Remove(id);
+            if(ledger.Pools.RemoveAll(p=>p.Id==id)>0)Save();
+        }
         foreach(var id in receiptCache.Keys.Where(id=>!ledger.Entries.Any(e=>e.Plan.Id==id&&!Store.IsTerminal(e))).ToArray())receiptCache.Remove(id);
-        var known=jobs.Values.SelectMany(j=>j.Members()).ToHashSet();
-        if(root!.Members().Any(pid=>!known.Contains(pid)))blocked="发现资源组内尚未归属的进程，暂停新启动。";
+        var known=jobs.Values.SelectMany(j=>j.Members()).Concat(pools.Values.SelectMany(j=>j.Members())).ToHashSet();
+        if(blocked==null&&root!.Members().Any(pid=>!known.Contains(pid)))blocked="发现资源组内尚未归属的进程，暂停新启动。";
         RefreshRootCpu();
     }
-    private bool CanRetire()=>!ledgerBroken&&blocked==null&&jobs.Count==0&&ledger.Entries.All(Store.IsTerminal);
+    private bool CanRetire()=>!ledgerBroken&&blocked==null&&jobs.Count==0&&pools.Count==0&&ledger.Entries.All(Store.IsTerminal);
     private sealed record ReceiptCacheEntry(DateTime Written,long Length,Receipt? Receipt);
     private Receipt? ReadReceipt(Guid id)
     {
@@ -290,7 +362,7 @@ internal sealed class Monitor : IDisposable
             var items=request.Items??[];
             var binding=BindAuthority(request,items,consumeToken:false);
             ValidateStableSlots(request,items,binding);
-            var decision=Decide(binding.Policy,ActiveBudgets(),items.Select(ResourcePolicy.BudgetOf).ToList());
+            var decision=Decide(binding.Policy,ActiveBudgets(),items.Select(p=>ResourcePolicy.BudgetOf(p,p.PoolId is {} poolId?ledger.Pools.SingleOrDefault(pool=>pool.Id==poolId)?.MemoryLimit??binding.Policy.PoolMemoryLimit:null)).ToList());
             if(decision.Kind==AdmissionKind.Deny)waivers.InvalidatePlan(binding.Digest);
             return waivers.Issue(decision,binding.Revision,binding.Hash,binding.Digest,binding.Slots,sample?.At??DateTimeOffset.UtcNow,binding.ConfigurationIdentity) with{Memory=sample,Epoch=epoch,RootCpuRate=rootCpuRate};
         }
@@ -320,7 +392,7 @@ internal sealed class Monitor : IDisposable
                 active.Add(new(){Plan=p});
             }
             var reservedItems=ActiveBudgets();
-            var requestedItems=items.Select(ResourcePolicy.BudgetOf).ToList();
+            var requestedItems=items.Select(p=>ResourcePolicy.BudgetOf(p,p.PoolId is {} poolId?ledger.Pools.SingleOrDefault(pool=>pool.Id==poolId)?.MemoryLimit??binding.Policy.PoolMemoryLimit:null)).ToList();
             var decision=Decide(binding.Policy,reservedItems,requestedItems);
             if(decision.Kind==AdmissionKind.Deny)
             {
@@ -330,11 +402,25 @@ internal sealed class Monitor : IDisposable
             if(decision.Kind==AdmissionKind.RequireWaiver||request.WaiverId!=null)ValidateStableSlots(request,items,binding);
             if(decision.Kind==AdmissionKind.RequireWaiver&&binding.Consumed!=true)return new(false,"需要有效确认授权。",Memory:sample,Epoch:epoch,Decision:AdmissionKind.RequireWaiver.ToString(),RootCpuRate:rootCpuRate);
             var policy=binding.Policy;
-            var entries=items.Select(p=>new ControlEntry{Plan=p,Digest=Store.Digest(p),Epoch=epoch,Mode=policy.Mode,JobMemoryLimit=p.Kind=="git"?policy.GitJobMemoryLimit:p.Budget,PlanningBytes=ResourcePolicy.BudgetOf(p).PlanningBytes,PhysicalFloor=policy.PhysicalFloor,CommitFloor=policy.CommitFloor,CpuRate=rootCpuRate??policy.CpuRate,WaiverId=request.WaiverId}).ToArray();
+            var poolIds=items.Where(i=>i.PoolId is not null).Select(i=>i.PoolId!.Value).Distinct().ToArray();
+            if(poolIds.Length>0&&items.Select(i=>i.BatchId).Distinct().Count()>1)throw new IOException("只有同一批次才能共享资源池。");
+            var addedPools=new List<PoolRecord>();
+            foreach(var poolId in poolIds)
+            {
+                var record=ledger.Pools.SingleOrDefault(p=>p.Id==poolId);
+                if(record==null)
+                {
+                    record=new PoolRecord{Id=poolId,MemoryLimit=policy.PoolMemoryLimit,PolicyHash=binding.Hash,BatchId=items[0].BatchId};
+                    ledger.Pools.Add(record);addedPools.Add(record);
+                }
+                else if(record.MemoryLimit!=policy.PoolMemoryLimit||record.PolicyHash!=binding.Hash)throw new IOException("资源池策略已变化，请撤销后重新准备。");
+                EnsurePoolJob(poolId,policy.PoolMemoryLimit);
+            }
+            var entries=items.Select(p=>new ControlEntry{Plan=p,Digest=Store.Digest(p),Epoch=epoch,Mode=policy.Mode,JobMemoryLimit=p.Kind=="git"?policy.GitJobMemoryLimit:p.Budget,PlanningBytes=ResourcePolicy.BudgetOf(p).PlanningBytes,PhysicalFloor=policy.PhysicalFloor,CommitFloor=policy.CommitFloor,CpuRate=rootCpuRate??policy.CpuRate,WaiverId=request.WaiverId,Pool=policy.PoolMode,PoolMemoryLimit=policy.PoolMode==ResourcePolicy.PoolShared?policy.PoolMemoryLimit:null}).ToArray();
             // Reject an unrepresentable plan before it can be persisted or granted; active records are never truncated later.
             foreach(var candidate in entries)Ipc.EnsureEntryRepresentable(candidate);
             ledger.Entries.AddRange(entries);
-            try{Save();}catch{ledger.Entries.RemoveAll(e=>entries.Contains(e));throw;}
+            try{Save();}catch{ledger.Entries.RemoveAll(e=>entries.Contains(e));ledger.Pools.RemoveAll(p=>addedPools.Contains(p));throw;}
             return new(true,"已预约预算与工作目录",entries,sample,epoch);
         }
         if(request.Operation=="reconcile")return ReconcileRequests();
@@ -354,7 +440,14 @@ internal sealed class Monitor : IDisposable
             var beginDecision=Decide(policy,ActiveBudgets(),[],includeSoftBudget:false);
             if(beginDecision.Kind==AdmissionKind.Deny)throw new IOException(beginDecision.Reason+" 已保留预约，可撤销此项。");
             if(PhysicalDirectory.Workspace(entry.Plan.Cwd).Key!=entry.Plan.Workspace.Key)throw new IOException("目录物理身份已变化。");
-            jobs[entry.Plan.Id]=new Job(Store.JobName(entry.Plan.Id),entry.Plan.Budget);
+            if(entry.Plan.PoolId is {} poolId)
+            {
+                if(!pools.TryGetValue(poolId,out var pool)){pool=new Job(Store.PoolName(poolId),openOnly:true);pools[poolId]=pool;}
+                var poolLimit=pool.QueryMemory()?.LimitBytes??0;
+                if(poolLimit==0)throw new IOException("资源池上限不可读，已停止创建。");
+                jobs[entry.Plan.Id]=CreateItemJob(poolId,entry.Plan.Id,pool,poolLimit,entry.Plan.Budget);
+            }
+            else jobs[entry.Plan.Id]=new Job(Store.JobName(entry.Plan.Id),entry.Plan.Budget);
             entry.State="Creating";entry.Epoch=epoch;entry.Detail="正在创建进程";Save();return new(true,"单次创建授权",[entry],sample,epoch);
         }
         if(request.Operation=="resume")
@@ -452,9 +545,67 @@ internal sealed class Monitor : IDisposable
         // Names/arguments may themselves be oversized. Only bounded IDs belong in the response header.
         return $"{entries.Length} 条活动记录超出单帧边界，已暂停新启动；本次状态省略 ID：{string.Join("、",entries.Take(4).Select(e=>e.Plan.Id.ToString("N")))}。请人工核对 control.json 及备份；其他记录仍可撤销。";
     }
+    private string PoolMarker(Guid id,string suffix)=>Store.FilePath(Path.Combine("pools",id.ToString("N")+"."+suffix));
+    private Job EnsurePoolJob(Guid id,ulong limit)
+    {
+        if(pools.TryGetValue(id,out var cached))return cached;
+        try{pools[id]=new Job(Store.PoolName(id),openOnly:true);return pools[id];}
+        catch(System.ComponentModel.Win32Exception e)when(e.NativeErrorCode==2){}
+        var ready=PoolMarker(id,"ready");var release=PoolMarker(id,"release");
+        Directory.CreateDirectory(Path.GetDirectoryName(ready)!);
+        File.Delete(ready);File.Delete(release);
+        using var helper=new ProtectedProcess(new(Environment.ProcessPath!,["pool-host",Store.PoolName(id),"",ready,release,"1",limit.ToString(System.Globalization.CultureInfo.InvariantCulture)],"exe"),Store.Root,[root!]);
+        helper.Resume();
+        WaitForPool(ready,id);
+        var pool=new Job(Store.PoolName(id),openOnly:true);
+        File.WriteAllText(release,"1");
+        helper.Process.WaitForExit(5000);
+        pools[id]=pool;
+        return pool;
+    }
+    private Job CreateItemJob(Guid poolId,Guid itemId,Job pool,ulong limit,ulong itemLimit)
+    {
+        var ready=PoolMarker(itemId,"ready");var release=PoolMarker(itemId,"release");
+        Directory.CreateDirectory(Path.GetDirectoryName(ready)!);
+        File.Delete(ready);File.Delete(release);
+        using var helper=new ProtectedProcess(new(Environment.ProcessPath!,["pool-host",Store.PoolName(poolId),Store.JobName(itemId),ready,release,"0",limit.ToString(System.Globalization.CultureInfo.InvariantCulture),itemLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)],"exe"),Store.Root,[root!,pool]);
+        helper.Resume();
+        WaitForPool(ready,itemId);
+        var item=new Job(Store.JobName(itemId),openOnly:true);
+        File.WriteAllText(release,"1");
+        helper.Process.WaitForExit(5000);
+        return item;
+    }
+    private static void WaitForPool(string ready,Guid id)
+    {
+        var watch=Stopwatch.StartNew();string? text=null;
+        while(text==null)
+        {
+            try{using var stream=new FileStream(ready,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete);using var reader=new StreamReader(stream);text=reader.ReadToEnd();}
+            catch(IOException)
+            {
+                if(watch.ElapsedMilliseconds>10000)throw new IOException("资源池创建超时："+id.ToString("N"));
+                Thread.Sleep(20);
+            }
+        }
+        if(text.StartsWith("error:",StringComparison.Ordinal))throw new IOException("资源池创建失败："+text[6..]);
+    }
     private string? AdmissionBlockedReason()=>UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!StatusEntry(e).Representable).ToArray())??blocked??rootCpuReason??(pressure?"资源压力尚未连续恢复，稍后重新检查。":null);
-    public void Dispose(){foreach(var j in jobs.Values)j.Dispose();jobs.Clear();receiptCache.Clear();statusEntryCache.Clear();root?.Dispose();}
-    private List<BudgetItem> ActiveBudgets()=>ledger.Entries.Where(e=>!Store.IsTerminal(e)).Select(e=>ResourcePolicy.BudgetOf(e.Plan)).ToList();
+    public void Dispose(){foreach(var j in jobs.Values)j.Dispose();jobs.Clear();foreach(var j in pools.Values)j.Dispose();pools.Clear();receiptCache.Clear();statusEntryCache.Clear();root?.Dispose();}
+    private List<BudgetItem> ActiveBudgets()
+    {
+        var items=ledger.Entries.Where(e=>!Store.IsTerminal(e)).Select(e=>ResourcePolicy.BudgetOf(e.Plan,PoolLimitOf(e.Plan.PoolId))).ToList();
+        foreach(var record in ledger.Pools)
+        {
+            if(ledger.Entries.Any(e=>!Store.IsTerminal(e)&&e.Plan.PoolId==record.Id))continue;
+            var limit=(pools.TryGetValue(record.Id,out var pool)?pool.QueryMemory()?.LimitBytes:null)??record.MemoryLimit;
+            if(limit==0)limit=record.MemoryLimit;
+            if(limit==0)continue;
+            items.Add(new(record.Id,"agent",ResourcePolicy.DefaultPlanningBytes,limit,record.Id,limit));
+        }
+        return items;
+    }
+    private ulong? PoolLimitOf(Guid? poolId)=>poolId is {} id?ledger.Pools.SingleOrDefault(p=>p.Id==id)?.MemoryLimit:null;
     private sealed record AuthorityBinding(ResourcePolicySnapshot Policy,string Hash,string Digest,long Revision,Guid[] Slots,bool? Consumed,Draft? Draft,string ConfigurationIdentity);
     private (ResourceSettings Settings,long Revision,Draft? Draft,string Identity) LoadAuthority(bool bind=false)
     {
@@ -521,7 +672,9 @@ internal sealed class Monitor : IDisposable
             PlanningBytes=entry.PlanningBytes??entry.Plan.PlanningBytes??ResourcePolicy.DefaultPlanningBytes,
             PhysicalFloorOverride=entry.PhysicalFloor,
             CommitFloorOverride=entry.CommitFloor,
-            CpuRate=entry.CpuRate??ResourcePolicy.DefaultCpuRate
+            CpuRate=entry.CpuRate??ResourcePolicy.DefaultCpuRate,
+            Pool=entry.Pool??ResourcePolicy.PoolIndependent,
+            PoolMemoryLimit=entry.PoolMemoryLimit
         };
         return ResourcePolicy.SnapshotFor(settings,sample?.Total??0,sample?.CommitLimit??0);
     }
