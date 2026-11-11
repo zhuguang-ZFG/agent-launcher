@@ -83,6 +83,13 @@ internal static class TaskChecks
             AssertThrows(() => store.Load(), "corrupt task book was accepted");
             AssertThrows(() => store.Update(9, book => book.MaxRunning = 2), "corrupt task book was overwritten");
             Assert(File.ReadAllText(path) == corrupt, "failed load rewrote the corrupt task book");
+            File.Delete(path);
+            var gate = store.TryAcquireQueueGate();
+            Assert(gate is not null, "queue dispatch gate was unavailable on an idle store");
+            Assert(Task.Run(() => store.TryAcquireQueueGate()).GetAwaiter().GetResult() is null, "a second window acquired the queue dispatch gate");
+            gate!.Dispose();
+            using var reacquired = Task.Run(() => store.TryAcquireQueueGate()).GetAwaiter().GetResult();
+            Assert(reacquired is not null, "queue dispatch gate stayed locked after release");
         });
     }
 
