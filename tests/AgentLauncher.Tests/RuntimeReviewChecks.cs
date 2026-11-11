@@ -18,6 +18,7 @@ internal static class RuntimeReviewChecks
         if(!Store.Root.Contains("AgentLauncher-tests-",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Runtime review checks require the integration test build and an isolated AgentLauncher-tests-* root.");
         if(!File.Exists(Store.WorkerPath))throw new FileNotFoundException("Runtime review checks require the published Worker beside the test executable.",Store.WorkerPath);
         Directory.CreateDirectory(cwd);
+        await test("P01 real CPU sampling keeps status and waiver replies readable",()=>NativeSamplingAsync(cwd));
         await test("CR04 revoke save failure restores state and detail before later begin",()=>RevokeRollbackAsync(cwd));
         await test("CR06 oversized plan is rejected before persistence",()=>OversizedPlanAsync(cwd));
         await test("CR06 ledger stays readable while active reservations survive pruning",()=>LedgerBoundAsync(cwd));
@@ -33,6 +34,28 @@ internal static class RuntimeReviewChecks
     }
 
     private static void Assert(bool value,string message){if(!value)throw new Exception(message);}
+
+    private static async Task NativeSamplingAsync(string cwd)
+    {
+        using var monitor=await OwnedMonitor.StartAsync(cwd,fakeSample:false);
+        var config=new Configuration();config.Draft.Project=cwd;config.Draft.DirectoryMode="shared";
+        foreach(var slot in config.Draft.Slots)slot.Enabled=true;
+        Store.Save(Path.Combine(monitor.Root,"configuration.json"),config);
+        var batch=Guid.NewGuid();
+        var items=config.Draft.Slots.Select((slot,index)=>new LaunchItem(Guid.NewGuid(),batch,index+1,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),true,
+            new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.AgentBudget,SourceSlotId:slot.Id,AgentId:slot.AgentId)).ToArray();
+        // No child is started: real resource pressure may deny a grant, but must never break IPC.
+        for(var i=0;i<50;i++)
+        {
+            var status=await monitor.SendAsync(new("status",Guid.NewGuid()));
+            Assert(status.Memory is {} sample&&double.IsFinite(sample.CpuPercent),"native status lost the CPU sample");
+            var reply=await monitor.SendAsync(new("waiver",Guid.NewGuid(),items));
+            Assert(reply.Memory==null||double.IsFinite(reply.Memory.CpuPercent),"waiver returned a non-finite CPU reading");
+            Assert(reply.Ok||!string.IsNullOrWhiteSpace(reply.Message),"denial lost its reason");
+        }
+        var final=await monitor.SendAsync(new("status",Guid.NewGuid()));
+        Assert(final.Entries is {Length:0},"sampling test unexpectedly reserved a launch");
+    }
 
     private static LaunchItem Item(string name,string[] arguments,string cwd)
     {
@@ -361,11 +384,12 @@ internal static class RuntimeReviewChecks
         public string Root { get; }
         private readonly string pipe;private readonly Process process;private readonly DateTime started;
         private OwnedMonitor(string root,string pipe,Process process){Root=root;this.pipe=pipe;this.process=process;started=process.StartTime;}
-        public static async Task<OwnedMonitor> StartAsync(string cwd)
+        public static async Task<OwnedMonitor> StartAsync(string cwd,bool fakeSample=true)
         {
             var root=OwnedRoot(cwd);Directory.CreateDirectory(root);
             var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
-            start.ArgumentList.Add("monitor");start.Environment["AGENT_LAUNCHER_TEST_ROOT"]=root;start.Environment["AGENT_LAUNCHER_FAKE_SAMPLE"]="1";
+            start.ArgumentList.Add("monitor");start.Environment["AGENT_LAUNCHER_TEST_ROOT"]=root;
+            if(fakeSample)start.Environment["AGENT_LAUNCHER_FAKE_SAMPLE"]="1";else start.Environment.Remove("AGENT_LAUNCHER_FAKE_SAMPLE");
             var process=Process.Start(start)??throw new IOException("无法启动隔离监控器。");process.StandardInput.Close();
             var monitor=new OwnedMonitor(root,PipeFor(root),process);
             try{await monitor.WaitReadyAsync();return monitor;}

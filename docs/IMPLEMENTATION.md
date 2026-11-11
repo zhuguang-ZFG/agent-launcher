@@ -566,3 +566,15 @@ powershell -NoProfile -File scripts/test.ps1
 - 核对释放在「资源组可打开但无进程」等常规可恢复情形下不介入（常规 Refresh 已处理）；仅覆盖句柄丢失类阻塞。释放只接受回执级整树证明（`Finished`/`FailedBeforeStart`）；无法证明的记录（回执缺失、回执仅为 `Started`/`Exited` 等父进程级证据、进程存活、创建者仍在、其它 Win32 错误）一律保持阻塞，只能等系统重启或人工按 .bak 核对。
 - 生产环境上一轮人工修复的条目维持原样（Detail 已含证明）；本轮不改动用户 `control.json`/`.bak`/回执。
 - 历史 15/16 部分启动仍未归因，与本流程无关，不因本轮绿色而关闭。
+
+## 21. 资源确认后数据流提前结束（2026-11-11）
+
+- 用户确认的错误为 `Unable to read beyond the end of the stream.`，发生在窗口已打开、点击启动并确认资源授权之后；当日没有新增生产启动账本条目。真实 UI 复现相同错误。
+- 根因：空闲 monitor 收到请求先强制 Refresh，waiver/reserve 处理再次强制 Refresh。`GetSystemTimes` 在同一 CPU 计数周期可返回相同累计值，原 Sampler 将零差值变成 NaN；带该读数的 Response 由 System.Text.Json 序列化时抛 ArgumentException，monitor 退出，客户端只见 EOF。原集成测试固定模拟 CPU=5，因此漏检。旧 DLL 的本机 1000 次紧邻采样有 975 次 NaN/序列化失败。
+- 修复：零时间差时沿用上一 CPU 区间及其原始时间戳，内存仍重新读取；不刷新旧 CPU 的时间，不将未知值伪造为零。首次采样仍是未知。IPC 写响应将非有限 CPU 的资源快照置为不可用（Memory=null），保留原有拒绝结果与错误说明，避免损坏通信。准入硬保护和单次授权协议不变。
+- 新增 P01 回归：1000 次原生紧邻采样、NaN/正负无穷的拒绝响应往返、独立 monitor 使用真实 CPU 的 50 轮 status/waiver 往返（明确移除模拟采样环境变量，不启动子进程）。只新增断言，未修改现有门槛或工作流。
+- 验证机器为本工作站 Windows x64 / .NET SDK 8.0.419。模型/原生 **67/67**；集成 **93/93**（含新增真实采样回归）；WPF **142/142**；原型模型 **5/5**。发布 DLL 原生 1000 次采样复核 **0 NaN / 0 序列化失败**。日志 `artifacts/startup-diagnosis/final-gate.txt`，WPF 结果 `artifacts/startup-diagnosis/ui/ui-checks.json`，集成结果 `artifacts/integration-results.json`。
+- 真实 UI → 资源授权 → Windows Terminal 四窗格 → 四个测试子进程完整路径验证成功；使用真实读数，四个 argv/cwd 正确，四个 Finished 回执 exit 0，四条账本具有 monitor 签发的 WaiverId。隔离测试未在用户项目运行 Agent。证据 `artifacts/startup-diagnosis/AgentLauncher-tests-native-ui-ef4e18ef712646a2b7a7e0ba0d6a5234/result.json` 和同目录 `success.png`。第一次自动化等待确认窗口超时，但四项已完成；第二次据输出、回执和授权账本核验，不将弹窗观察时序作为启动结果。
+- 完整脚本在 WPF 阶段两次超时，落盘断言指向 ACC-L02：环境 TEMP 为 `D:\Temp\User`，物理路径为 `D:\temp\User`，既有断言使用大小写敏感的字符串相等。使用物理路径拼写的独立测试根重跑原 WPF 检查后 142 项全部通过、exit 0；本次未改该断言。浏览器原型检查执行但受阻于 `CDP timeout: Page.enable`，因此不宣称整条 `scripts/test.ps1` 全绿。
+- 已备份旧 preview 至 `artifacts/startup-diagnosis/preview-before-fix`，生产修复构建为 `artifacts/preview-sampling-fix`，已替换 `artifacts/preview`；桌面原快捷方式仍指向该目录。生产 `AgentLauncher.Windows.dll` SHA-256：`89537208DEE178C2CE48647D3A833FB41836BB33B250D33752FFF3A16244BB33`。四个生产程序集均未发现测试根/模拟采样标记。未手工修改用户配置、control.json 或回执，未提交或推送代码。
+- 后续生产验证：可用内存降至约 3.6 GiB，原四项需要 3 GiB 规划 + 2 GiB 系统余量，正常拒绝；用户明确选择「先启动前两项 Omp + Codex，保留另外两项配置」。通过界面取消第三、四项勾选，保留路径/参数；第一次两项申请因内存瞬时不足在预约前拒绝，核对无新条目后重试。15:13 成功启动 Omp（`D:\Users\monidianlu`，PID 6640）及 Codex 的 Node 入口（`D:\Users\claude`，PID 17772，原生 Codex 子进程 27704），两条 Started 回执、对应进程持续存活，Windows Terminal 新窗口已打开。证据 `artifacts/startup-diagnosis/production-two-agent-result.json`；只确认启动与存活，不将其表述为模型会话已就绪或任务已完成。配置和账本变更由产品正常流程写入。

@@ -12,6 +12,33 @@ if(args.Length>0&&args[0]=="--allocate") {try {var data=new byte[256*1024*1024];
 var failures=new List<string>();var passed=new List<string>();var temp=Path.Combine(Path.GetTempPath(),"AgentLauncher-tests-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temp);
 void Test(string name,Action action){try{action();passed.Add(name);Console.WriteLine("PASS "+name);}catch(Exception e){failures.Add(name+": "+e);Console.WriteLine("FAIL "+name+": "+e.Message);}}
 void Assert(bool value,string message){if(!value)throw new Exception(message);}
+Test("P01 rapid native sampling retains a valid CPU interval",()=>{
+    var sampler=new Sampler();var first=sampler.Sample();
+    Assert(double.IsNaN(first.CpuPercent),"first CPU reading fabricated usage");
+    Thread.Sleep(250);var previous=sampler.Sample();
+    Assert(double.IsFinite(previous.CpuPercent),"CPU warmup failed");
+    var reused=0;
+    for(var i=0;i<1000;i++)
+    {
+        var sample=sampler.Sample();
+        Assert(double.IsFinite(sample.CpuPercent),"rapid sample lost its valid CPU interval");
+        Assert(sample.At>=previous.At,"sample time moved backwards");
+        if(sample.At==previous.At){reused++;Assert(sample.CpuPercent==previous.CpuPercent,"cached interval changed CPU usage");}
+        JsonSerializer.Serialize(new Response(true,"sample",Memory:sample),Store.Json);
+        previous=sample;
+    }
+    Assert(reused>0,"native burst did not exercise an unchanged CPU tick");
+});
+Test("P01 unavailable CPU sends a readable fail-closed resource response",()=>{
+    foreach(var cpu in new[]{double.NaN,double.PositiveInfinity,double.NegativeInfinity})
+    {
+        var memory=new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,cpu,DateTimeOffset.UtcNow);
+        using var stream=new MemoryStream();
+        Ipc.WriteResponseAsync(stream,new(false,"资源读数不可用",Memory:memory,Decision:nameof(AdmissionKind.Deny)),default).GetAwaiter().GetResult();
+        stream.Position=0;var reply=Ipc.ReadResponseAsync(stream,default).GetAwaiter().GetResult();
+        Assert(!reply.Ok&&reply.Memory==null&&reply.Decision==nameof(AdmissionKind.Deny),"unknown sample became a launch authorization");
+    }
+});
 Test("F15 profile switching",()=>{var c=new Configuration();c.Edit(d=>d.Slots[0].Profiles["pi"]=new(){Executable="pi.exe",Arguments=["--pi"]});c.Edit(d=>d.Slots[0].AgentId="codex");Assert(c.Draft.Slots[0].Current.Executable=="","stale executable");c.Edit(d=>d.Slots[0].AgentId="pi");Assert(c.Draft.Slots[0].Current.Arguments[0]=="--pi","lost profile");});
 Test("F16/F17 full snapshots and LastEdited",()=>{var c=new Configuration();c.Edit(d=>{d.Slots.ForEach(s=>s.Enabled=false);d.Slots[3].Enabled=true;d.DirectoryMode="prepared";});c.SaveTemplate("a");c.Restore(new());c.Restore(new());c.Restore(c.LastEdited!);Assert(c.Draft.Slots[3].Enabled&&!c.Draft.Slots[0].Enabled&&c.Draft.DirectoryMode=="prepared","snapshot lost");c.Edit(d=>d.DirectoryMode="shared");Assert(c.Templates["a"].DirectoryMode=="prepared","snapshot aliases draft");});
 Test("P low memory rejects without spawning",()=>{var total=16*ResourcePolicy.GiB;var policy=new ResourcePolicySnapshot("practical",ResourcePolicy.DefaultJobMemoryLimit,ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultPhysicalFloor(total),ResourcePolicy.DefaultCommitFloor(32*ResourcePolicy.GiB),ResourcePolicy.DefaultCpuRate,ResourcePolicy.GitJobMemoryLimit,ResourcePolicy.DefaultGitPlanningBytes);var d=ResourcePolicy.Evaluate(new MemorySnapshot(total,ResourcePolicy.GiB,32*ResourcePolicy.GiB,20*ResourcePolicy.GiB,10,DateTimeOffset.UtcNow),policy,[],[new BudgetItem(Guid.NewGuid(),"agent",ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultJobMemoryLimit)]);Assert(d.Kind==AdmissionKind.Deny,"low memory allowed");});

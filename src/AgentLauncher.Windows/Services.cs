@@ -149,6 +149,9 @@ public static class Ipc
     }
     private static List<byte[]> SplitResponse(Response response)
     {
+        // Unknown CPU readings cannot be JSON numbers. Keep the resource snapshot unavailable
+        // rather than inventing zero usage or terminating the monitor while writing a reply.
+        if(response.Memory is {} memory&&!double.IsFinite(memory.CpuPercent))response=response with{Memory=null};
         var single=JsonSerializer.SerializeToUtf8Bytes(response with{More=false},Store.Json);if(single.Length<=FrameLimit)return [single];
         if(response.Entries is not {Length:>0})throw new IOException("响应超出单帧边界且没有可分页记录。");
         var header=response with{Entries=null,More=true};var frames=new List<Response>();var chunk=new List<ControlEntry>();
