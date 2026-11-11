@@ -8,11 +8,17 @@ namespace AgentLauncher.Windows;
 public sealed record CommandResult(int Code,string Output,string Error);
 public static class ControlledCommand
 {
-    public static async Task<CommandResult> RunAsync(CommandSpec command,string cwd,CancellationToken ct=default,Action<string>? outputLine=null,ResourceSettings? resource=null,long? draftRevision=null)
+    public static async Task<CommandResult> RunAsync(CommandSpec command,string cwd,CancellationToken ct=default,Action<string>? outputLine=null,ResourceSettings? resource=null,long? draftRevision=null,Func<LaunchItem[],Task<Guid?>>? authorize=null)
     {
         ct.ThrowIfCancellationRequested();
         var item=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"Git 准备",cwd,PhysicalDirectory.Workspace(cwd),false,command,ResourcePolicy.GitJobMemoryLimit,"git",PlanningBytes:ResourcePolicy.DefaultGitPlanningBytes,ResourceMode:resource?.Mode??"practical");
-        var reserve=await Ipc.ReserveWithCleanupAsync([item],ct,draftRevision:draftRevision,planDigest:ResourcePolicy.PlanDigest([item]));if(!reserve.Ok)throw new IOException(reserve.Message);
+        var reserve=await Ipc.ReserveWithCleanupAsync([item],ct,draftRevision:draftRevision,planDigest:ResourcePolicy.PlanDigest([item]));
+        if(!reserve.Ok&&reserve.Decision==AdmissionKind.RequireWaiver.ToString()&&authorize!=null)
+        {
+            ct.ThrowIfCancellationRequested();var waiver=await authorize([item]);ct.ThrowIfCancellationRequested();
+            reserve=await Ipc.ReserveWithCleanupAsync([item],ct,draftRevision:draftRevision,planDigest:ResourcePolicy.PlanDigest([item]),waiverId:waiver);
+        }
+        if(!reserve.Ok)throw new IOException(reserve.Message);
         Process? process=null;
         try
         {
@@ -74,6 +80,7 @@ public sealed class WorkspacePreparer
     private readonly string? destinationRoot;
     private ResourceSettings resourceSettings=new();
     private long draftRevision;
+    private Func<LaunchItem[],Task<Guid?>>? authorize;
     public WorkspacePreparer(string? destinationRoot=null){this.destinationRoot=string.IsNullOrWhiteSpace(destinationRoot)?null:destinationRoot;}
     private static bool StructurallyValid(PreparationRecord record,IReadOnlyList<LaunchItem> expected)
     {
@@ -83,6 +90,7 @@ public sealed class WorkspacePreparer
             var plan=record.Original[i];var current=expected[i];
             if(!Usable(plan)||plan.Position!=current.Position||plan.Name!=current.Name||plan.Shared!=current.Shared||plan.Kind!=current.Kind||plan.Budget!=current.Budget)return false;
             if(plan.Cwd!=current.Cwd||plan.Workspace!=current.Workspace||plan.BatchId!=record.Original[0].BatchId)return false;
+            if((plan.SourceSlotId!=null&&plan.SourceSlotId!=current.SourceSlotId)||(plan.AgentId!=null&&plan.AgentId!=current.AgentId)||plan.PlanningBytes!=current.PlanningBytes||plan.ResourceMode!=current.ResourceMode)return false;
             for(var j=0;j<i;j++)if(record.Original[j].Id==plan.Id)return false;
         }
         foreach(var pair in record.Completed)
@@ -90,6 +98,7 @@ public sealed class WorkspacePreparer
             var plan=pair.Value;if(!Usable(plan)||plan.Id!=pair.Key)return false;
             var original=record.Original.Find(p=>p.Id==pair.Key);if(original==null)return false;
             if(plan.Position!=original.Position||plan.BatchId!=original.BatchId||plan.Name!=original.Name||plan.Shared!=original.Shared||plan.Kind!=original.Kind||plan.Budget!=original.Budget)return false;
+            if((plan.SourceSlotId!=null&&plan.SourceSlotId!=original.SourceSlotId)||(plan.AgentId!=null&&plan.AgentId!=original.AgentId)||plan.PlanningBytes!=original.PlanningBytes||plan.ResourceMode!=original.ResourceMode)return false;
         }
         foreach(var baseline in record.Baselines)
         {
@@ -100,7 +109,7 @@ public sealed class WorkspacePreparer
     }
     private static bool Usable(LaunchItem? plan)
     {
-        if(plan==null||plan.Id==Guid.Empty||plan.BatchId==Guid.Empty||plan.Position is <1 or >4||!ValidText(plan.Name)||!AbsolutePath(plan.Cwd))return false;
+        if(plan==null||plan.Id==Guid.Empty||plan.BatchId==Guid.Empty||plan.Position is <1 or >ResourcePolicy.MaxSlots||!ValidText(plan.Name)||!AbsolutePath(plan.Cwd))return false;
         if(plan.Workspace==null||!AbsolutePath(plan.Workspace.Path)||!ValidText(plan.Workspace.Key)||plan.Command==null)return false;
         if(!AbsolutePath(plan.Command.Executable)||!plan.Command.Executable.EndsWith(".exe",StringComparison.OrdinalIgnoreCase)||plan.Command.Adapter is not ("exe" or "node-shim")||plan.Command.Arguments==null)return false;
         foreach(var argument in plan.Command.Arguments)if(argument==null||argument.Contains('\0'))return false;
@@ -108,10 +117,11 @@ public sealed class WorkspacePreparer
     }
     private static bool ValidText(string? value)=>!string.IsNullOrWhiteSpace(value)&&!value.Contains('\0');
     private static bool AbsolutePath(string? value)=>ValidText(value)&&Path.IsPathFullyQualified(value!);
-    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null)
+    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null,Func<LaunchItem[],Task<Guid?>>? authorize=null)
     {
         resourceSettings=draft.Resource??new ResourceSettings();
         draftRevision=draft.Revision;
+        this.authorize=authorize;
         draft.Validate();
         Directory.CreateDirectory(Store.Root);
         await using var preparationLock=new FileStream(Store.FilePath("preparation.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
@@ -123,7 +133,7 @@ public sealed class WorkspacePreparer
             ct.ThrowIfCancellationRequested();var cwd=PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(slot.Directory)?draft.Project:slot.Directory).Path;
             var position=draft.Slots.IndexOf(slot)+1;
             var resource=draft.Resource??new ResourceSettings();
-            plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),resource.JobMemoryLimit,PlanningBytes:resource.PlanningBytes,ResourceMode:resource.Mode));
+            plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),resource.JobMemoryLimit,PlanningBytes:resource.PlanningBytes,ResourceMode:resource.Mode,SourceSlotId:slot.Id,AgentId:slot.AgentId));
         }
         var defaultRoot=Store.FilePath("worktrees");var worktreeRoot=defaultRoot;var nondefaultRoot=false;
         var isolatedGroups=plans.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1&&draft.DirectoryMode=="isolated").ToArray();
@@ -155,9 +165,9 @@ public sealed class WorkspacePreparer
             for(var i=0;i<record.Original.Count;i++)
             {
                 var plan=record.Original[i];var slot=draft.Slots[plan.Position-1];var fresh=Commands.Resolve(slot.AgentId,slot.Current);
-                if(plan.Command.Executable!=fresh.Executable||!plan.Command.Arguments.SequenceEqual(fresh.Arguments)||plan.Command.Adapter!=fresh.Adapter){record.Original[i]=plan with{Command=fresh};repaired=true;}
+                if(plan.Command.Executable!=fresh.Executable||!plan.Command.Arguments.SequenceEqual(fresh.Arguments)||plan.Command.Adapter!=fresh.Adapter||plan.SourceSlotId!=slot.Id||plan.AgentId!=slot.AgentId){record.Original[i]=plan with{Command=fresh,SourceSlotId=slot.Id,AgentId=slot.AgentId};repaired=true;}
             }
-            foreach(var id in record.Completed.Keys.ToArray()){var mapped=record.Original.Single(p=>p.Id==id).Command;if(record.Completed[id].Command.Executable!=mapped.Executable||!record.Completed[id].Command.Arguments.SequenceEqual(mapped.Arguments)||record.Completed[id].Command.Adapter!=mapped.Adapter){record.Completed[id]=record.Completed[id] with{Command=mapped};repaired=true;}}
+            foreach(var id in record.Completed.Keys.ToArray()){var mapped=record.Original.Single(p=>p.Id==id);var completed=record.Completed[id];if(completed.Command.Executable!=mapped.Command.Executable||!completed.Command.Arguments.SequenceEqual(mapped.Command.Arguments)||completed.Command.Adapter!=mapped.Command.Adapter||completed.SourceSlotId!=mapped.SourceSlotId||completed.AgentId!=mapped.AgentId){record.Completed[id]=completed with{Command=mapped.Command,SourceSlotId=mapped.SourceSlotId,AgentId=mapped.AgentId};repaired=true;}}
             if(record.SchemaVersion!=1||repaired){record.SchemaVersion=1;Store.Save(preparationPath,record);}
             effective=record.Original.Select(p=>record.Completed.GetValueOrDefault(p.Id)??p).ToList();
         }
@@ -175,12 +185,12 @@ public sealed class WorkspacePreparer
             if(record.Baselines.TryGetValue(group.Key,out var fixedOid))oid=fixedOid;
             else{record.Baselines[group.Key]=oid;Store.Save(preparationPath,record);}
             if((await Git(root,["ls-tree",oid,".gitmodules"],ct)).Length>0)throw new IOException("首版不自动准备含子模块的仓库，请先自行准备独立目录。");
-            var sparse=await ControlledCommand.RunAsync(new(git,["config","--bool","core.sparseCheckout"],"exe"),root,ct);
+            var sparse=await ControlledCommand.RunAsync(new(git,["config","--bool","core.sparseCheckout"],"exe"),root,ct,resource:resourceSettings,draftRevision:draftRevision,authorize:authorize);
             if(sparse.Code is not (0 or 1)||sparse.Output.Trim()=="true")throw new IOException("稀疏检出尚未验证，请使用已准备目录。");
             var dirty=(await Git(root,["status","--porcelain","--untracked-files=normal"],ct)).Length>0;
             if(dirty&&!await confirmHead($"原项目有未提交修改。独立目录只包含已提交版本 {oid[..8]}，不复制未提交文件、依赖或 .env。继续使用这个版本？"))throw new OperationCanceledException("已取消目录准备。");
             ulong estimated=0;
-            var sizeResult=await ControlledCommand.RunAsync(new(git,["ls-tree","-r","--format=%(objectsize)",oid],"exe"),root,ct,line=>{if(ulong.TryParse(line,out var bytes))estimated=checked(estimated+bytes);else if(line!="-")throw new IOException("Git 文件大小格式无效。");});
+            var sizeResult=await ControlledCommand.RunAsync(new(git,["ls-tree","-r","--format=%(objectsize)",oid],"exe"),root,ct,line=>{if(ulong.TryParse(line,out var bytes))estimated=checked(estimated+bytes);else if(line!="-")throw new IOException("Git 文件大小格式无效。");},resource:resourceSettings,draftRevision:draftRevision,authorize:authorize);
             if(sizeResult.Code!=0)throw new IOException("无法估算检出大小："+sizeResult.Error);
             foreach(var plan in group)
             {
@@ -344,7 +354,7 @@ public sealed class WorkspacePreparer
     }
     private async Task<string> Git(string cwd,string[] args,CancellationToken ct)
     {
-        var result=await ControlledCommand.RunAsync(new(git,args,"exe"),cwd,ct,resource:resourceSettings,draftRevision:draftRevision);
+        var result=await ControlledCommand.RunAsync(new(git,args,"exe"),cwd,ct,resource:resourceSettings,draftRevision:draftRevision,authorize:authorize);
         if(result.Code!=0)throw new IOException($"Git 准备失败（{result.Code}）：{result.Error.Trim()}");return result.Output;
     }
 }

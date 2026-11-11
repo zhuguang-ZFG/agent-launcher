@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Security.Cryptography;
 using System.Text.Json;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
@@ -86,6 +87,12 @@ internal sealed class Monitor : IDisposable
     private readonly string epoch=Guid.NewGuid().ToString("N");
     private readonly string ledgerPath=Store.FilePath("control.json");
     private Ledger ledger=new();
+    private readonly string configurationPath=Store.FilePath("configuration.json");
+    private readonly Dictionary<Guid,ReceiptCacheEntry> receiptCache=[];
+    private readonly Dictionary<Guid,StatusEntryCache> statusEntryCache=[];
+    private int? rootCpuRate;
+    private string? rootCpuReason;
+    private bool retireForCpuChange;
     private Job? root;
     private MemorySnapshot? sample;
     private DateTime lastActivity=DateTime.UtcNow;
@@ -94,7 +101,7 @@ internal sealed class Monitor : IDisposable
     private readonly PressureTracker pressureTracker=new();
     private bool pressure=>pressureTracker.Pressure;
     private readonly WaiverTable waivers=new(()=>DateTimeOffset.UtcNow);
-    private static readonly TimeSpan IdleTimeout=TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan IdleTimeout=TimeSpan.FromSeconds(ResourcePolicy.IdleTimeoutSeconds);
     private static readonly TimeSpan AcceptTick=TimeSpan.FromSeconds(1);
     private const long LedgerBudget=6L*1024*1024;
     public int Run()
@@ -110,7 +117,7 @@ internal sealed class Monitor : IDisposable
             var boot=Store.BootId();
             if(!ledgerBroken&&ledger.BootId!=boot){foreach(var e in ledger.Entries.Where(e=>!Store.IsTerminal(e))){e.State="Settled";e.Detail="系统已重新启动，未重放旧请求";}ledger.BootId=boot;Save();}
             root=new Job(Store.RootJob,root:true,cpuRate:RootCpuRate());
-            if(!root.CreatedNew){var actual=root.QueryCpuRate();/* Existing aggregate root keeps its original limits; do not rewrite them. */}
+            RefreshRootCpu();
             sampler.Sample();Thread.Sleep(250);Refresh();
             while(true)
             {
@@ -127,7 +134,7 @@ internal sealed class Monitor : IDisposable
                         if(tick==accept){connected=true;break;}
                         Refresh();
                         // Retire only when nothing can still be reconciled and no client polled recently; any accepted request resets lastActivity.
-                        if(!ledgerBroken&&blocked==null&&jobs.Count==0&&ledger.Entries.All(Store.IsTerminal)&&DateTime.UtcNow-lastActivity>=IdleTimeout)
+                        if(CanRetire()&&DateTime.UtcNow-lastActivity>=IdleTimeout)
                         {
                             // Give a simultaneous poll one final chance instead of stranding it on a disposed listener.
                             if(accept.IsCompleted||Task.WhenAny(accept,Task.Delay(250)).GetAwaiter().GetResult()==accept){connected=true;break;}
@@ -138,10 +145,11 @@ internal sealed class Monitor : IDisposable
                     using var deadline=new CancellationTokenSource(3000);
                     try
                     {
-                        var request=Ipc.ReadAsync<Request>(pipe,deadline.Token).GetAwaiter().GetResult();Refresh();
+                        var request=Ipc.ReadAsync<Request>(pipe,deadline.Token).GetAwaiter().GetResult();Refresh(forceSample:!ledger.Entries.Any(e=>!Store.IsTerminal(e)));
                         Response response;
                         try{response=Handle(request);}catch(Exception e)when(e is not OutOfMemoryException){response=new(false,e.Message);}
                         Ipc.WriteResponseAsync(pipe,response,deadline.Token).GetAwaiter().GetResult();
+                        if(retireForCpuChange&&CanRetire())return 0;
                     }
                     catch(Exception e)when(e is IOException or OperationCanceledException or JsonException){/* Peer failure never grants additional authorization. */}
                 }
@@ -167,11 +175,13 @@ internal sealed class Monitor : IDisposable
             if(total<=LedgerBudget)return;
             total-=JsonSerializer.SerializeToUtf8Bytes(entry,Store.Json).LongLength+1;
             ledger.Entries.Remove(entry);
+            statusEntryCache.Remove(entry.Plan.Id);
         }
     }
     private void Refresh(bool forceSample=false)
     {
-        if(forceSample||sample==null||DateTimeOffset.UtcNow-sample.At>=TimeSpan.FromSeconds(2))
+        var samplingNeeded=jobs.Count>0||ledgerBroken||blocked!=null||pressure||ledger.Entries.Any(e=>!Store.IsTerminal(e));
+        if(forceSample||sample==null||(samplingNeeded&&DateTimeOffset.UtcNow-sample.At>=TimeSpan.FromSeconds(2)))
         {
             sample=sampler.Sample();
 #if INTEGRATION_TESTS
@@ -196,7 +206,7 @@ internal sealed class Monitor : IDisposable
                     try{jobs[e.Plan.Id]=j=new Job(Store.JobName(e.Plan.Id),openOnly:true);}
                     catch(System.ComponentModel.Win32Exception ex)when(ex.NativeErrorCode==2){/* Last handle may be gone while processes still exist; absence is not exit evidence. */}
                 }
-                var receipt=Store.Read<Receipt>(Store.ReceiptPath(e.Plan.Id));
+                var receipt=ReadReceipt(e.Plan.Id);
                 if(j==null && receipt?.Phase is not ("Finished" or "FailedBeforeStart")) {blocked="资源组句柄丢失，无法证明后代已退出；保留预算，系统重启后可核对释放。";e.Detail=blocked;continue;}
                 var members=j?.Members()??[];
                 if(members.Length==0){e.State=receipt?.Phase is "Started" or "Exited" or "ResumeIntent" or "Finished"?"Settled":"FailedBeforeStart";e.Detail=receipt?.Detail??"创建者已退出，核对无存活进程";changed=true;continue;}
@@ -206,28 +216,78 @@ internal sealed class Monitor : IDisposable
                     foreach(var pid in members){using var p=Process.GetProcessById(pid);Native.Check(Native.IsProcessInJob(p.Handle,j!.Handle,out var member));if(!member)throw new IOException("进程归属变化");Native.Check(Native.TerminateProcess(p.Handle,1));p.WaitForExit(2000);}
                     e.State="FailedBeforeStart";e.Detail="已回收创建中断的未运行进程";changed=true;
                 }
-                else {e.Detail=receipt?.Phase=="Exited"?"Agent 已退出，工具仍运行":receipt?.Phase=="Started"?"已启动进程（不代表任务完成）":"结果未确认；占用保留";}
+                else
+                {
+                    var state=receipt?.Phase switch{"Started"=>"Started","Exited"=>"Exited",_=>"Unknown"};
+                    if(e.State!=state){e.State=state;changed=true;}
+                    e.Detail=receipt?.Phase=="Exited"?"Agent 已退出，工具仍运行":receipt?.Phase=="Started"?"已启动进程（不代表任务完成）":"结果未确认；占用保留";
+                }
             }
             catch(Exception ex)when(ex is not OutOfMemoryException){blocked="恢复核对失败："+ex.Message;e.Detail=blocked;}
             finally{gate.ReleaseMutex();}
         }
         if(changed)Save();
-        foreach(var id in jobs.Keys.Where(id=>Store.IsTerminal(ledger.Entries.Single(e=>e.Plan.Id==id))).ToArray()){jobs[id].Dispose();jobs.Remove(id);}
+        foreach(var id in jobs.Keys.Where(id=>Store.IsTerminal(ledger.Entries.Single(e=>e.Plan.Id==id))).ToArray()){jobs[id].Dispose();jobs.Remove(id);receiptCache.Remove(id);}
+        foreach(var id in receiptCache.Keys.Where(id=>!ledger.Entries.Any(e=>e.Plan.Id==id&&!Store.IsTerminal(e))).ToArray())receiptCache.Remove(id);
         var known=jobs.Values.SelectMany(j=>j.Members()).ToHashSet();
         if(root!.Members().Any(pid=>!known.Contains(pid)))blocked="发现资源组内尚未归属的进程，暂停新启动。";
+        RefreshRootCpu();
+    }
+    private bool CanRetire()=>!ledgerBroken&&blocked==null&&jobs.Count==0&&ledger.Entries.All(Store.IsTerminal);
+    private sealed record ReceiptCacheEntry(DateTime Written,long Length,Receipt? Receipt);
+    private Receipt? ReadReceipt(Guid id)
+    {
+        var info=new FileInfo(Store.ReceiptPath(id));
+        if(!info.Exists){receiptCache.Remove(id);return null;}
+        var written=info.LastWriteTimeUtc;var length=info.Length;
+        if(receiptCache.TryGetValue(id,out var cached)&&cached.Written==written&&cached.Length==length)return cached.Receipt;
+        var receipt=Store.Read<Receipt>(info.FullName);info.Refresh();
+        if(info.Exists&&info.LastWriteTimeUtc==written&&info.Length==length)receiptCache[id]=new(written,length,receipt);
+        else receiptCache.Remove(id);
+        return receipt;
+    }
+    private void RefreshRootCpu()
+    {
+        if(root==null)return;
+        var actual=root.QueryCpuRate();
+        rootCpuRate=actual is {} rate&&(rate.Flags&5)==5?checked((int)rate.Rate):null;
+        retireForCpuChange=false;
+        if(rootCpuRate==null){rootCpuReason="无法核对当前根 Job 的 CPU 硬封顶，已暂停新启动。";return;}
+        try
+        {
+            var (settings,_,_,_)=LoadAuthority();var desired=settings.Mode=="custom"?settings.CpuRate:ResourcePolicy.DefaultCpuRate;
+            if(rootCpuRate==desired){rootCpuReason=null;return;}
+            rootCpuReason=$"当前根 Job CPU 封顶为 {rootCpuRate.Value/100.0:0.##}%，新配置为 {desired/100.0:0.##}%；现有 Job 不会修改。请等待现有任务结束并让监控器退出，再重新检查资源。";
+            retireForCpuChange=CanRetire();
+        }
+        catch(Exception e)when(e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){rootCpuReason="无法核对根 Job CPU 配置，已暂停新启动："+e.Message;}
     }
     private Response Handle(Request request)
     {
-        if(request.Operation=="status")return Status();
+        try
+        {
+            if(request.Operation is not ("reserve" or "waiver"))return HandleRequest(request);
+            var key=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(configurationPath).ToUpperInvariant())));
+            using var gate=new Mutex(false,@"Local\AgentLauncher-file-"+key);bool own;
+            try{own=gate.WaitOne(2000);}catch(AbandonedMutexException){own=true;}
+            if(!own)throw new IOException("配置正在写入，请重新检查资源。");
+            try{return HandleRequest(request);}finally{gate.ReleaseMutex();}
+        }
+        finally{if(request.Operation=="reserve"&&request.WaiverId is {} id)waivers.Invalidate(id);}
+    }
+    private Response HandleRequest(Request request)
+    {
+        if(request.Operation=="status")return StatusFor(request);
         if(request.Operation=="waiver")
         {
             Refresh(forceSample:true);
             if(AdmissionBlockedReason() is {} reason)throw new IOException(reason);
             var items=request.Items??[];
             var binding=BindAuthority(request,items,consumeToken:false);
+            ValidateStableSlots(request,items,binding);
             var decision=Decide(binding.Policy,ActiveBudgets(),items.Select(ResourcePolicy.BudgetOf).ToList());
             if(decision.Kind==AdmissionKind.Deny)waivers.InvalidatePlan(binding.Digest);
-            return waivers.Issue(decision,binding.Revision,binding.Hash,binding.Digest,binding.Slots,sample?.At??DateTimeOffset.UtcNow) with{Memory=sample,Epoch=epoch};
+            return waivers.Issue(decision,binding.Revision,binding.Hash,binding.Digest,binding.Slots,sample?.At??DateTimeOffset.UtcNow,binding.ConfigurationIdentity) with{Memory=sample,Epoch=epoch,RootCpuRate=rootCpuRate};
         }
         if(request.Operation=="reserve")
         {
@@ -254,7 +314,6 @@ internal sealed class Monitor : IDisposable
                 if(p.Kind=="agent" && active.Any(e=>e.Plan.Kind=="agent"&&PhysicalDirectory.Overlaps(e.Plan.Workspace,p.Workspace)&&(!p.Shared||!e.Plan.Shared)))throw new IOException("工作目录已被独立会话占用，请选择另一个工作目录。");
                 active.Add(new(){Plan=p});
             }
-            foreach(var item in items)ResourcePolicy.ValidateLaunchItem(item,binding.Policy,sample!.Total);
             var reservedItems=ActiveBudgets();
             var requestedItems=items.Select(ResourcePolicy.BudgetOf).ToList();
             var decision=Decide(binding.Policy,reservedItems,requestedItems);
@@ -263,9 +322,10 @@ internal sealed class Monitor : IDisposable
                 waivers.InvalidatePlan(binding.Digest);
                 throw new IOException(decision.Reason);
             }
-            if(decision.Kind==AdmissionKind.RequireWaiver && binding.Consumed!=true)throw new IOException("需要有效确认授权。");
+            if(decision.Kind==AdmissionKind.RequireWaiver||request.WaiverId!=null)ValidateStableSlots(request,items,binding);
+            if(decision.Kind==AdmissionKind.RequireWaiver&&binding.Consumed!=true)return new(false,"需要有效确认授权。",Memory:sample,Epoch:epoch,Decision:AdmissionKind.RequireWaiver.ToString(),RootCpuRate:rootCpuRate);
             var policy=binding.Policy;
-            var entries=items.Select(p=>new ControlEntry{Plan=p,Digest=Store.Digest(p),Epoch=epoch,Mode=policy.Mode,JobMemoryLimit=p.Kind=="git"?policy.GitJobMemoryLimit:p.Budget,PlanningBytes=p.Kind=="git"?policy.GitPlanningBytes:p.PlanningBytes??ResourcePolicy.DefaultPlanningBytes,PhysicalFloor=policy.PhysicalFloor,CommitFloor=policy.CommitFloor,CpuRate=policy.CpuRate,WaiverId=request.WaiverId}).ToArray();
+            var entries=items.Select(p=>new ControlEntry{Plan=p,Digest=Store.Digest(p),Epoch=epoch,Mode=policy.Mode,JobMemoryLimit=p.Kind=="git"?policy.GitJobMemoryLimit:p.Budget,PlanningBytes=ResourcePolicy.BudgetOf(p).PlanningBytes,PhysicalFloor=policy.PhysicalFloor,CommitFloor=policy.CommitFloor,CpuRate=rootCpuRate??policy.CpuRate,WaiverId=request.WaiverId}).ToArray();
             // Reject an unrepresentable plan before it can be persisted or granted; active records are never truncated later.
             foreach(var candidate in entries)Ipc.EnsureEntryRepresentable(candidate);
             ledger.Entries.AddRange(entries);
@@ -298,19 +358,29 @@ internal sealed class Monitor : IDisposable
         }
         throw new IOException("未知协议操作。");
     }
-    private Response Status()
+    private Response Status()=>BuildStatus(null);
+    private Response StatusFor(Request request)=>BuildStatus(request);
+    private Response BuildStatus(Request? request)
     {
         var active=ledger.Entries.Where(e=>!Store.IsTerminal(e)).ToArray();
-        // Withhold only an active record that cannot cross the frame boundary: failing the whole status would hide every other
-        // revoke entry and leave the user without a recovery path.
-        var withheld=active.Where(entry=>!Ipc.EntryRepresentable(entry)).ToArray();
-        var listed=active.Where(entry=>!withheld.Contains(entry)).ToArray();
-        // Each response frame is capped; keep the newest terminal entries that fit rather than a fixed count.
-        var terminal=ledger.Entries.Where(Store.IsTerminal).TakeLast(40).Reverse().ToList();var kept=new List<ControlEntry>();long bytes=0;
-        foreach(var e in terminal){var size=JsonSerializer.SerializeToUtf8Bytes(e,Store.Json).LongLength;if(bytes+size>768*1024)break;kept.Add(e);bytes+=size;}
-        kept.Reverse();
-        var omittedReason=UnrepresentableReason(withheld);
-        return new(blocked==null&&withheld.Length==0,omittedReason??blocked??"监控器已核对",listed.Concat(kept).ToArray(),sample,epoch,omittedReason??AdmissionBlockedReason());
+        var withheld=active.Where(entry=>!StatusEntry(entry).Representable).ToArray();
+        var terminal=ledger.Entries.Where(Store.IsTerminal).TakeLast(40).Reverse();var kept=new List<ControlEntry>();long bytes=0;
+        foreach(var entry in terminal){var size=StatusEntry(entry).Bytes;if(bytes+size>768*1024)break;kept.Add(entry);bytes+=size;}
+        kept.Reverse();var omittedReason=UnrepresentableReason(withheld);
+        var reason=omittedReason??AdmissionBlockedReason();
+        var signature=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new{Epoch=epoch,Blocked=blocked,Reason=reason,RootCpuRate=rootCpuRate,Active=active.Select(e=>StatusEntry(e).Signature),History=kept.Select(e=>StatusEntry(e).Signature)},Store.Json)));
+        var unchanged=request?.StatusEpoch==epoch&&request.StatusSignature==signature;
+        return new(blocked==null&&withheld.Length==0,omittedReason??blocked??"监控器已核对",unchanged?null:active.Where(entry=>!withheld.Contains(entry)).Concat(kept).ToArray(),sample,epoch,reason,Unchanged:unchanged,StatusSignature:signature,RootCpuRate:rootCpuRate);
+    }
+    private readonly record struct StatusFields(LaunchItem Plan,string State,string Epoch,string Digest,DateTimeOffset Created,string Detail,string? Mode,ulong? JobMemoryLimit,ulong? PlanningBytes,ulong? PhysicalFloor,ulong? CommitFloor,int? CpuRate,Guid? WaiverId);
+    private sealed record StatusEntryCache(StatusFields Fields,string Signature,long Bytes,bool Representable);
+    private StatusEntryCache StatusEntry(ControlEntry entry)
+    {
+        var fields=new StatusFields(entry.Plan,entry.State,entry.Epoch,entry.Digest,entry.Created,entry.Detail,entry.Mode,entry.JobMemoryLimit,entry.PlanningBytes,entry.PhysicalFloor,entry.CommitFloor,entry.CpuRate,entry.WaiverId);
+        if(statusEntryCache.TryGetValue(entry.Plan.Id,out var cached)&&cached.Fields==fields)return cached;
+        var data=JsonSerializer.SerializeToUtf8Bytes(entry,Store.Json);
+        cached=new(fields,Convert.ToHexString(SHA256.HashData(data)),data.LongLength,Ipc.EntryRepresentable(entry));
+        statusEntryCache[entry.Plan.Id]=cached;return cached;
     }
     private static string? UnrepresentableReason(ControlEntry[] entries)
     {
@@ -318,21 +388,26 @@ internal sealed class Monitor : IDisposable
         // Names/arguments may themselves be oversized. Only bounded IDs belong in the response header.
         return $"{entries.Length} 条活动记录超出单帧边界，已暂停新启动；本次状态省略 ID：{string.Join("、",entries.Take(4).Select(e=>e.Plan.Id.ToString("N")))}。请人工核对 control.json 及备份；其他记录仍可撤销。";
     }
-    private string? AdmissionBlockedReason()=>UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!Ipc.EntryRepresentable(e)).ToArray())??blocked??(pressure?"资源压力尚未连续恢复，稍后重新检查。":null);
-    public void Dispose(){foreach(var j in jobs.Values)j.Dispose();root?.Dispose();}
+    private string? AdmissionBlockedReason()=>UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!StatusEntry(e).Representable).ToArray())??blocked??rootCpuReason??(pressure?"资源压力尚未连续恢复，稍后重新检查。":null);
+    public void Dispose(){foreach(var j in jobs.Values)j.Dispose();jobs.Clear();receiptCache.Clear();statusEntryCache.Clear();root?.Dispose();}
     private List<BudgetItem> ActiveBudgets()=>ledger.Entries.Where(e=>!Store.IsTerminal(e)).Select(e=>ResourcePolicy.BudgetOf(e.Plan)).ToList();
-    private sealed record AuthorityBinding(ResourcePolicySnapshot Policy,string Hash,string Digest,long Revision,Guid[] Slots,bool? Consumed);
-    private (ResourceSettings Settings,long Revision) LoadAuthority()
+    private sealed record AuthorityBinding(ResourcePolicySnapshot Policy,string Hash,string Digest,long Revision,Guid[] Slots,bool? Consumed,Draft? Draft,string ConfigurationIdentity);
+    private (ResourceSettings Settings,long Revision,Draft? Draft,string Identity) LoadAuthority(bool bind=false)
     {
-        var path=Store.FilePath("configuration.json");
-        if(!File.Exists(path))return (new ResourceSettings(),0);
-        var config=Store.Read<Configuration>(path)??throw new IOException("配置无法读取，已拒绝准入。");
+        if(!File.Exists(configurationPath))return (new ResourceSettings(),0,null,"missing");
+        var config=Store.Read<Configuration>(configurationPath)??throw new IOException("配置无法读取，已拒绝准入。");
         config=ConfigurationCompatibility.Accept(config);
-        return (config.Draft.Resource??new ResourceSettings(),config.Draft.Revision);
+        var identity="";
+        if(bind)
+        {
+            var info=new FileInfo(configurationPath);
+            identity=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(config,Store.Json)))+":"+info.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture)+":"+info.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        return (config.Draft.Resource,config.Draft.Revision,config.Draft,identity);
     }
     private ResourcePolicySnapshot AuthorityPolicy()
     {
-        var (settings,_)=LoadAuthority();
+        var (settings,_,_,_)=LoadAuthority();
         if(sample==null)throw new IOException("资源读数不可用，暂停创建。");
         ResourcePolicy.ValidateSettings(settings,sample.Total,sample.CommitLimit);
         return ResourcePolicy.SnapshotFor(settings,sample.Total,sample.CommitLimit);
@@ -340,19 +415,38 @@ internal sealed class Monitor : IDisposable
     private AuthorityBinding BindAuthority(Request request,LaunchItem[] items,bool consumeToken)
     {
         if(sample==null)throw new IOException("资源读数不可用，暂停创建。");
-        var (settings,revision)=LoadAuthority();
+        if(items.Length is <1 or >ResourcePolicy.MaxSlots||items.Any(i=>i==null)||items.Select(i=>i.Id).Distinct().Count()!=items.Length)throw new IOException("启动项数量或 ID 无效。");
+        var (settings,revision,draft,identity)=LoadAuthority(bind:true);
         ResourcePolicy.ValidateSettings(settings,sample.Total,sample.CommitLimit);
         var policy=ResourcePolicy.SnapshotFor(settings,sample.Total,sample.CommitLimit);
-        var hash=ResourcePolicy.PolicyHash(policy);
-        var digest=ResourcePolicy.PlanDigest(items??[]);
-        var slots=(request.EnabledSlotIds??(items??[]).Select(i=>i.Id)).ToArray();
-        waivers.InvalidateMismatched(revision,hash);
+        var hash=ResourcePolicy.PolicyHash(policy);var digest=ResourcePolicy.PlanDigest(items);
+        var slots=draft?.Slots.Where(s=>s.Enabled).Select(s=>s.Id).ToArray()??[];
+        waivers.InvalidateMismatched(revision,hash,identity);
         bool? consumed=null;
-        if(consumeToken && request.WaiverId is {} id)consumed=waivers.Consume(id,revision,hash,digest,slots);
+        if(consumeToken&&request.WaiverId is {} id)consumed=waivers.Consume(id,revision,hash,digest,slots,identity);
         if(!string.IsNullOrWhiteSpace(request.PolicyHash)&&request.PolicyHash!=hash)throw new IOException("策略快照与当前配置不一致。");
         if(!string.IsNullOrWhiteSpace(request.PlanDigest)&&request.PlanDigest!=digest)throw new IOException("计划摘要与当前启动项不一致。");
         if(request.DraftRevision is {} clientRevision&&clientRevision!=revision)throw new IOException("草稿修订号与当前配置不一致。");
-        return new(policy,hash,digest,revision,slots,consumed);
+        foreach(var item in items)ResourcePolicy.ValidateLaunchItem(item,policy,sample.Total);
+        return new(policy,hash,digest,revision,slots,consumed,draft,identity);
+    }
+    private void ValidateStableSlots(Request request,LaunchItem[] items,AuthorityBinding binding)
+    {
+        var draft=binding.Draft??throw new IOException("确认授权需要先保存当前配置并重新准备启动计划。");
+        if(request.EnabledSlotIds!=null&&!request.EnabledSlotIds.SequenceEqual(binding.Slots))throw new IOException("启用槽集合与当前配置不一致，请重新检查资源。");
+        if(items.Length==1&&items[0].Kind=="git"&&items[0].RetryOf==null)return;
+        if(items.Any(i=>i.Kind!="agent"||i.SourceSlotId==null||i.SourceSlotId==Guid.Empty))throw new IOException("确认授权缺少稳定来源槽，请重新准备启动计划。");
+        foreach(var item in items)
+        {
+            var index=draft.Slots.FindIndex(slot=>slot.Id==item.SourceSlotId);
+            if(index<0||!draft.Slots[index].Enabled||item.Position!=index+1||item.AgentId!=draft.Slots[index].AgentId)throw new IOException("启动项的稳定来源槽或 Agent 与当前配置不一致。");
+        }
+        if(items.Length==1&&items[0].RetryOf is {} sourceId)
+        {
+            var source=ledger.Entries.SingleOrDefault(e=>e.Plan.Id==sourceId);
+            if(source==null||source.Plan.SourceSlotId!=items[0].SourceSlotId||source.Plan.AgentId!=items[0].AgentId)throw new IOException("重试只能使用原来的稳定槽，请重新配置启动。");
+        }
+        else if(items.Any(i=>i.RetryOf!=null)||!items.Select(i=>i.SourceSlotId!.Value).SequenceEqual(binding.Slots))throw new IOException("启动项必须与当前配置的有序启用槽集合一致。");
     }
     private ResourcePolicySnapshot PolicyFromEntry(ControlEntry entry)
     {

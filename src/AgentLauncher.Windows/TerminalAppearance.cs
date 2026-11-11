@@ -27,19 +27,36 @@ public static class TerminalAppearance
         }
     }
 
-    public static void AddPaneArguments(ProcessStartInfo start,LaunchItem item,bool useSystemColors)
+    public static void AddPaneArguments(ProcessStartInfo start,LaunchItem item,bool useSystemColors)=>AddPaneArguments(start.ArgumentList,item,useSystemColors);
+
+    internal static void AddPaneArguments(ICollection<string> arguments,LaunchItem item,bool useSystemColors)
     {
         // Command-line overrides affect only this pane. Do not install fragments or rewrite the user's Terminal settings.
-        start.ArgumentList.Add("--title");
+        arguments.Add("--title");
         var folder=Path.GetFileName(item.Cwd.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar));
-        start.ArgumentList.Add($"{item.Position:00}  {DisplayText(item.Name,40)} · {DisplayText(folder,40)}".Replace(";","\\;"));
-        start.ArgumentList.Add("--suppressApplicationTitle");
-        start.ArgumentList.Add("--startingDirectory");start.ArgumentList.Add(item.Cwd.Replace(";","\\;"));
+        arguments.Add($"{item.Position:00}  {DisplayText(item.Name,40)} · {DisplayText(folder,40)}".Replace(";","\\;"));
+        arguments.Add("--suppressApplicationTitle");
+        arguments.Add("--startingDirectory");arguments.Add(item.Cwd.Replace(";","\\;"));
         if(!useSystemColors)
         {
-            start.ArgumentList.Add("--colorScheme");start.ArgumentList.Add("One Half Dark");
-            start.ArgumentList.Add("--tabColor");start.ArgumentList.Add("#61AFEF");
+            arguments.Add("--colorScheme");arguments.Add("One Half Dark");
+            arguments.Add("--tabColor");arguments.Add(TabColor(item));
         }
+    }
+
+    private static string TabColor(LaunchItem item)
+    {
+        var id=item.AgentId;
+        if(string.IsNullOrEmpty(id))
+        {
+            foreach(var agent in Agents.All)
+                if(StringComparer.OrdinalIgnoreCase.Equals(agent.Name,item.Name)||StringComparer.OrdinalIgnoreCase.Equals(agent.Id,item.Name)){id=agent.Id;break;}
+        }
+        return id switch
+        {
+            "pi"=>"#61AFEF","codex"=>"#E5C07B","claude"=>"#C678DD","gemini"=>"#56B6C2","opencode"=>"#98C379",
+            "hermes"=>"#E06C75","omp"=>"#D19A66","kimi"=>"#BE5046","qoder"=>"#528BFF",_=>"#ABB2BF"
+        };
     }
 
     public static void WritePaneHeading(LaunchItem item)

@@ -21,61 +21,112 @@
    </DockPanel>
   </Border>
   <ScrollViewer x:Name="ContentScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-   <StackPanel x:Name="Editor" Margin="24,20,24,24">
-    <Border x:Name="ProjectPanel" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,20">
+   <StackPanel x:Name="Editor" Margin="24,16,24,24">
+    <Border x:Name="ProjectPanel" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,16">
      <StackPanel>
-      <DockPanel Margin="0,0,0,12">
+      <DockPanel Margin="0,0,0,10">
        <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="选择文件夹" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Margin="12,0,0,0" VerticalAlignment="Top"/>
-       <StackPanel><TextBlock Text="项目" Style="{StaticResource Caption}"/><TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/></StackPanel>
+       <DockPanel VerticalAlignment="Center"><TextBlock Text="项目" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,12,0"/><TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="18" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/></DockPanel>
       </DockPanel>
       <TextBox x:Name="ProjectPath" FontFamily="Consolas,Microsoft YaHei" FontSize="13" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" ToolTip="输入本地绝对目录，或拖入文件夹"/>
-      <DockPanel Margin="0,8,0,0"><ComboBox DockPanel.Dock="Right" x:Name="Recent" Width="200" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/><TextBlock x:Name="ProjectGuide" Text="三步开始：① 选择或拖入项目文件夹　② 勾选要启动的 Agent　③ 点右下角「启动」" Style="{StaticResource Caption}" VerticalAlignment="Center"/></DockPanel>
+      <DockPanel Margin="0,6,0,0"><ComboBox DockPanel.Dock="Right" x:Name="Recent" Width="200" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/><TextBlock x:Name="ProjectGuide" Text="① 选择或拖入项目文件夹　② 在左侧勾选 Agent　③ 在右侧检查资源后点「启动」" Style="{StaticResource Caption}" VerticalAlignment="Center"/></DockPanel>
      </StackPanel>
     </Border>
     <Grid x:Name="WorkGrid">
      <Grid.ColumnDefinitions><ColumnDefinition x:Name="ConfigColumn" Width="*"/><ColumnDefinition x:Name="SummaryColumn" Width="320"/></Grid.ColumnDefinitions>
      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <StackPanel x:Name="ConfigurationPanel" Margin="0,0,20,0">
-      <DockPanel Margin="0,0,0,12"><TextBlock DockPanel.Dock="Right" x:Name="SelectionSummary" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="要一起启动的 Agent" Style="{StaticResource Heading}"/></DockPanel>
+      <DockPanel Margin="0,0,0,10"><TextBlock DockPanel.Dock="Right" x:Name="SelectionSummary" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="要一起启动的 Agent" Style="{StaticResource Heading}"/></DockPanel>
+      <WrapPanel x:Name="ScalePresets" Margin="0,0,0,8" AutomationProperties.Name="可配置规模预设">
+       <TextBlock Text="规模预设" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+       <Button Content="1" Tag="1" Click="ScalePresetClick" MinWidth="36" Margin="0,0,4,4" AutomationProperties.Name="规模预设 1"/>
+       <Button Content="2" Tag="2" Click="ScalePresetClick" MinWidth="36" Margin="0,0,4,4" AutomationProperties.Name="规模预设 2"/>
+       <Button Content="4" Tag="4" Click="ScalePresetClick" MinWidth="36" Margin="0,0,4,4" AutomationProperties.Name="规模预设 4"/>
+       <Button Content="8" Tag="8" Click="ScalePresetClick" MinWidth="36" Margin="0,0,4,4" AutomationProperties.Name="规模预设 8"/>
+       <Button Content="16" Tag="16" Click="ScalePresetClick" MinWidth="40" Margin="0,0,4,4" AutomationProperties.Name="规模预设 16"/>
+      </WrapPanel>
+      <TextBlock Text="只勾选的项会启动；预设用于补齐配置。缩小不会删除已编辑项。" Style="{StaticResource Caption}" Margin="0,0,0,12"/>
       <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="10">
        <StackPanel>
         <Grid Margin="16,12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-         <ComboBox x:Name="Templates" SelectionChanged="TemplateChanged" AutomationProperties.Name="恢复组合" MaxWidth="260" HorizontalAlignment="Left"/>
+         <DockPanel VerticalAlignment="Center"><TextBlock Text="组合模板" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,8,0"/><ComboBox x:Name="Templates" SelectionChanged="TemplateChanged" AutomationProperties.Name="恢复组合" MaxWidth="260" HorizontalAlignment="Left"/></DockPanel>
          <Button Grid.Column="1" x:Name="SaveTemplateButton" Content="存为组合" Style="{StaticResource QuietButton}" Click="SaveTemplateClick" Margin="8,0,0,0"/>
         </Grid>
-        <DockPanel Margin="16,0,16,12"><Label Content="筛选 Agent" Target="{Binding ElementName=AgentSearch}" VerticalAlignment="Center" Padding="0,0,8,0"/><TextBox x:Name="AgentSearch" AutomationProperties.Name="搜索 Agent 名称" ToolTip="按名称筛选下拉选项；不会改变已选择的 Agent" TextChanged="AgentSearchChanged"/></DockPanel>
+        <DockPanel Margin="16,0,16,12">
+         <Label Content="筛选下拉选项" Target="{Binding ElementName=AgentSearch}" VerticalAlignment="Center" Padding="0,0,8,0" ToolTip="只筛选各项的 Agent 下拉选项，不隐藏配置行，也不改变勾选"/>
+         <TextBox x:Name="AgentSearch" AutomationProperties.Name="搜索 Agent 名称" AutomationProperties.HelpText="按名称筛选 Agent 下拉选项，不改变已勾选项" ToolTip="按名称筛选下拉选项；不会改变已选择的 Agent" TextChanged="AgentSearchChanged"/>
+        </DockPanel>
         <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0"><StackPanel x:Name="SlotList"/></Border>
         <WrapPanel Margin="12,8,12,12"><Button x:Name="AddButton" Content="＋  添加 Agent" Style="{StaticResource QuietButton}" Click="AddClick"/><Button x:Name="DiscoverButton" Content="重新查找本机 CLI" Style="{StaticResource QuietButton}" Click="DiscoverClick" Margin="8,0,0,0"/></WrapPanel>
         <TextBlock x:Name="DiscoveryStatus" Text="正在查找本机 CLI…" Style="{StaticResource Caption}" Margin="16,0,16,12" AutomationProperties.LiveSetting="Polite"/>
        </StackPanel>
       </Border>
-      <Expander x:Name="SessionExpander" Margin="0,20,0,0" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch">
-       <Expander.Header><TextBlock x:Name="SessionHeading" Text="运行记录" FontWeight="SemiBold" Margin="4,0"/></Expander.Header>
+      <Expander x:Name="SessionExpander" Margin="0,16,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" ToolTip="展开查看本次与本机运行记录">
+       <Expander.Header><TextBlock x:Name="SessionHeading" Text="运行记录" FontWeight="SemiBold" Margin="4,0" MinHeight="36" VerticalAlignment="Center"/></Expander.Header>
        <StackPanel Margin="0,12,0,0"><StackPanel x:Name="Sessions"/><TextBlock x:Name="ProgressText" Margin="0,8" AutomationProperties.LiveSetting="Polite"/></StackPanel>
       </Expander>
      </StackPanel>
      <StackPanel x:Name="SummaryPanel" Grid.Column="1">
-      <DockPanel Margin="0,0,0,12"><TextBlock DockPanel.Dock="Right" Text="实时预览" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="启动后的终端样子" Style="{StaticResource Heading}"/></DockPanel>
+      <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,16">
+       <StackPanel>
+        <DockPanel LastChildFill="False">
+         <TextBlock DockPanel.Dock="Left" Text="电脑资源" Style="{StaticResource Heading}" VerticalAlignment="Center"/>
+         <Button DockPanel.Dock="Right" x:Name="ResourceSettingsButton" Content="资源模式 / 设置" Style="{StaticResource QuietButton}" Click="ResourceClick" VerticalAlignment="Center"/>
+        </DockPanel>
+        <TextBlock x:Name="ResourceModeText" Text="资源模式：实用（默认）" Style="{StaticResource Caption}" Margin="0,4,0,0"/>
+        <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+         <StackPanel><TextBlock Text="现在可用内存" Style="{StaticResource Caption}"/><TextBlock x:Name="AvailableValue" Text="—" FontFamily="Consolas" FontSize="20" Margin="0,2,0,0"/></StackPanel>
+         <StackPanel Grid.Column="1"><TextBlock Text="本次规划" Style="{StaticResource Caption}"/><TextBlock x:Name="BudgetValue" Text="—" FontFamily="Consolas" FontSize="20" Margin="0,2,0,0"/></StackPanel>
+        </Grid>
+        <TextBlock x:Name="ResourceText" Style="{StaticResource Caption}" Margin="0,6,0,0" AutomationProperties.LiveSetting="Polite"/>
+        <TextBlock x:Name="CpuLimitText" Style="{StaticResource Caption}" Margin="0,4,0,0"/>
+        <TextBlock Text="Job 上限是提交上限，不是当前占用；运行中仍可能分配失败或系统变卡。16 个可配置槽不表示 16 个 Agent 满载安全。" Style="{StaticResource Caption}" Margin="0,6,0,0"/>
+        <Expander x:Name="ResourceDetailsExpander" Margin="0,6,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" AutomationProperties.Name="规划与余量明细" ToolTip="展开查看规划合计、硬保护余量、Job 上限对照与每项预算">
+         <Expander.Header><TextBlock Text="规划与余量明细" FontWeight="SemiBold" Margin="4,0" MinHeight="36" VerticalAlignment="Center"/></Expander.Header>
+         <StackPanel Margin="0,8,0,0">
+          <Grid>
+           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+           <TextBlock Text="本次规划占用" Style="{StaticResource Caption}"/><TextBlock x:Name="PlanningRequestedValue" Grid.Column="1" Text="—" FontFamily="Consolas"/>
+           <TextBlock Grid.Row="1" Text="活动预约规划" Style="{StaticResource Caption}"/><TextBlock x:Name="PlanningReservedValue" Grid.Row="1" Grid.Column="1" Text="—" FontFamily="Consolas"/>
+           <TextBlock Grid.Row="2" Text="规划合计" Style="{StaticResource Caption}"/><TextBlock x:Name="PlanningTotalValue" Grid.Row="2" Grid.Column="1" Text="—" FontFamily="Consolas"/>
+           <TextBlock Grid.Row="3" Text="硬保护后规划余量" Style="{StaticResource Caption}"/><TextBlock x:Name="PlanningRemainingValue" Grid.Row="3" Grid.Column="1" Text="—" FontFamily="Consolas"/>
+           <TextBlock Grid.Row="4" Text="若按 Job 上限加总" Style="{StaticResource Caption}"/><TextBlock x:Name="JobCapTotalValue" Grid.Row="4" Grid.Column="1" Text="—" FontFamily="Consolas"/>
+          </Grid>
+          <TextBlock x:Name="JobCapDifferenceText" Style="{StaticResource Caption}" Margin="0,8,0,0"/>
+          <TextBlock x:Name="PhysicalHeadroomText" Style="{StaticResource Caption}" Margin="0,8,0,0"/>
+          <TextBlock x:Name="CommitHeadroomText" Style="{StaticResource Caption}" Margin="0,8,0,0"/>
+          <TextBlock x:Name="PerSlotBudgetText" Style="{StaticResource Caption}" Margin="0,8,0,0"/>
+        <TextBlock Text="规划估算用于准入，不是该程序的实测占用；本产品没有按 Agent 种类给出的基准数据。" Style="{StaticResource Caption}" Margin="0,4,0,0"/>
+        <TextBlock Text="单位为 1024 进制：1 GiB = 1024 MiB。" Style="{StaticResource Caption}" Margin="0,4,0,0"/>
+         </StackPanel>
+        </Expander>
+       </StackPanel>
+      </Border>
+      <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,16">
+       <StackPanel>
+        <UniformGrid Columns="4">
+         <StackPanel><TextBlock Text="已配置" Style="{StaticResource Caption}"/><TextBlock x:Name="ConfiguredCountValue" Text="—" FontSize="20" FontFamily="Consolas" AutomationProperties.Name="已配置槽数"/></StackPanel>
+         <StackPanel><TextBlock Text="已勾选" Style="{StaticResource Caption}"/><TextBlock x:Name="EnabledCountValue" Text="—" FontSize="20" FontFamily="Consolas" AutomationProperties.Name="已勾选槽数"/></StackPanel>
+         <StackPanel><TextBlock Text="已预约" Style="{StaticResource Caption}"/><TextBlock x:Name="ReservedCountValue" Text="—" FontSize="20" FontFamily="Consolas" AutomationProperties.Name="monitor 活动预约数"/></StackPanel>
+         <StackPanel><TextBlock Text="已启动进程" Style="{StaticResource Caption}"/><TextBlock x:Name="StartedCountValue" Text="—" FontSize="20" FontFamily="Consolas" AutomationProperties.Name="monitor 已确认 Started 数"/></StackPanel>
+        </UniformGrid>
+        <TextBlock Text="预约包含运行中；状态未知显示 —。" Style="{StaticResource Caption}" Margin="0,8,0,0"/>
+        <TextBlock x:Name="CreatedPendingText" Style="{StaticResource Caption}" Margin="0,6,0,0" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite"/>
+       </StackPanel>
+      </Border>
+      <DockPanel Margin="0,0,0,8"><TextBlock DockPanel.Dock="Right" Text="启动后的样子" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="终端预览" Style="{StaticResource Heading}"/></DockPanel>
       <Border Background="{DynamicResource PreviewPage}" BorderBrush="{DynamicResource PreviewLine}" BorderThickness="1" CornerRadius="10" Padding="12">
        <StackPanel>
         <DockPanel Margin="4,0,4,12"><TextBlock DockPanel.Dock="Right" x:Name="PaneCount" Text="1 个窗格" Foreground="{DynamicResource PreviewMuted}" FontSize="12"/><TextBlock Text="Windows Terminal" Foreground="{DynamicResource PreviewInk}" FontSize="12"/></DockPanel>
-        <Grid x:Name="Preview" MinHeight="128"/>
+        <Grid x:Name="Preview" MinHeight="120"/>
        </StackPanel>
       </Border>
-      <DockPanel Margin="0,10,0,14"><TextBlock Text="两个窗格的排法" Style="{StaticResource Caption}" VerticalAlignment="Center"/><ComboBox x:Name="Layout" Width="128" HorizontalAlignment="Right" SelectionChanged="LayoutChanged" AutomationProperties.Name="两项布局"><ComboBoxItem Content="左右并排" Tag="vertical"/><ComboBoxItem Content="上下叠放" Tag="horizontal"/></ComboBox></DockPanel>
-      <TextBlock Text="文件夹怎么用" FontWeight="SemiBold" Margin="0,0,0,8"/>
+      <DockPanel Margin="0,8,0,16"><TextBlock Text="两个窗格的排法" Style="{StaticResource Caption}" VerticalAlignment="Center"/><ComboBox x:Name="Layout" Width="128" HorizontalAlignment="Right" SelectionChanged="LayoutChanged" AutomationProperties.Name="两项布局"><ComboBoxItem Content="左右并排" Tag="vertical"/><ComboBoxItem Content="上下叠放" Tag="horizontal"/></ComboBox></DockPanel>
+      <TextBlock Text="文件夹策略" FontWeight="SemiBold" Margin="0,0,0,8"/>
       <ComboBox x:Name="DirectoryMode" SelectionChanged="DirectoryChanged" AutomationProperties.Name="同项目目录策略"><ComboBoxItem Content="各自独立（互不影响）" Tag="isolated"/><ComboBoxItem Content="用已准备好的目录" Tag="prepared"/><ComboBoxItem Content="共用同一个文件夹" Tag="shared"/></ComboBox>
-      <TextBlock x:Name="DirectoryHelp" Style="{StaticResource Caption}" Margin="0,8,0,12"/>
-      <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="0,12,0,0">
-       <StackPanel>
-        <DockPanel><Button DockPanel.Dock="Right" Content="详情" Style="{StaticResource QuietButton}" Click="ResourceClick" MinHeight="28" Padding="8,2"/><TextBlock Text="电脑资源" FontWeight="SemiBold" VerticalAlignment="Center"/></DockPanel>
-        <Grid Margin="0,12,0,0"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
-         <StackPanel><TextBlock Text="现在可用内存" Style="{StaticResource Caption}"/><TextBlock x:Name="AvailableValue" Text="—" FontFamily="Consolas" FontSize="24" Margin="0,4,0,0"/></StackPanel>
-         <StackPanel Grid.Column="1"><TextBlock Text="本次需要" Style="{StaticResource Caption}"/><TextBlock x:Name="BudgetValue" Text="2 GiB" FontFamily="Consolas" FontSize="24" Margin="0,4,0,0"/></StackPanel>
-        </Grid>
-        <TextBlock x:Name="ResourceText" Style="{StaticResource Caption}" Margin="0,12,0,0" AutomationProperties.LiveSetting="Polite"/>
-       </StackPanel>
-      </Border>
+      <TextBlock x:Name="DirectoryHelp" Style="{StaticResource Caption}" Margin="0,8,0,0"/>
+      <TextBlock Text="只为已勾选项准备目录；worktree 准备全局串行，取消不删除已创建目录。不修改 Terminal 全局设置，不承诺字体、间距或 scrollback。" Style="{StaticResource Caption}" Margin="0,8,0,0"/>
      </StackPanel>
     </Grid>
    </StackPanel>

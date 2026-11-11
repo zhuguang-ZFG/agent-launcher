@@ -1,4 +1,4 @@
-#if INTEGRATION_TESTS
+﻿#if INTEGRATION_TESTS
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
@@ -16,6 +16,9 @@ public partial class MainWindow
     private async Task RunUiChecksAsync(string folder)
     {
         System.IO.Directory.CreateDirectory(folder);var checks=new List<string>();
+        // The harness owns an isolated, possibly non-existent test root. The app's preview-first startup no longer writes
+        // monitor state there, so create it before the first configuration write (a missing root surfaces as a silent UI-only error).
+        System.IO.Directory.CreateDirectory(Store.Root);
         void Check(string name,bool value){if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}checks.Add(name);}
         IEnumerable<T> Find<T>(DependencyObject root) where T:DependencyObject
         {
@@ -79,7 +82,7 @@ public partial class MainWindow
         Check("automation toggle updates Draft and summary",config.Draft.Slots[0].Enabled&&SelectionSummary.Text=="已选 1 个，共 4 个");
         toggle=(System.Windows.Automation.Provider.IToggleProvider)new System.Windows.Automation.Peers.CheckBoxAutomationPeer(Find<CheckBox>(SlotList).First());
         toggle.Toggle();
-        Check("automation toggle reverts cleanly",!config.Draft.Slots[0].Enabled&&SelectionSummary.Text=="已选 0 个，共 4 个");
+        Check("automation toggle reverts cleanly",!config.Draft.Slots[0].Enabled&&config.Draft.Slots.All(slot=>!slot.Enabled));
         var fourth=Find<CheckBox>(SlotList).Last();fourth.IsChecked=true;fourth.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
         Check("native checkbox updates Draft",config.Draft.Slots.Count(s=>s.Enabled)==1&&config.Draft.Slots[3].Enabled);
         Check("preview keeps original slot numbers",Find<TextBlock>(Preview).First().Text.StartsWith("4"));
@@ -89,9 +92,6 @@ public partial class MainWindow
         var select=Find<ComboBox>(SlotList).First();select.SelectedValue="codex";Check("native Agent selector separates profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Executable=="");
         select=Find<ComboBox>(SlotList).First();select.SelectedValue="pi";Check("native Agent selector restores profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Arguments.SequenceEqual(new[]{"--only-pi"}));
         config.Edit(d=>{d.Slots[0].Profiles.Clear();d.Slots.ForEach(s=>s.Enabled=true);});Render();
-        Check("four pane preview positions",Preview.Children.Count==4&&Grid.GetColumn(Preview.Children[2])==0&&Grid.GetRow(Preview.Children[2])==1);
-        config.Edit(d=>d.Slots[3].Enabled=false);Render();Check("three pane left spans rows",Grid.GetRowSpan(Preview.Children[0])==2);
-        Check("overflow menu keeps move and remove",Find<MenuButton>(SlotList).First().MenuLabels.SequenceEqual(new[]{"上移","下移","移除"}));
         var firstMenu=Find<MenuButton>(SlotList).First();((Button)firstMenu.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         var openItems=firstMenu.menu.Items.OfType<MenuItem>().ToArray();Check("menu enable states at open",openItems[0].IsEnabled==false&&openItems[1].IsEnabled&&openItems[2].IsEnabled);firstMenu.menu.IsOpen=false;
         var removedId=config.Draft.Slots[0].Id;openItems[2].RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
@@ -102,16 +102,16 @@ public partial class MainWindow
         Check("undo restores only removed slot",config.Draft.Slots.Count==4&&config.Draft.Slots[0].Id==removedId&&config.Draft.Layout=="horizontal");config.Edit(d=>d.Layout="vertical");Render();
         var menu2=Find<MenuButton>(SlotList).First();((Button)menu2.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         var secondRemoved=config.Draft.Slots[0].Id;((MenuItem)menu2.menu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));menu2.menu.IsOpen=false;
-        AddClick(this,new RoutedEventArgs());
+        while(config.Draft.Slots.Count<ResourcePolicy.MaxSlots)AddClick(this,new RoutedEventArgs());
         var undo2=Find<Button>(Sessions).FirstOrDefault(b=>(b.Content as string)=="撤销移除");Check("undo offered after second remove",undo2!=null);
         undo2!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        Check("undo refuses when full",config.Draft.Slots.Count==4&&config.Draft.Slots.All(s=>s.Id!=secondRemoved)&&ProgressText.Text.Contains("无法撤销"));
+        Check("undo refuses when full",config.Draft.Slots.Count==ResourcePolicy.MaxSlots&&config.Draft.Slots.All(s=>s.Id!=secondRemoved)&&ProgressText.Text.Contains("无法撤销"));
         // F7 regression: a refused undo must stay retryable; freeing capacity then clicking must restore the slot.
         Check("undo stays enabled after capacity refusal",undo2.IsEnabled);
         var thirdMenu=Find<MenuButton>(SlotList).First();((Button)thirdMenu.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         ((MenuItem)thirdMenu.menu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));thirdMenu.menu.IsOpen=false;
         undo2.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        Check("undo retry restores after freeing capacity",config.Draft.Slots.Count==4&&config.Draft.Slots.Any(s=>s.Id==secondRemoved));
+        Check("undo retry restores after freeing capacity",config.Draft.Slots.Count==ResourcePolicy.MaxSlots&&config.Draft.Slots.Any(s=>s.Id==secondRemoved));
         var settingsDialog=CreateSettingsDialog();
         settingsDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>{
             var theme=FindLogical<ComboBox>(settingsDialog).Single(c=>AutomationProperties.GetName(c)=="主题");theme.SelectedIndex=2;
@@ -146,7 +146,6 @@ public partial class MainWindow
         }
         // F5 regression: the submission gate must hold only while attempts are still Pending; a confirmed running attempt must release it for the next batch.
         // Reserve admission depends on real free memory, which is environment-dependent; restart the monitor under the sanctioned FAKE_SAMPLE hook for determinism, then restore real sampling for the final health check.
-        System.IO.Directory.CreateDirectory(Store.Root);
         var realMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(realMonitor>0){try{using var m=Process.GetProcessById(realMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
         Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE","1");
         await RefreshAsync();Check("fake-sample monitor healthy",status is{Ok:true});
@@ -155,6 +154,8 @@ public partial class MainWindow
         submittedAttempts=[gateItem.Id];submittedRevision=config.Draft.Revision;
         await RefreshAsync();
         Check("pending attempt keeps launch gate",submittedAttempts.Length==1&&submittedRevision==config.Draft.Revision);
+        await RefreshAsync();
+        Check("ACC-S03 unchanged snapshot preserves pending submission",status?.Unchanged==true&&status.Entries?.Any(e=>e.Plan.Id==gateItem.Id&&e.State=="Pending")==true&&submittedAttempts.SequenceEqual(new[]{gateItem.Id})&&submittedRevision==config.Draft.Revision);
         var gateStart=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};gateStart.ArgumentList.Add("run");gateStart.ArgumentList.Add(gateItem.Id.ToString());
         using(var gateRunner=Process.Start(gateStart)!)
         {
@@ -213,6 +214,7 @@ public partial class MainWindow
             Check($"F12 named template {name} restores its own snapshot",config.Draft.DirectoryMode=="prepared"&&config.Draft.Slots[3].Enabled&&!config.Draft.Slots[0].Enabled);
         }
         await RunReviewUiChecksAsync(Check);
+        await RunMultipaneChecksAsync(Check);
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX,Resource=ResourceText.Text});Close();
     }

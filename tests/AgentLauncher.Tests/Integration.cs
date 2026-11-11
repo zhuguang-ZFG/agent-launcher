@@ -24,7 +24,7 @@ internal static class Integration
             System.Reflection.FieldInfo Field(string name)=>type.GetField(name,flags)??throw new MissingFieldException(type.FullName,name);
             var handle=type.GetMethod("Handle",flags)??throw new MissingMethodException(type.FullName,"Handle");
             var healthySample=new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow);
-            foreach(var sample in new[]{healthySample with{CommitAvailable=ResourcePolicy.GiB},healthySample with{Available=4*ResourcePolicy.GiB},healthySample with{CpuPercent=double.NaN},healthySample with{At=DateTimeOffset.UtcNow.AddSeconds(-10)}})
+            foreach(var sample in new[]{healthySample with{CommitAvailable=ResourcePolicy.GiB},healthySample with{Available=ResourcePolicy.DefaultPhysicalFloor(healthySample.Total)+ResourcePolicy.DefaultPlanningBytes-1},healthySample with{CpuPercent=double.NaN},healthySample with{At=DateTimeOffset.UtcNow.AddSeconds(-10)}})
             {
                 using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;var item=Item("recheck",["--hold","1"]);var entry=new ControlEntry{Plan=item,Digest=Store.Digest(item)};
                 Field("sample").SetValue(monitor,sample);Field("ledger").SetValue(monitor,new Ledger{Entries=[entry]});

@@ -25,8 +25,11 @@ internal static class RuntimeReviewChecks
         await test("CR06 paged status keeps oversized active and history records exact",()=>StatusTransportAsync(cwd));
         await test("CR06 truncated and epoch-mixed continuation frames are rejected",()=>ContinuationRejectionAsync(cwd));
         await test("CR07 pressure exposes an admission reason without changing reconciliation health",()=>PressureReasonAsync(cwd));
-        await test("CR10 idle monitor retires within five seconds without polling and keeps pending attempts",()=>IdleRetirementAsync(cwd));
+        await test("ACC-S02 idle monitor keeps the 15-second window and pending attempts",()=>IdleRetirementAsync(cwd));
         await test("CR10 a merely busy pipe does not start a second monitor",()=>BusyPipeAsync(cwd));
+        await test("ACC-S03 status signatures invalidate on activity history blockers and epoch",()=>StatusSignatureAsync(cwd));
+        await test("ACC-C01 status exposes the existing root CPU and rejects an idle configuration mismatch",()=>RootCpuAsync(cwd));
+        await test("ACC-S03 unchanged receipt metadata skips reads but still reconciles Job members",()=>ReceiptCacheAsync(cwd));
     }
 
     private static void Assert(bool value,string message){if(!value)throw new Exception(message);}
@@ -234,11 +237,13 @@ internal static class RuntimeReviewChecks
     private static Task PressureReasonAsync(string cwd)
     {
         var root=OwnedRoot(cwd);using var probe=new MonitorProbe(new Ledger(),FreshSample(),Path.Combine(root,"control.json"));
-        probe.Set("pressure",true);
+        var tracker=(PressureTracker)probe.Get("pressureTracker")!;
+        var high=FreshSample() with{CpuPercent=85};
+        for(var i=0;i<3;i++)tracker.Observe(high,ResourcePolicy.DefaultPhysicalFloor(high.Total));
         var pressured=probe.Status();
         Assert(pressured.Ok,"resource pressure changed reconciliation health");
         Assert(!string.IsNullOrEmpty(pressured.AdmissionBlockedReason)&&pressured.AdmissionBlockedReason!.Contains("压力"),"pressure admission blocker not exposed: "+(pressured.AdmissionBlockedReason??"<null>"));
-        probe.Set("pressure",false);
+        for(var i=0;i<5;i++)tracker.Observe(FreshSample(),ResourcePolicy.DefaultPhysicalFloor(high.Total));
         var normal=probe.Status();
         Assert(normal.Ok&&normal.AdmissionBlockedReason==null,"cleared pressure still reports an admission blocker: "+(normal.AdmissionBlockedReason??"<null>"));
         return Task.CompletedTask;
@@ -256,16 +261,71 @@ internal static class RuntimeReviewChecks
         var pending=Item("cr10-pending",["--hold","100"],Path.Combine(monitor.Root,"projects","pending"));
         var reserved=await monitor.SendAsync(new("reserve",Guid.NewGuid(),[pending]));
         Assert(reserved.Ok,"pending reserve failed: "+reserved.Message);
-        await Task.Delay(5200);
+        await Task.Delay(TimeSpan.FromSeconds(ResourcePolicy.IdleTimeoutSeconds+1));
         var status=await monitor.SendAsync(new("status",Guid.NewGuid()));
         Assert(status.Ok,"an active pending attempt did not keep the monitor alive: "+status.Message);
         Assert(status.Entries!.Single(e=>e.Plan.Id==pending.Id).State=="Pending","pending attempt changed before revocation");
         var revokeWatch=Stopwatch.StartNew();
         var revoke=await monitor.SendAsync(new("revoke",Guid.NewGuid(),Attempt:pending.Id));
         Assert(revoke.Ok,"final revoke failed: "+revoke.Message);
-        var exited=monitor.WaitForExit(TimeSpan.FromSeconds(5));revokeWatch.Stop();
-        Assert(exited,"owned monitor did not exit within five seconds after the final revoke");
-        Assert(revokeWatch.Elapsed<=TimeSpan.FromSeconds(5),"owned monitor exit took "+revokeWatch.Elapsed.TotalSeconds.ToString("F2")+"s");
+        Assert(!monitor.WaitForExit(TimeSpan.FromSeconds(5)),"idle monitor retired before the new 15-second contract");
+        var exited=monitor.WaitForExit(TimeSpan.FromSeconds(13));revokeWatch.Stop();
+        Assert(exited,"owned monitor did not exit within the 18-second idle boundary");
+        Assert(revokeWatch.Elapsed>=TimeSpan.FromSeconds(15)&&revokeWatch.Elapsed<=TimeSpan.FromSeconds(18),"owned monitor exit took "+revokeWatch.Elapsed.TotalSeconds.ToString("F2")+"s");
+    }
+
+    private static Task StatusSignatureAsync(string cwd)
+    {
+        var root=OwnedRoot(cwd);var item=Item("short-frame",[new string('s',60000)],Path.Combine(root,"project"));
+        var entry=new ControlEntry{Plan=item,Digest=Store.Digest(item)};var ledger=new Ledger{Entries=[entry]};
+        using var probe=new MonitorProbe(ledger,FreshSample(),Path.Combine(root,"control.json"));
+        var first=probe.Status();Assert(first.Entries?.Length==1&&!string.IsNullOrEmpty(first.StatusSignature),"full status omitted its stable signature");
+        Response Poll(Response prior)=>(Response)probe.Invoke("Handle",new Request("status",Guid.NewGuid(),StatusEpoch:prior.Epoch,StatusSignature:prior.StatusSignature))!;
+        var nextSample=FreshSample() with{Available=11*ResourcePolicy.GiB};probe.Set("sample",nextSample);
+        var shortFrame=Poll(first);Assert(shortFrame.Unchanged&&shortFrame.Entries==null&&shortFrame.Memory==nextSample&&shortFrame.StatusSignature==first.StatusSignature,"unchanged status did not return a sample-only short frame");
+        entry.Detail="changed progress";var detail=Poll(first);Assert(!detail.Unchanged&&detail.Entries?.Single().Detail==entry.Detail&&detail.StatusSignature!=first.StatusSignature,"detail change was hidden by short status");
+        entry.State="Revoked";var terminal=Poll(detail);Assert(!terminal.Unchanged&&terminal.Entries?.Single().State=="Revoked","terminal transition did not invalidate status");
+        entry.Plan=item with{Command=item.Command with{Arguments=["changed"]}};
+        var plan=Poll(terminal);Assert(!plan.Unchanged&&plan.Entries?.Single().Plan.Command.Arguments.Single()=="changed","complete plan change was hidden");
+        probe.Set("blocked","fixture reconciliation blocker");var blocked=Poll(plan);Assert(!blocked.Unchanged&&blocked.AdmissionBlockedReason=="fixture reconciliation blocker","blocker change was hidden");
+        var otherEpoch=(Response)probe.Invoke("Handle",new Request("status",Guid.NewGuid(),StatusEpoch:"other",StatusSignature:blocked.StatusSignature))!;
+        Assert(!otherEpoch.Unchanged&&otherEpoch.Entries!=null,"epoch mismatch returned a short frame");
+        return Task.CompletedTask;
+    }
+
+    private static Task RootCpuAsync(string cwd)
+    {
+        var root=OwnedRoot(cwd);using var probe=new MonitorProbe(new Ledger(),FreshSample(),Path.Combine(root,"control.json"));
+        var job=new Job("Local\\AgentLauncher-cpu-review-"+Guid.NewGuid().ToString("N"),root:true,cpuRate:4000);probe.Set("root",job);
+        probe.Invoke("Refresh",false);var status=probe.Status();
+        Assert(status.RootCpuRate==4000,"status reported a configured rate instead of the actual existing root");
+        Assert(status.AdmissionBlockedReason?.Contains("CPU")==true,"different idle configuration was silently declared applied");
+        Assert(job.QueryCpuRate()?.Rate==4000,"monitor changed the existing Job CPU rate");
+        return Task.CompletedTask;
+    }
+
+    private static async Task ReceiptCacheAsync(string cwd)
+    {
+        var root=OwnedRoot(cwd);var item=Item("receipt-cache",["--hold","30000"],Path.Combine(root,"project"));
+        var entry=new ControlEntry{Plan=item,Digest=Store.Digest(item),State="Creating"};
+        using var probe=new MonitorProbe(new Ledger{Entries=[entry]},FreshSample(),Path.Combine(root,"control.json"));
+        var aggregate=new Job("Local\\AgentLauncher-receipt-review-"+Guid.NewGuid().ToString("N"),root:true);probe.Set("root",aggregate);
+        var job=new Job(Store.JobName(item.Id),item.Budget);var jobs=(Dictionary<Guid,Job>)probe.Get("jobs")!;jobs[item.Id]=job;
+        using var child=new ProtectedProcess(item.Command,item.Cwd,aggregate,job);child.Resume();
+        try
+        {
+            Store.Save(Store.ReceiptPath(item.Id),new Receipt("Started",child.Process.Id,child.CreationTime,null,"running",DateTimeOffset.UtcNow));
+            probe.Invoke("Refresh",false);Assert(!Store.IsTerminal(entry),"live Job was settled");
+            Assert(entry.State=="Started","Started receipt is still reported as "+entry.State+"; UI cannot count the running process");
+            var cache=(System.Collections.IDictionary)probe.Get("receiptCache")!;Assert(cache.Contains(item.Id),"receipt was not cached");
+            var cached=cache[item.Id];probe.Invoke("Refresh",false);Assert(ReferenceEquals(cached,cache[item.Id]),"unchanged receipt was reloaded");
+            child.Process.Kill();await child.Process.WaitForExitAsync();
+            var deadline=DateTime.UtcNow.AddSeconds(3);
+            do{probe.Invoke("Refresh",false);if(Store.IsTerminal(entry))break;await Task.Delay(25);}while(DateTime.UtcNow<deadline);
+            Assert(Store.IsTerminal(entry),"unchanged receipt prevented Job-member exit reconciliation");
+            Assert(!jobs.ContainsKey(item.Id)&&!cache.Contains(item.Id),"terminal entry retained Job or receipt cache");
+        }
+        finally{if(!child.Process.HasExited){child.Process.Kill();await child.Process.WaitForExitAsync();}}
     }
 
     private const long LedgerPruneTrigger=6L*1024*1024;
@@ -285,9 +345,10 @@ internal static class RuntimeReviewChecks
             var assembly=Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase));
             type=assembly.GetType("AgentLauncher.Worker.Monitor",true)!;
             instance=Activator.CreateInstance(type,true)!;
-            Set("ledger",ledger);Set("ledgerPath",ledgerPath);Set("sample",sample);
+            Set("ledger",ledger);Set("ledgerPath",ledgerPath);Set("configurationPath",Path.Combine(Path.GetDirectoryName(ledgerPath)!,"configuration.json"));Set("sample",sample);
         }
         public void Set(string name,object? value)=>Field(name).SetValue(instance,value);
+        public object? Get(string name)=>Field(name).GetValue(instance);
         public object? Invoke(string name,params object[] arguments)=>Method(name).Invoke(instance,arguments);
         public Response Status()=>(Response)Invoke("Status")!;
         private FieldInfo Field(string name)=>type.GetField(name,Flags)??throw new MissingFieldException(type.FullName??type.Name,name);

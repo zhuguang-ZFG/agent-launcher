@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
@@ -19,7 +19,7 @@ public partial class MainWindow : Window
     private Configuration config=new();
     private bool rendering,busy,loading=true,readOnly,refreshing,closing;
     private bool launchFinalizing,launchStopping,closeRequested;
-    private readonly DispatcherTimer timer=new(){Interval=TimeSpan.FromSeconds(2)};
+    private readonly DispatcherTimer timer=new(){Interval=TimeSpan.FromSeconds(30)};
     private byte[]? pendingSave;
     private Task saveTask=Task.CompletedTask;
     private Task commandCheckTask=Task.CompletedTask;
@@ -60,7 +60,7 @@ public partial class MainWindow : Window
         var work=SystemParameters.WorkArea;Width=Math.Min(1120,work.Width-32);Height=Math.Min(800,work.Height-32);MinWidth=Math.Min(560,work.Width-32);MinHeight=Math.Min(460,work.Height-32);
         SizeChanged+=(_,_)=>ArrangePanels();
         Loaded+=async (_,_)=>await GuardAsync(LoadAsync);
-        timer.Tick+=async (_,_)=>await GuardAsync(RefreshAsync);
+        timer.Tick+=async (_,_)=>await GuardAsync(PollResourcesAsync);
         PreviewKeyDown+=(_,e)=>{if(Keyboard.Modifiers==ModifierKeys.Control&&e.Key==Key.O){ChooseClick(this,new());e.Handled=true;}else if(Keyboard.Modifiers==ModifierKeys.Control&&e.Key==Key.Enter&&LaunchButton.IsEnabled){LaunchClick(this,new());e.Handled=true;}};
         Closing+=ClosingWindow;
         SystemParameters.StaticPropertyChanged+=SystemAppearanceChanged;Closed+=(_,_)=>SystemParameters.StaticPropertyChanged-=SystemAppearanceChanged;
@@ -81,7 +81,7 @@ public partial class MainWindow : Window
         catch(Exception e)when(e is IOException or JsonException or InvalidOperationException or UnauthorizedAccessException or InvalidDataException)
         {readOnly=true;config=new Configuration();ErrorText.Text="配置无法读取，已禁止覆盖和启动。请在设置中检查配置文件及 .bak 备份。\n"+e.Message;}
         if(configMissing){readOnly=true;ErrorText.Text="配置文件丢失，检测到 .bak 备份。请核对后使用「恢复备份」；当前不会写入配置。";}
-        loading=false;RestoreBackupButton.Visibility=readOnly?Visibility.Visible:Visibility.Collapsed;ApplyTheme();Render();_=GuardAsync(DiscoverCatalogAsync);await RefreshAsync();timer.Start();
+        loading=false;RestoreBackupButton.Visibility=readOnly?Visibility.Visible:Visibility.Collapsed;ApplyTheme();Render();_=GuardAsync(DiscoverCatalogAsync);await LoadResourceViewAsync();timer.Start();
 #if INTEGRATION_TESTS
         if(arguments is ["--idle-check",var reportPath])
         {
@@ -105,7 +105,7 @@ public partial class MainWindow : Window
         if(rendering||loading||busy)return false;
         if(readOnly){Render();return false;}
         var focusName=Keyboard.FocusedElement is DependencyObject focused&&Within(focused,SlotList)?AutomationProperties.GetName(focused):null;
-        config.Edit(change);validationError="";ErrorText.Text="";QueueSave();Render();
+        var before=config.Draft;config.Edit(change);TrackMultipaneSlotEdits(before,config.Draft);validationError="";ErrorText.Text="";QueueSave();Render();
         if(focusName is {Length:>0}&&FindLogical(SlotList).FirstOrDefault(el=>AutomationProperties.GetName(el)==focusName) is IInputElement target)Keyboard.Focus(target);
         return true;
     }
@@ -165,6 +165,7 @@ public partial class MainWindow : Window
         {
             ProjectPath.Text=config.Draft.Project;var noProject=string.IsNullOrWhiteSpace(config.Draft.Project);ProjectTitle.Text=noProject?"还没有选择项目":Path.GetFileName(config.Draft.Project.TrimEnd('\\','/')) is {Length:>0} title?title:config.Draft.Project;
             ProjectGuide.Text=noProject?"三步开始：① 选择或拖入项目文件夹　② 勾选要启动的 Agent　③ 点右下角「启动」":"把别的文件夹拖进来也可以切换项目";
+            ProjectGuide.Visibility=noProject?Visibility.Visible:Visibility.Collapsed;
             Recent.ItemsSource=config.RecentProjects;Recent.SelectedIndex=-1;Recent.Visibility=config.RecentProjects.Count>0?Visibility.Visible:Visibility.Collapsed;
             DirectoryMode.SelectedIndex=config.Draft.DirectoryMode switch{"prepared"=>1,"shared"=>2,_=>0};Layout.SelectedIndex=config.Draft.Layout=="horizontal"?1:0;
             DirectoryHelp.Text=DirectoryModeHelp();
@@ -173,17 +174,10 @@ public partial class MainWindow : Window
             foreach(var name in config.Templates.Keys)Templates.Items.Add(new ComboBoxItem{Content=name,Tag=name});Templates.SelectedIndex=0;
             SlotList.Children.Clear();commandLabels.Clear();
             foreach(var slot in config.Draft.Slots)AddSlot(slot);
-            AddButton.IsEnabled=config.Draft.Slots.Count<4;
-            Preview.Children.Clear();Preview.RowDefinitions.Clear();Preview.ColumnDefinitions.Clear();var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
-            var columns=active.Length<=1||active.Length==2&&config.Draft.Layout=="horizontal"?1:2;var rows=active.Length>2||active.Length==2&&columns==1?2:1;
-            for(var i=0;i<columns;i++)Preview.ColumnDefinitions.Add(new());for(var i=0;i<rows;i++)Preview.RowDefinitions.Add(new());
-            for(var i=0;i<active.Length;i++)
-            {
-                var slot=active[i];var pane=CreatePreviewPane(slot);
-                Grid.SetColumn(pane,columns==1?0:active.Length==3&&i>0?1:i%2);Grid.SetRow(pane,active.Length==3?Math.Max(0,i-1):active.Length==4?i/2:columns==1?i:0);if(active.Length==3&&i==0)Grid.SetRowSpan(pane,2);Preview.Children.Add(pane);
-            }
-            if(active.Length==0)Preview.Children.Add(new TextBlock{Text="勾选 Agent 后，这里实时预览窗格布局",Foreground=new SolidColorBrush(Color.FromRgb(165,171,182)),VerticalAlignment=VerticalAlignment.Center,HorizontalAlignment=HorizontalAlignment.Center});Layout.IsEnabled=active.Length==2;
-            SelectionSummary.Text=$"已选 {active.Length} 个，共 {config.Draft.Slots.Count} 个";PaneCount.Text=$"{active.Length} 个窗格";ArrangePanels();
+            AddButton.IsEnabled=config.Draft.Slots.Count<ResourcePolicy.MaxSlots;
+            var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
+            RenderMultipanePreview(active);Layout.IsEnabled=active.Length==2;
+            PaneCount.Text=$"{active.Length} 个窗格";ArrangePanels();
             UpdateLaunch();
         }
         finally{rendering=false;}
@@ -231,7 +225,7 @@ public partial class MainWindow : Window
         var position=config.Draft.Slots.IndexOf(slot)+1;
         var row=new Grid{Margin=new(0,8,0,8)};row.RowDefinitions.Add(new(){Height=GridLength.Auto});row.RowDefinitions.Add(new(){Height=GridLength.Auto});
         row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});
-        var enabled=new CheckBox{IsChecked=slot.Enabled,VerticalAlignment=VerticalAlignment.Center,Margin=new(16,0,8,0),MinWidth=22};
+        var enabled=new CheckBox{IsChecked=slot.Enabled,VerticalAlignment=VerticalAlignment.Center,Margin=new(16,0,8,0),MinWidth=28,MinHeight=36,ToolTip="仅勾选项会启动；取消勾选不结束已运行的会话"};
         AutomationProperties.SetName(enabled,$"第 {position} 项本次启动");
         // Checked/Unchecked (not Click) so UIA TogglePattern and assistive tech take the same path as mouse/keyboard.
         void OnToggled(object _,RoutedEventArgs __){if(rendering)return;var value=enabled.IsChecked==true;if(!Edit(d=>d.Slots.Single(s=>s.Id==slot.Id).Enabled=value)){rendering=true;enabled.IsChecked=!value;rendering=false;}}
@@ -240,15 +234,15 @@ public partial class MainWindow : Window
         var choices=FilterChoices(AgentChoices(),slot.AgentId);
         var choice=new ComboBox{ItemsSource=choices,DisplayMemberPath="Label",SelectedValuePath="Id",SelectedValue=slot.AgentId,VerticalAlignment=VerticalAlignment.Center,MinWidth=180,MaxWidth=240,MinHeight=36};AutomationProperties.SetName(choice,$"第 {position} 项 Agent");TextSearch.SetTextPath(choice,"Name");
         choice.SelectionChanged+=(_,_)=>{if(rendering||choice.SelectedValue is not string id)return;if(Edit(d=>d.Slots.Single(s=>s.Id==slot.Id).AgentId=id)){config.RecentAgents.Remove(id);config.RecentAgents.Insert(0,id);config.RecentAgents=config.RecentAgents.Take(9).ToList();QueueSave();RefreshAgentChoices();}else{rendering=true;choice.SelectedValue=slot.AgentId;rendering=false;}};Grid.SetColumn(choice,2);row.Children.Add(choice);
-        var command=new TextBlock{Text=slot.Enabled?"正在检查…":"未勾选",Foreground=(Brush)FindResource("Muted"),FontSize=12,Margin=new(0,4,12,0),TextWrapping=TextWrapping.Wrap};commandLabels[slot.Id]=command;Grid.SetColumn(command,2);Grid.SetColumnSpan(command,4);Grid.SetRow(command,1);row.Children.Add(command);
+        var command=new TextBlock{Text=slot.Enabled?"正在检查…":"未勾选 · 不启动、不预约",Foreground=(Brush)FindResource("Muted"),FontSize=12,Margin=new(16,4,12,0),TextWrapping=TextWrapping.Wrap};commandLabels[slot.Id]=command;Grid.SetColumnSpan(command,6);Grid.SetRow(command,1);row.Children.Add(command);
         command.SetResourceReference(TextBlock.ForegroundProperty,"Muted");
-        var detail=new Button{Content="详情",Style=(Style)FindResource("QuietButton"),Padding=new(8,4,8,4),VerticalAlignment=VerticalAlignment.Center};AutomationProperties.SetName(detail,$"第 {position} 项详情");
+        var detail=new Button{Content="详情",ToolTip="程序路径、启动参数、工作目录与分工备注",Style=(Style)FindResource("QuietButton"),Padding=new(8,4,8,4),VerticalAlignment=VerticalAlignment.Center};AutomationProperties.SetName(detail,$"第 {position} 项详情");
         detail.Click+=(_,_)=>EditSlot(slot.Id);Grid.SetColumn(detail,4);row.Children.Add(detail);
         var actions=new MenuButton(slot,position);Grid.SetColumn(actions,5);row.Children.Add(actions);
         row.RowDefinitions.Add(new(){Height=GridLength.Auto});
-        row.SizeChanged+=(_,_)=>{var compact=row.ActualWidth<480;Grid.SetColumnSpan(choice,compact?4:1);Grid.SetRow(detail,compact?1:0);Grid.SetColumn(detail,compact?2:4);Grid.SetRow(actions,compact?1:0);Grid.SetRow(command,compact?2:1);Grid.SetColumn(command,compact?0:2);Grid.SetColumnSpan(command,compact?6:4);command.Margin=compact?new(16,4,12,0):new(0,4,12,0);};
-        var directory=new TextBlock{Text=slot.RequiresDirectory&&slot.Directory.Length==0?"需要指定独立目录":slot.Directory.Length>0?"独立指定目录 · "+slot.Directory:"使用项目目录 · 可拖入文件夹单独指定",Style=(Style)FindResource("Caption"),Margin=new(16,4,12,0)};
-        row.RowDefinitions.Add(new(){Height=GridLength.Auto});Grid.SetRow(directory,3);Grid.SetColumnSpan(directory,6);row.Children.Add(directory);
+        var directory=new TextBlock{Text=slot.RequiresDirectory&&slot.Directory.Length==0?"需要指定目录":slot.Directory.Length>0?"独立目录 · "+slot.Directory:"项目目录",ToolTip=slot.Directory.Length>0?slot.Directory:"继承项目目录；可拖入文件夹，或在详情中单独指定",Style=(Style)FindResource("Caption"),TextWrapping=TextWrapping.NoWrap,TextTrimming=TextTrimming.CharacterEllipsis,VerticalAlignment=VerticalAlignment.Center,Margin=new(12,0,8,0)};
+        Grid.SetColumn(directory,3);row.Children.Add(directory);
+        row.SizeChanged+=(_,_)=>{var compact=row.ActualWidth<480;Grid.SetColumnSpan(choice,compact?4:1);Grid.SetRow(detail,compact?1:0);Grid.SetColumn(detail,compact?2:4);Grid.SetRow(actions,compact?1:0);Grid.SetRow(command,compact?2:1);Grid.SetRow(directory,compact?1:0);Grid.SetColumn(directory,compact?0:3);Grid.SetColumnSpan(directory,compact?2:1);directory.Margin=compact?new(16,0,8,0):new(12,0,8,0);};
         var container=new Border{BorderBrush=(Brush)FindResource("Line"),BorderThickness=new(0,0,0,position<config.Draft.Slots.Count?1:0),Child=row};AttachSlotDrag(container,number,directory,slot,position);SlotList.Children.Add(container);
     }
     private sealed class MenuButton : ContentControl
@@ -261,6 +255,8 @@ public partial class MainWindow : Window
             AutomationProperties.SetName(button,$"第 {position} 项更多操作");
             var items=new List<(MenuItem Item,Func<bool> Enabled)>();
             Menu("上移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>0)(d.Slots[i-1],d.Slots[i])=(d.Slots[i],d.Slots[i-1]);}),()=>position>1);Menu("下移",()=>Owner.Edit(d=>{var i=d.Slots.FindIndex(s=>s.Id==slot.Id);if(i>=0&&i<d.Slots.Count-1)(d.Slots[i+1],d.Slots[i])=(d.Slots[i],d.Slots[i+1]);}),()=>position<Owner.config.Draft.Slots.Count);Menu("移除",()=>{var owner=Owner;var index=owner.config.Draft.Slots.FindIndex(s=>s.Id==slot.Id);if(index<0)return;var removed=owner.config.Draft.Slots[index];if(!owner.Edit(d=>d.Slots.RemoveAll(s=>s.Id==removed.Id)))return;owner.ProgressText.Text="已移除配置，不影响现有会话。";owner.SessionExpander.IsExpanded=true;owner.RememberRemoval(removed,index);},()=>Owner.config.Draft.Slots.Count>1);
+            Menu("将此项 Agent 应用到后续窗格",()=>Owner.ApplyAgentToSlots(slot.Id,false),()=>position<Owner.config.Draft.Slots.Count);
+            Menu("将此项 Agent 应用到全部窗格",()=>Owner.ApplyAgentToSlots(slot.Id,true),()=>Owner.config.Draft.Slots.Count>1);
             button.Click+=(_,_)=>{foreach(var (item,enabled) in items)item.IsEnabled=enabled();menu.PlacementTarget=button;menu.IsOpen=true;};
             Content=button;
             void Menu(string text,Action action,Func<bool> enabled){var item=new MenuItem{Header=text};item.Click+=(_,_)=>action();menu.Items.Add(item);items.Add((item,enabled));}
@@ -271,6 +267,7 @@ public partial class MainWindow : Window
     private async Task DiscoverCatalogAsync()
     {
         if(discovering)return;discovering=true;DiscoverButton.IsEnabled=false;DiscoveryStatus.Text="正在查找 PATH 与常见安装目录，不会启动 CLI…";
+        commandLabelCache.Clear();
         try
         {
             discoveredInstalls=await Task.Run(()=>{var directories=Commands.InstallSearchDirs();return Agents.All.Where(a=>a.Command.Length>0).ToDictionary(a=>a.Id,a=>Commands.DiscoverInstalls(a.Command,directories).ToArray());});
@@ -307,7 +304,7 @@ public partial class MainWindow : Window
             {
                 var position=draft.Slots.IndexOf(slot)+1;
                 string detail;string? resolvedPath=null;
-                try{var cmd=await Task.Run(()=>Commands.Resolve(slot.AgentId,slot.Current));resolvedPath=cmd.Executable;detail="找到命令 · 版本未验证";}
+                try{resolvedPath=await ResolveCommandLabelAsync(slot);detail="找到命令 · 版本未验证";}
                 catch(Exception e)when(e is not OutOfMemoryException){detail=e.Message;errors.Add($"第 {position} 项：{detail}");}
                 var directory=string.IsNullOrWhiteSpace(slot.Directory)?draft.Project:slot.Directory;
                 if(string.IsNullOrWhiteSpace(directory))detail+=" · 未设置工作目录";
@@ -316,6 +313,7 @@ public partial class MainWindow : Window
                     try{await Task.Run(()=>PhysicalDirectory.Resolve(directory));detail+=" · 目录已核对";}
                     catch(Exception e)when(e is not OutOfMemoryException){detail+=" · 目录不可用";errors.Add($"第 {position} 项目录不可用：{e.Message}");}
                 }
+                detail+=" · "+SlotCostText(slot);
                 labels[slot.Id]=(detail,resolvedPath??detail);
             }
             if(draft.Revision!=config.Draft.Revision){pendingCommandCheck=config.Draft.Copy();continue;}
@@ -335,8 +333,8 @@ public partial class MainWindow : Window
         var explicitDirectoryMissing=config.Draft.Slots.Any(s=>s.Enabled&&s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory));
         var missing=explicitDirectoryMissing||config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
-        LaunchButton.Content=busy?"正在处理…":$"启动 {count} 个 Agent";
-        LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&admission.Launchable&&!admissionBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
+        LaunchButton.Content=busy?"正在处理…":previewOnly?$"检查资源并启动 {count} 个 Agent":$"启动 {count} 个 Agent";
+        LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&(admission.Launchable||IsPreviewStale)&&!admissionBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
         LaunchHint.Text=closeRequested?"正在关闭窗口，等待本次操作与配置保存完成…":
             launchFinalizing&&launchStopping||launchCancellation?.IsCancellationRequested==true||!cancelTask.IsCompleted?"正在停止后续步骤并核对撤销结果，暂不能再次启动":
             launchFinalizing?"正在完成本次启动收尾；可以编辑配置，暂不能再次启动":
@@ -347,17 +345,15 @@ public partial class MainWindow : Window
             pendingProject?"项目路径输入尚未应用；请按 Enter 或移开焦点完成校验":
             explicitDirectoryMissing?"通用组合需要重新指定独立目录，请打开对应 Agent 的详情":
             missing?"先选择项目文件夹":count==0?"先勾选至少一个 Agent":
-            admissionBlocked?admissionBlockedReason!:admission.Kind==AdmissionKind.Deny?admission.Reason:
+            admissionBlocked?admissionBlockedReason!:admission.Kind==AdmissionKind.Deny&&!IsPreviewStale?admission.Reason:
             !SaveHealthy?saveError!=null?"配置尚未保存："+saveError:"正在保存配置…":
             validationError.Length>0?validationError:
             status?.Ok!=true?"正在等待后台检查就绪，暂时不能启动":
             commandsChecking?"正在检查命令和目录":
-            LaunchButton.IsEnabled?"检查全部通过，可以启动":"本次配置已提交，暂不能再次启动";
+            LaunchButton.IsEnabled?previewOnly?"本机预览不是启动授权；点击后由监控器重新核验":admission.Kind==AdmissionKind.RequireWaiver?"硬保护通过；准备完成后需要一次性资源确认":"检查全部通过，可以启动":"本次配置已提交，暂不能再次启动";
         LaunchHint.Foreground=(Brush)FindResource(LaunchButton.IsEnabled?"Ink":"Muted");
-        var jobGib=GiB((config.Draft.Resource?.JobMemoryLimit??ResourcePolicy.DefaultJobMemoryLimit)* (ulong)Math.Max(count,0));
-        if(status?.Memory is {} m){AvailableValue.Text=$"{GiB(m.Available)} GiB";BudgetValue.Text=$"{jobGib} GiB";ResourceText.Text=(admissionBlocked?admissionBlockedReason!:admission.Reason)+$" · {m.At.LocalDateTime:HH:mm:ss} 采样";}
-        else{AvailableValue.Text="—";BudgetValue.Text=$"{jobGib} GiB";ResourceText.Text="资源检测不可用，暂缓启动";}
         if(status?.Entries?.Any(e=>!Store.IsTerminal(e))==true)SessionExpander.IsExpanded=true;
+        UpdateMultipaneSummary(admission);UpdatePollingInterval();
     }
     private static string GiB(ulong value)=>(value/(double)ResourcePolicy.GiB).ToString("F1");
     private static AdmissionDecision DecideAdmission(Draft draft,MemorySnapshot? memory,IEnumerable<ControlEntry>? entries,bool includeGitPreparation=false)
@@ -378,29 +374,9 @@ public partial class MainWindow : Window
     private string? commError;
     private async Task RefreshAsync()
     {
-        if(refreshing)return;refreshing=true;
-        var requestGeneration=submissionGeneration;
-        try
-        {
-            var response=await Ipc.EnsureMonitorAsync();
-            // A request begun before a newer reservation cannot describe that submission, even if it arrives later.
-            if(requestGeneration!=submissionGeneration)return;
-            status=response;
-            // Successful status includes all active entries, but terminal history may be omitted or pruned.
-            if(status.Ok&&!status.More&&status.Entries is {} entries&&submittedAttempts.Length>0)
-            {
-                submittedAttempts=submittedAttempts.Where(id=>entries.Any(e=>e.Plan.Id==id&&e.State=="Pending")).ToArray();
-                if(submittedAttempts.Length==0)submittedRevision=-1;
-            }
-            RenderSessions();UpdateLaunch();
-            var err=status.Ok?null:status.Message;if(commError!=null&&ErrorText.Text==commError)ErrorText.Text="";commError=err;if(err!=null)ErrorText.Text=err;
-        }
-        catch(Exception e)when(e is IOException or OperationCanceledException or TimeoutException)
-        {
-            if(requestGeneration!=submissionGeneration)return;
-            status=null;commError="监控器不可用 · "+e.Message;ErrorText.Text=commError;UpdateLaunch();
-        }
-        finally{refreshing=false;}
+        if(resourceRefreshTask is {} pending){await pending;return;}
+        var task=RefreshMonitorAsync();resourceRefreshTask=task;
+        try{await task;}finally{if(ReferenceEquals(resourceRefreshTask,task))resourceRefreshTask=null;}
     }
     private void RenderSessions()
     {
@@ -426,12 +402,12 @@ public partial class MainWindow : Window
     private void RenderSessionsNow(){sessionSignature=null;RenderSessions();}
     private void RememberRemoval(Slot slot,int index)
     {
-        undoRemovals.Insert(0,(slot.Copy(),index));while(undoRemovals.Count>4)undoRemovals.RemoveAt(undoRemovals.Count-1);RenderSessionsNow();
+        undoRemovals.Insert(0,(slot.Copy(),index));while(undoRemovals.Count>ResourcePolicy.MaxSlots)undoRemovals.RemoveAt(undoRemovals.Count-1);RenderSessionsNow();
     }
     private void UndoRemoval((Slot Slot,int Index) state)
     {
         if(!undoRemovals.Contains(state))return;
-        if(config.Draft.Slots.Count>=4){ProgressText.Text="已有 4 项，无法撤销移除；请先移除其他项。";return;}
+        if(config.Draft.Slots.Count>=ResourcePolicy.MaxSlots){ProgressText.Text="已有 16 项，无法撤销移除；请先移除其他项。";return;}
         if(config.Draft.Slots.Any(s=>s.Id==state.Slot.Id)){undoRemovals.Remove(state);RenderSessionsNow();return;}
         if(Edit(d=>d.Slots.Insert(Math.Min(state.Index,d.Slots.Count),state.Slot.Copy()))){undoRemovals.Remove(state);ProgressText.Text="已撤销移除，配置已恢复。";}
         RenderSessionsNow();
@@ -439,7 +415,7 @@ public partial class MainWindow : Window
     private void SetConfigLocked(bool locked)
     {
         ProjectPath.IsEnabled=!locked;Recent.IsEnabled=!locked;Templates.IsEnabled=!locked;AgentSearch.IsEnabled=!locked;SlotList.IsEnabled=!locked;DirectoryMode.IsEnabled=!locked;
-        ChooseProjectButton.IsEnabled=!locked;SaveTemplateButton.IsEnabled=!locked;DiscoverButton.IsEnabled=!locked&&!discovering;AddButton.IsEnabled=!locked&&config.Draft.Slots.Count<4;Layout.IsEnabled=!locked&&config.Draft.Slots.Count(s=>s.Enabled)==2;
+        ChooseProjectButton.IsEnabled=!locked;SaveTemplateButton.IsEnabled=!locked;DiscoverButton.IsEnabled=!locked&&!discovering;AddButton.IsEnabled=!locked&&config.Draft.Slots.Count<ResourcePolicy.MaxSlots;Layout.IsEnabled=!locked&&config.Draft.Slots.Count(s=>s.Enabled)==2;
     }
     private void SetBusy(bool value){busy=value;CancelButton.IsEnabled=value&&launchCancellation!=null;SetConfigLocked(value);UpdateLaunch();}
     private void UnlockForCleanup()
@@ -512,7 +488,7 @@ public partial class MainWindow : Window
         var settings=config.Draft.Resource??new ResourceSettings();
         var policy=ResourcePolicy.SnapshotFor(settings,memory.Total,memory.CommitLimit);
         ResourcePolicy.ValidateSettings(settings,memory.Total,memory.CommitLimit);
-        var slots=items.Select(i=>i.Id).ToArray();
+        var slots=items.All(i=>i.Kind=="git")||items.Any(i=>i.RetryOf!=null)?config.Draft.Slots.Where(s=>s.Enabled).Select(s=>s.Id).ToArray():items.Select(i=>i.SourceSlotId??throw new IOException("旧启动记录缺少稳定槽身份，请从配置重新启动。")).ToArray();
         return (policy,ResourcePolicy.PolicyHash(policy),ResourcePolicy.PlanDigest(items),config.Draft.Revision,slots);
     }
     private Task RetrySessionAsync(Guid id)
@@ -531,8 +507,9 @@ public partial class MainWindow : Window
             if(previous.State is not ("FailedBeforeStart" or "Revoked"))throw new IOException("不能证明此项未运行，已阻止重复提交。");
             var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));
             var retry=previous.Plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=previous.Plan.Id};
+            var waiverId=await AuthorizePlansAsync([retry]);
             var retryBindings=ReservationBindings([retry]);
-            var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token,UnlockForCleanup,retryBindings.Policy,retryBindings.Revision,retryBindings.Hash,retryBindings.Digest,retryBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
+            var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token,UnlockForCleanup,retryBindings.Policy,retryBindings.Revision,retryBindings.Hash,retryBindings.Digest,retryBindings.Slots,waiverId);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=config.Draft.Revision;submittedAttempts=[retry.Id];submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
             try{await Task.Run(()=>Commands.SubmitTerminal(terminal,[retry],"vertical"));}
@@ -554,21 +531,22 @@ public partial class MainWindow : Window
         launchCancellation=new();SetBusy(true);ErrorText.Text="";
         try
         {
-            await CheckCommandsAsync();if(validationError.Length>0)throw new IOException(validationError);
+            await CheckFreshCommandsAsync();if(validationError.Length>0)throw new IOException(validationError);
             await saveTask;if(!SaveHealthy)throw new IOException(saveError!=null?"先解决配置保存失败，再启动。":"正在保存配置，请稍候。");
             var draft=config.Draft.Copy();
             var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));await RefreshAsync();
             if(status?.Ok!=true)throw new IOException(status?.Message??"监控状态不可用");
             var admissionBlocked=status?.AdmissionBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
-            var admission=DecideAdmission(draft,status?.Memory??throw new IOException("资源不可用"),status?.Entries,includeGitPreparation:true);if(admission.Kind==AdmissionKind.Deny)throw new IOException(admission.Reason);if(admission.Kind==AdmissionKind.RequireWaiver)throw new IOException("需要有效确认授权。");
+            var admission=DecideAdmission(draft,status?.Memory??throw new IOException("资源不可用"),status?.Entries,includeGitPreparation:true);if(admission.Kind==AdmissionKind.Deny)throw new IOException(admission.Reason);
             ProgressText.Text="正在核对命令和工作目录…";
             // Active agent workspaces are the monitor's own reserve precondition; checking them here keeps an occupied destination from leaving a worktree and branch behind.
             var activeWorkspaces=status?.Entries?.Where(x=>!Store.IsTerminal(x)&&x.Plan.Kind=="agent").Select(x=>x.Plan.Workspace).ToArray()??[];
-            var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token,activeWorkspaces));
+            var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token,activeWorkspaces,items=>Dispatcher.InvokeAsync(()=>AuthorizePlansAsync(items)).Task.Unwrap()));
             launchCancellation.Token.ThrowIfCancellationRequested();
             var planned=plans.ToArray();
+            var waiverId=await AuthorizePlansAsync(planned);
             var launchBindings=ReservationBindings(planned);
-            var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
+            var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots,waiverId);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
             try{await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout));}
@@ -599,7 +577,7 @@ public partial class MainWindow : Window
     }
     private void ChooseClick(object sender,RoutedEventArgs e){if(busy||readOnly)return;var picker=new OpenFolderDialog{Title="选择项目文件夹"};if(picker.ShowDialog(this)==true)SelectProject(picker.FolderName);}
     private void RecentChanged(object sender,SelectionChangedEventArgs e){if(!rendering&&Recent.SelectedItem is string path)SelectProject(path);}
-    private void AddClick(object sender,RoutedEventArgs e){if(config.Draft.Slots.Count<4)Edit(d=>d.Slots.Add(new()));}
+    private void AddClick(object sender,RoutedEventArgs e){if(config.Draft.Slots.Count<ResourcePolicy.MaxSlots)Edit(d=>d.Slots.Add(new()));}
     private void LayoutChanged(object sender,SelectionChangedEventArgs e){if(Layout.SelectedItem is ComboBoxItem {Tag:string value})Edit(d=>d.Layout=value);}
     private void DirectoryChanged(object sender,SelectionChangedEventArgs e){if(DirectoryMode.SelectedItem is ComboBoxItem {Tag:string value})Edit(d=>d.DirectoryMode=value);}
     private void TemplateChanged(object sender,SelectionChangedEventArgs e)
@@ -622,7 +600,7 @@ public partial class MainWindow : Window
         var dialog=new FormWindow(this,$"{Agents.Get(slot.AgentId).Name} · 参数与目录",fields.ToArray(),"切换 Agent 会保留各自的程序和参数。取消不修改配置。",suggestions:new(){["exe"]=[..discovered]},argumentLists:new(){["args"]=profile.Arguments});
         if(dialog.ShowDialog()==true){if(revision!=config.Draft.Revision){ErrorText.Text="配置已改变，请重新打开编辑。";return;}Edit(d=>{var target=d.Slots.Single(s=>s.Id==id);target.Profiles[target.AgentId]=new(){Executable=dialog.Values["exe"].Trim(),Arguments=dialog.ArgumentValues["args"]};if(target.AgentId=="custom")target.CustomName=string.IsNullOrWhiteSpace(dialog.Values["name"])?null:dialog.Values["name"].Trim();target.Directory=dialog.Values["cwd"].Trim();if(dialog.Values.GetValueOrDefault("inheritDirectory")=="true")target.RequiresDirectory=false;target.Note=dialog.Values["note"];});}
     }
-    private async void ResourceClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>{await RefreshAsync();if(status?.Memory is not {} m)return;MessageBox.Show(this,$"采样时间：{m.At.LocalDateTime:HH:mm:ss}\n可用物理内存：{GiB(m.Available)} GiB / 共 {GiB(m.Total)} GiB\n系统提交余量：{GiB(m.CommitAvailable)} GiB\n整机 CPU：{m.CpuPercent:F1}%（受管进程总和上限 35%）\n预算：每个 Agent 2 GiB；每次目录准备 1 GiB\n进行中的预约：{status.Entries?.Count(x=>!Store.IsTerminal(x))??0}\n\n内存超额分配可能让工具失败。保护覆盖受管子进程，不控制其他程序。资源恢复后会自动解除阻止，但不会替你自动启动。","资源详情");});
+    private async void ResourceClick(object sender,RoutedEventArgs e)=>await GuardAsync(ShowResourceSettingsAsync);
     private FormWindow CreateSettingsDialog()=>new(this,"设置",[("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates});
     private async void SettingsClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
     {

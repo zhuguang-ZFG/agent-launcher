@@ -127,10 +127,10 @@ public partial class MainWindow
         Check("CR09 older undo restores after session render",config.Draft.Slots.Any(slot=>slot.Id==oldest));
         await RefreshAsync();
         undoRemovals.Clear();config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
-        var refusedSlot=config.Draft.Slots[0].Id;ReviewRemoveFirstSlot(this);AddClick(this,new RoutedEventArgs());
+        var refusedSlot=config.Draft.Slots[0].Id;ReviewRemoveFirstSlot(this);while(config.Draft.Slots.Count<ResourcePolicy.MaxSlots)AddClick(this,new RoutedEventArgs());
         var refusedUndo=ReviewFind<Button>(Sessions).FirstOrDefault(button=>button.Content as string=="撤销移除");
         refusedUndo!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        Check("CR09 capacity refusal keeps undo retryable",config.Draft.Slots.Count==4&&config.Draft.Slots.All(slot=>slot.Id!=refusedSlot)&&ProgressText.Text.Contains("无法撤销"));
+        Check("CR09 capacity refusal keeps undo retryable",config.Draft.Slots.Count==ResourcePolicy.MaxSlots&&config.Draft.Slots.All(slot=>slot.Id!=refusedSlot)&&ProgressText.Text.Contains("无法撤销"));
         status=new Response(true,"healthy",[changed],healthy);RenderSessions();
         Check("CR09 capacity-refused undo survives session render",ReviewFind<Button>(Sessions).Any(button=>button.Content as string=="撤销移除"));
         ReviewRemoveFirstSlot(this);refusedUndo.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));

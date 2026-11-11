@@ -127,7 +127,7 @@ public static class Ipc
         {
             if(++frames>MaxResponseFrames)throw new IOException("协议分页帧数量超出边界。");
             var nextFrame=await ReadFrameAsync<Response>(stream,ct);var next=nextFrame.Message;
-            if(next.Ok!=first.Ok||next.Message!=first.Message||next.Memory!=first.Memory||next.Epoch!=first.Epoch||next.AdmissionBlockedReason!=first.AdmissionBlockedReason)throw new IOException("协议分页帧不一致，已拒绝混合响应。");
+            if(next.Ok!=first.Ok||next.Message!=first.Message||next.Memory!=first.Memory||next.Epoch!=first.Epoch||next.AdmissionBlockedReason!=first.AdmissionBlockedReason||next.StatusSignature!=first.StatusSignature||next.Unchanged!=first.Unchanged||next.RootCpuRate!=first.RootCpuRate)throw new IOException("协议分页帧不一致，已拒绝混合响应。");
             if(next.Entries is not {Length:>0})throw new IOException("协议分页帧缺少记录。");
             bytes+=nextFrame.Size;
             if(bytes>MaxResponseBytes)throw new IOException("协议分页响应超出边界。");
@@ -176,14 +176,15 @@ public static class Ipc
         if(size is <1 or >FrameLimit)throw new IOException("协议帧长度无效。");
         var bytes=new byte[size];await stream.ReadExactlyAsync(bytes,ct);return (JsonSerializer.Deserialize<T>(bytes,Store.Json)??throw new IOException("协议帧为空。"),size);
     }
-    public static async Task<Response> EnsureMonitorAsync()
+    public static async Task<Response> EnsureMonitorAsync(string? statusEpoch=null,string? statusSignature=null)
     {
+        var request=new Request("status",Guid.NewGuid(),StatusEpoch:statusEpoch,StatusSignature:statusSignature);
         using var probe=new CancellationTokenSource(400);
-        try{return await SendAsync(new("status",Guid.NewGuid()),probe.Token);}catch(TimeoutException){}catch(OperationCanceledException){}catch(IOException){}
+        try{return await SendAsync(request,probe.Token);}catch(TimeoutException){}catch(OperationCanceledException){}catch(IOException){}
         if(!MonitorRunning())StartMonitor();
-        return await SendAsync(new("status",Guid.NewGuid()));
+        return await SendAsync(request);
     }
-    private static bool MonitorRunning()
+    public static bool MonitorRunning()
     {
         // Deliberately avoids Store.Read: that helper waits up to 2 s for a file mutex, and this probe only decides whether to spawn.
         try
@@ -209,7 +210,7 @@ public static class Ipc
         using var p=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});
     }
 }
-public static class Commands
+public static partial class Commands
 {
     private static readonly string[] ExecutableExtensions=[".exe",".cmd"];
     public static string? FindExe(string name)=>EnumerateInstalls(name,null).FirstOrDefault();
@@ -319,21 +320,5 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
         var alias=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Microsoft","WindowsApps","wt.exe");
         if(File.Exists(alias))return alias;
         return TerminalDiscovery.Installs().FirstOrDefault()??throw new FileNotFoundException("未找到可用的 Terminal 入口。请启用执行别名，或在设置中选择已安装的 WindowsTerminal.exe / wt.exe。");
-    }
-    public static void SubmitTerminal(string terminal,IReadOnlyList<LaunchItem> items,string layout)
-    {
-        var start=new ProcessStartInfo(terminal){UseShellExecute=false};start.ArgumentList.Add("-w");start.ArgumentList.Add("agent-"+items[0].BatchId.ToString("N"));
-        if(items.Count>1)start.ArgumentList.Add("--maximized");
-        var useSystemColors=TerminalAppearance.UseSystemColors;
-        for(var i=0;i<items.Count;i++)
-        {
-            if(i>0){start.ArgumentList.Add(";");if(items.Count==4&&i>=2){start.ArgumentList.Add("move-focus");start.ArgumentList.Add(i==2?"left":"right");start.ArgumentList.Add(";");}}
-            start.ArgumentList.Add(i==0?"new-tab":"split-pane");
-            if(i>0){start.ArgumentList.Add(i==1&&(items.Count>2||layout!="horizontal")?"-V":"-H");start.ArgumentList.Add("--size");start.ArgumentList.Add("0.5");}
-            TerminalAppearance.AddPaneArguments(start,items[i],useSystemColors);
-            start.ArgumentList.Add(Store.WorkerPath.Replace(";","\\;"));start.ArgumentList.Add("pane");start.ArgumentList.Add(items[i].Id.ToString("D"));
-        }
-        start.ArgumentList.Add(";");start.ArgumentList.Add("focus-pane");start.ArgumentList.Add("--target");start.ArgumentList.Add("0");
-        using var process=Process.Start(start)??throw new IOException("无法提交给 Windows Terminal。");
     }
 }

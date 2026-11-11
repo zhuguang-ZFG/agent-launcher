@@ -194,6 +194,11 @@ public static class ResourcePolicy
         var payload = System.Text.Json.JsonSerializer.Serialize((items ?? []).Select(item => new
         {
             Id = item.Id.ToString("N"),
+            BatchId = item.BatchId.ToString("N"),
+            Position = item.Position,
+            SourceSlotId = item.SourceSlotId?.ToString("N"),
+            AgentId = item.AgentId,
+            RetryOf = item.RetryOf?.ToString("N"),
             Kind = item.Kind ?? "agent",
             Name = item.Name ?? "",
             Cwd = item.Cwd ?? "",
@@ -203,6 +208,8 @@ public static class ResourcePolicy
             Executable = item.Command.Executable ?? "",
             Arguments = item.Command.Arguments ?? Array.Empty<string>(),
             Budget = item.Budget,
+            Adapter = item.Command.Adapter,
+            ResourceMode = item.ResourceMode,
             PlanningBytes = item.PlanningBytes ?? 0
         }));
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
@@ -298,6 +305,8 @@ public static class ResourcePolicy
             if (planning != policy.PlanningBytes)
                 throw new InvalidDataException("启动项规划估算与当前策略不一致。");
         }
+        else if (policy.PlanningBytes != DefaultPlanningBytes)
+            throw new InvalidDataException("启动项缺少当前策略的规划估算，请重新准备启动计划。");
     }
 
     public static BudgetItem BudgetOf(LaunchItem plan)

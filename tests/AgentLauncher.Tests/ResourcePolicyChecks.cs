@@ -448,6 +448,13 @@ internal static class ResourcePolicyChecks
             var relocated = shared with { Cwd = otherDir, Workspace = PhysicalDirectory.Workspace(otherDir) };
             if (ResourcePolicy.PlanDigest([shared]) == ResourcePolicy.PlanDigest([relocated]))
                 throw new Exception("Workspace/Cwd was omitted from digest");
+            var bound = shared with { SourceSlotId = Guid.NewGuid(), AgentId = "pi" };
+            if (ResourcePolicy.PlanDigest([bound]) == ResourcePolicy.PlanDigest([bound with { SourceSlotId = Guid.NewGuid() }]))
+                throw new Exception("stable source slot was omitted from digest");
+            if (ResourcePolicy.PlanDigest([bound]) == ResourcePolicy.PlanDigest([bound with { AgentId = "codex" }]))
+                throw new Exception("AgentId was omitted from digest");
+            if (ResourcePolicy.PlanDigest([bound]) == ResourcePolicy.PlanDigest([bound with { Position = 16 }]))
+                throw new Exception("slot position was omitted from digest");
         });
 
         Test("ACC-C02 default floors on large machines are not capped by custom maxima", () =>
@@ -490,6 +497,50 @@ internal static class ResourcePolicyChecks
             try { ResourcePolicy.ValidateLaunchItem(Item("mis", ["--a"], planning: ResourcePolicy.DefaultPlanningBytes, cap: 4 * ResourcePolicy.GiB), policy, total); }
             catch (InvalidDataException) { mismatch = true; }
             if (!mismatch) throw new Exception("item cap disagreed with approved policy");
+        });
+
+        Test("ACC-R02 nondefault custom planning cannot use legacy request omission", () =>
+        {
+            var custom = policy with { Mode = "custom", PlanningBytes = ResourcePolicy.GiB };
+            foreach (var missing in new ulong?[] { null, 0 })
+            {
+                var candidate = Item("custom-missing", [], planning: missing) with { ResourceMode = "custom" };
+                var rejected = false;
+                try { ResourcePolicy.ValidateLaunchItem(candidate, custom, total); }
+                catch (InvalidDataException) { rejected = true; }
+                if (!rejected) throw new Exception("missing custom planning was accepted and counted as " + ResourcePolicy.BudgetOf(candidate).PlanningBytes);
+            }
+            var explicitPlan = Item("custom-explicit", [], planning: ResourcePolicy.GiB) with { ResourceMode = "custom" };
+            ResourcePolicy.ValidateLaunchItem(explicitPlan, custom, total);
+            if (ResourcePolicy.BudgetOf(explicitPlan).PlanningBytes != custom.PlanningBytes) throw new Exception("custom explicit planning changed");
+            var legacy = Item("legacy-active", [], planning: null);
+            if (ResourcePolicy.BudgetOf(legacy).PlanningBytes != ResourcePolicy.DefaultPlanningBytes || ResourcePolicy.BudgetOf(legacy).JobMemoryLimit != legacy.Budget)
+                throw new Exception("legacy active ledger semantics changed");
+            ResourcePolicy.ValidateLaunchItem(legacy, policy, total);
+            ResourcePolicy.ValidateLaunchItem(legacy with { PlanningBytes = 0 }, policy, total);
+            ResourcePolicy.ValidateLaunchItem(legacy, custom with { PlanningBytes = ResourcePolicy.DefaultPlanningBytes }, total);
+            var git = legacy with { Kind = "git", Budget = ResourcePolicy.GitJobMemoryLimit, PlanningBytes = null };
+            ResourcePolicy.ValidateLaunchItem(git, custom, total);
+            if (ResourcePolicy.BudgetOf(git).PlanningBytes != ResourcePolicy.DefaultGitPlanningBytes || ResourcePolicy.BudgetOf(git).JobMemoryLimit != ResourcePolicy.GitJobMemoryLimit)
+                throw new Exception("Git fixed budget changed with custom policy");
+        });
+
+        Test("ACC-R01 waiver binds ordered stable slots and full configuration identity", () =>
+        {
+            var clock = DateTimeOffset.UtcNow;
+            var table = new WaiverTable(() => clock);
+            var require = new AdmissionDecision(AdmissionKind.RequireWaiver, "soft", 0, 0, 0, 0, ResourcePolicy.SoftCap(total), policy.PhysicalFloor, policy.CommitFloor, true);
+            var slots = new[] { Guid.NewGuid(), Guid.NewGuid() };
+            var grant = table.Issue(require, 3, "policy", "plan", slots, clock, "configuration-a");
+            if (grant.WaiverId is not { } first || table.Consume(first, 3, "policy", "plan", slots.Reverse().ToArray(), "configuration-a"))
+                throw new Exception("waiver accepted reordered source slots");
+            grant = table.Issue(require, 3, "policy", "plan", slots, clock, "configuration-a");
+            if (grant.WaiverId is not { } second || table.Consume(second, 3, "policy", "plan", slots, "configuration-b"))
+                throw new Exception("waiver survived a same-revision configuration change");
+            grant = table.Issue(require, 3, "policy", "plan", slots, clock, "configuration-a");
+            table.InvalidateMismatched(3, "policy", "configuration-b");
+            if (table.Count != 0 || grant.WaiverId is not { } third || table.Consume(third, 3, "policy", "plan", slots, "configuration-a"))
+                throw new Exception("changed authority did not invalidate grants");
         });
 
         Test("ACC-R05 begin hard-only check ignores conservative soft overage from later batches", () =>

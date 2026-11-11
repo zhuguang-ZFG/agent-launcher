@@ -16,7 +16,7 @@ public partial class MainWindow
     private async Task ApplyDroppedDirectoriesAsync(string[] paths,Guid? slotId,long revision)
     {
         if(busy||readOnly||checkingDrop)return;
-        if(paths.Length is <1 or >4||slotId!=null&&paths.Length!=1)throw new IOException("顶部最多接收 4 个文件夹；单项只能接收一个文件夹。当前配置未更改。");
+        if(paths.Length<1||paths.Length>ResourcePolicy.MaxSlots||slotId!=null&&paths.Length!=1)throw new IOException($"顶部最多接收 {ResourcePolicy.MaxSlots} 个文件夹；单项只能接收一个文件夹。当前配置未更改。");
         if(ProjectPath.Text!=config.Draft.Project)throw new IOException("项目路径正在编辑，请先完成输入再拖入目录；已保留输入。");
         var inputRevision=projectInputRevision;
         checkingDrop=true;
