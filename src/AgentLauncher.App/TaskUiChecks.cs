@@ -66,6 +66,15 @@ public partial class MainWindow
         TaskConcurrency.SelectedIndex = 0;
         for (var i = 0; i < 50 && taskBook?.MaxRunning != 1; i++) await Task.Delay(100);
         check("ACC-B05 queue concurrency restores to one", taskStore.Load().MaxRunning == 1 && taskBook?.MaxRunning == 1);
+        RenderTasks();
+        await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+        var attemptsBeforeDequeue = taskStore.Load().Attempts.Count;
+        var dequeueButton = FindLogical<Button>(TaskList).FirstOrDefault(button => AutomationProperties.GetName(button) == "移出队列 任务甲");
+        check("ACC-B07 queued task exposes queue-only removal", dequeueButton != null);
+        dequeueButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        for (var i = 0; i < 50 && taskStore.Load().Queue.Count > 0; i++) await Task.Delay(100);
+        check("ACC-B07 removing a queued item keeps attempts and the task record",
+            taskStore.Load().Queue.Count == 0 && taskStore.Load().Attempts.Count == attemptsBeforeDequeue && taskStore.Load().Tasks.Any(task => task.Id == waiting.Id));
         File.WriteAllText(tasksPath, "{\"SchemaVersion\":1,\"Revision\":3,\"Tasks\":\"bad\"}");
         File.WriteAllText(tasksPath + ".bak", JsonSerializer.Serialize(book, Store.Json));
         await LoadTasksAsync();

@@ -66,6 +66,14 @@ public partial class MainWindow
         System.Windows.Automation.AutomationProperties.SetName(StartedCountValue,"已启动进程数 "+StartedCountValue.Text);
         ScalePresets.IsEnabled=!busy&&!readOnly&&!loading&&!closeRequested;ResourceSettingsButton.IsEnabled=!busy&&!loading&&!closeRequested;
         ResourceModeText.Text="资源模式："+(settings.Mode switch{"conservative"=>"保守","custom"=>"自定义",_=>"实用（默认）"});
+        var poolRecords=status?.Pools??[];
+        if(ResourcePolicy.PoolModeOf(settings)==ResourcePolicy.PoolShared)
+        {
+            var poolLimit=ResourcePolicy.PoolLimitOf(settings);
+            PoolSummaryText.Text=$"内存共享池：池上限 {ResourceGiB(poolLimit)} GiB · 单项 Job 上限 {ResourceGiB(settings.JobMemoryLimit)} GiB · 当前占用与峰值：未知（系统未按池上报）";
+            if(poolRecords.Length>0)PoolSummaryText.Text+=$" · 账本保留 {poolRecords.Length} 个池记录";
+        }
+        else PoolSummaryText.Text=$"内存独立：每项各自按 Job 上限 {ResourceGiB(settings.JobMemoryLimit)} GiB 保护，不共用池额度。";
         PerSlotBudgetText.Text=$"每个启用项：规划 {ResourceMiB(settings.PlanningBytes)} MiB / Job 提交上限 {ResourceGiB(settings.JobMemoryLimit)} GiB";
         var planningTotal=(decimal)admission.PlanningRequested+admission.PlanningReserved;var capTotal=(decimal)admission.CapSumRequested+admission.CapSumReserved;
         var sample=status?.Memory;var sampleValid=status?.Ok==true&&admission.SampleValid&&ResourcePolicy.IsSampleValid(sample);

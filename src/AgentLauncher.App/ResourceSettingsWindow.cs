@@ -10,6 +10,8 @@ namespace AgentLauncher.App;
 public sealed class ResourceSettingsWindow : Window
 {
     internal readonly ComboBox ModeChoice=new(){Margin=new(0,4,0,12),SelectedValuePath="Tag"};
+    internal readonly ComboBox PoolChoice=new(){Margin=new(0,4,0,12),SelectedValuePath="Tag"};
+    internal readonly TextBox PoolLimitGiB=new();
     internal readonly TextBox JobLimitGiB=new();
     internal readonly TextBox PlanningMiB=new();
     internal readonly TextBox PhysicalFloorGiB=new();
@@ -46,11 +48,17 @@ public sealed class ResourceSettingsWindow : Window
         ModeChoice.Items.Add(new ComboBoxItem{Content="保守",Tag="conservative"});ModeChoice.Items.Add(new ComboBoxItem{Content="实用（默认）",Tag="practical"});ModeChoice.Items.Add(new ComboBoxItem{Content="自定义",Tag="custom"});
         panel.Children.Add(modeLabel);panel.Children.Add(ModeChoice);
         panel.Children.Add(new TextBlock{Text="保守按软预算严格准入；实用按规划估算准入（默认）；自定义可调整下方资源数值。",Style=(Style)FindResource("Caption"),Margin=new(0,0,0,12)});
+        var poolLabel=new Label{Content="内存并行方式",Target=PoolChoice,Padding=new(0)};AutomationProperties.SetName(PoolChoice,"内存并行方式");
+        PoolChoice.Items.Add(new ComboBoxItem{Content="独立（每项各自上限）",Tag=ResourcePolicy.PoolIndependent});
+        PoolChoice.Items.Add(new ComboBoxItem{Content="共享（同一池额度只计一次）",Tag=ResourcePolicy.PoolShared});
+        panel.Children.Add(poolLabel);panel.Children.Add(PoolChoice);
+        panel.Children.Add(new TextBlock{Text="共享模式把同批次各项放进同一个内存池：池额度只计一次，但池满时整组一起被内核拒绝。独立模式每项各自按上限保护。选择只影响之后的新批次。",Style=(Style)FindResource("Caption"),Margin=new(0,0,0,12)});
         // The reason the numbers are read only stays attached to the numbers themselves.
         panel.Children.Add(Shell(fieldStatus));
         panel.Children.Add(new TextBlock{Text="资源数值",FontWeight=FontWeights.SemiBold,Margin=new(0,0,0,4)});
         var maxJob=Math.Min(ResourcePolicy.MaxJobMemoryLimit,sample.Total);var maxPhysical=Math.Min(ResourcePolicy.MaxCustomPhysicalFloor,sample.Total/2);var maxCommit=Math.Min(ResourcePolicy.MaxCustomCommitFloor,sample.CommitLimit/4);
         Field(JobLimitGiB,$"每项 Job 内存上限（GiB；1～{GiB(maxJob)}）");
+        Field(PoolLimitGiB,$"共享池内存上限（GiB；至少等于每项 Job 上限，最大 8 GiB）");
         panel.Children.Add(new TextBlock{Text="该上限由 Agent、MCP、浏览器和编译等全部工具子进程共享。多工具任务可为新批次提高上限，同时减少并行项；规划估算应反映实际工作负载。",Style=(Style)FindResource("Caption"),Margin=new(0,0,0,12)});
         Field(PlanningMiB,"每项规划估算（MiB；至少 256，不能超过该项 Job 上限）");
         Field(PhysicalFloorGiB,$"物理临界余量（GiB；1.5～{GiB(maxPhysical)}；留空自动，当前默认 {GiB(ResourcePolicy.DefaultPhysicalFloor(sample.Total))}）");
@@ -63,8 +71,9 @@ public sealed class ResourceSettingsWindow : Window
         details.Content=new TextBlock{Text="所有单位均为 1024 进制：1 GiB = 1024 MiB，1 MiB = 1024 × 1024 字节。规划估算不是实测占用；Job 上限是提交上限，不是当前占用。",Margin=new(0,4,0,0)};
         panel.Children.Add(details);
         root.Children.Add(new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled});Content=root;
-        LoadValues(initial);ModeChoice.SelectedValue=initial.Mode;ModeChoice.IsEnabled=!readOnly;apply.IsEnabled=!readOnly;
-        ModeChoice.SelectionChanged+=(_,_)=>{if(SelectedMode!="custom")LoadValues(new ResourceSettings());UpdateEditable();ValidationMessage.Text="";};
+        LoadValues(initial);PoolChoice.SelectedValue=ResourcePolicy.PoolModeOf(initial);ModeChoice.SelectedValue=initial.Mode;ModeChoice.IsEnabled=!readOnly;apply.IsEnabled=!readOnly;
+        ModeChoice.SelectionChanged+=(_,_)=>{if(SelectedMode!="custom"){var keep=SelectedPool;var keptLimit=PoolLimitGiB.Text;LoadValues(new ResourceSettings{Pool=keep,PoolMemoryLimit=keep==ResourcePolicy.PoolShared?initial.PoolMemoryLimit:null});PoolLimitGiB.Text=keptLimit;}UpdateEditable();ValidationMessage.Text="";};
+        PoolChoice.SelectionChanged+=(_,_)=>{if(SelectedPool==ResourcePolicy.PoolShared&&string.IsNullOrWhiteSpace(PoolLimitGiB.Text))PoolLimitGiB.Text=GiB(DefaultPoolLimit());UpdateEditable();ValidationMessage.Text="";};
         UpdateEditable();UiScale.Apply(this);apply.Click+=(_,_)=>{if(TryApplySettings())DialogResult=true;};Loaded+=(_,_)=>ModeChoice.Focus();
         void Field(TextBox input,string label)
         {
@@ -79,16 +88,26 @@ public sealed class ResourceSettingsWindow : Window
         }
     }
     private string SelectedMode=>(ModeChoice.SelectedItem as ComboBoxItem)?.Tag as string??initial.Mode;
+    private string SelectedPool=>(PoolChoice.SelectedItem as ComboBoxItem)?.Tag as string??ResourcePolicy.PoolIndependent;
+    private ulong DefaultPoolLimit()
+    {
+        var job=ulong.TryParse(JobLimitGiB.Text,NumberStyles.AllowDecimalPoint,CultureInfo.CurrentCulture,out var parsed)?(ulong)(parsed*ResourcePolicy.GiB):initial.JobMemoryLimit;
+        return Math.Min(ResourcePolicy.MaxJobMemoryLimit,Math.Max(4*ResourcePolicy.GiB,Math.Max(job,ResourcePolicy.MinJobMemoryLimit)));
+    }
     private static string GiB(ulong bytes)=>(bytes/(decimal)ResourcePolicy.GiB).ToString("0.################",CultureInfo.CurrentCulture);
     private void LoadValues(ResourceSettings settings)
     {
         JobLimitGiB.Text=GiB(settings.JobMemoryLimit);PlanningMiB.Text=(settings.PlanningBytes/(decimal)ResourcePolicy.MiB).ToString("0.################",CultureInfo.CurrentCulture);
         PhysicalFloorGiB.Text=settings.PhysicalFloorOverride is {} physical?GiB(physical):"";CommitFloorGiB.Text=settings.CommitFloorOverride is {} commit?GiB(commit):"";CpuPercent.Text=(settings.CpuRate/100m).ToString("0.##",CultureInfo.CurrentCulture);
+        PoolLimitGiB.Text=settings.PoolMemoryLimit is {} pool?GiB(pool):"";
     }
     private void UpdateEditable()
     {
         var editable=SelectedMode=="custom"&&!readOnly;
         foreach(var box in new[]{JobLimitGiB,PlanningMiB,PhysicalFloorGiB,CommitFloorGiB}){box.IsReadOnly=!editable;box.IsTabStop=editable;}
+        PoolChoice.IsEnabled=!readOnly;PoolChoice.IsTabStop=!readOnly;
+        var poolEditable=editable&&SelectedPool==ResourcePolicy.PoolShared;PoolLimitGiB.IsReadOnly=!poolEditable;PoolLimitGiB.IsTabStop=poolEditable;
+        if(SelectedPool!=ResourcePolicy.PoolShared)PoolLimitGiB.Text="";
         CpuPercent.IsReadOnly=!editable||activeOrUnknown;CpuPercent.IsTabStop=!CpuPercent.IsReadOnly;
         if(activeOrUnknown)CpuPercent.Text=(initial.CpuRate/100m).ToString("0.##",CultureInfo.CurrentCulture);
         fieldStatus.Text=editable
@@ -106,7 +125,7 @@ public sealed class ResourceSettingsWindow : Window
         try
         {
             ResourceSettings next;
-            if(SelectedMode!="custom")next=new(){Mode=SelectedMode};
+            if(SelectedMode!="custom")next=new(){Mode=SelectedMode,Pool=SelectedPool,PoolMemoryLimit=SelectedPool==ResourcePolicy.PoolShared?ReadBytes(PoolLimitGiB.Text,ResourcePolicy.GiB,"共享池上限"):null};
             else
             {
                 if(!int.TryParse(CpuPercent.Text.Trim(),NumberStyles.None,CultureInfo.CurrentCulture,out var percent)||percent is <15 or >80)throw new InvalidDataException("CPU 封顶请输入 15～80 的整数百分比；未应用。 ");
@@ -114,7 +133,8 @@ public sealed class ResourceSettingsWindow : Window
                 {
                     Mode="custom",JobMemoryLimit=ReadBytes(JobLimitGiB.Text,ResourcePolicy.GiB,"Job 内存上限"),PlanningBytes=ReadBytes(PlanningMiB.Text,ResourcePolicy.MiB,"规划估算"),
                     PhysicalFloorOverride=string.IsNullOrWhiteSpace(PhysicalFloorGiB.Text)?null:ReadBytes(PhysicalFloorGiB.Text,ResourcePolicy.GiB,"物理临界余量"),
-                    CommitFloorOverride=string.IsNullOrWhiteSpace(CommitFloorGiB.Text)?null:ReadBytes(CommitFloorGiB.Text,ResourcePolicy.GiB,"提交临界余量"),CpuRate=percent*100
+                    CommitFloorOverride=string.IsNullOrWhiteSpace(CommitFloorGiB.Text)?null:ReadBytes(CommitFloorGiB.Text,ResourcePolicy.GiB,"提交临界余量"),CpuRate=percent*100,
+                    Pool=SelectedPool,PoolMemoryLimit=SelectedPool==ResourcePolicy.PoolShared?ReadBytes(PoolLimitGiB.Text,ResourcePolicy.GiB,"共享池上限"):null
                 };
             }
             if(activeOrUnknown&&next.CpuRate!=initial.CpuRate)throw new InvalidDataException("活动批次仍使用当前 CPU 上限；请保持此值，待任务结束后再修改。");

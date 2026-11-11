@@ -102,6 +102,16 @@ public partial class MainWindow
             check("ACC-U03 active batches allow future memory limits but lock shared CPU",activeDialog.ModeChoice.IsEnabled&&!activeDialog.JobLimitGiB.IsReadOnly&&activeDialog.CpuPercent.IsReadOnly&&activeDialog.Value?.JobMemoryLimit==4*ResourcePolicy.GiB);
             activeDialog.CpuPercent.Text="40";
             check("ACC-U03 programmatic CPU edit cannot bypass active protection",!activeDialog.TryApplySettings()&&activeDialog.Value is null);activeDialog.Close();
+            var poolDialog=new ResourceSettingsWindow(this,new ResourceSettings(),Sample(),false,false);
+            check("ACC-U03 pool mode defaults to independent with no pool limit",Equals(poolDialog.PoolChoice.SelectedValue,ResourcePolicy.PoolIndependent)&&string.IsNullOrEmpty(poolDialog.PoolLimitGiB.Text));
+            poolDialog.ModeChoice.SelectedIndex=2;poolDialog.PoolChoice.SelectedValue=ResourcePolicy.PoolShared;
+            check("ACC-U03 selecting shared fills a pool limit at least the item cap",poolDialog.Value is null&&ulong.TryParse(poolDialog.PoolLimitGiB.Text,System.Globalization.NumberStyles.AllowDecimalPoint,System.Globalization.CultureInfo.CurrentCulture,out var filled)&&filled>=2);
+            poolDialog.JobLimitGiB.Text="4";poolDialog.PoolLimitGiB.Text="2";
+            check("ACC-U03 pool limit below the item cap is rejected",!poolDialog.TryApplySettings()&&poolDialog.Value is null&&poolDialog.ValidationMessage.Text.Length>0);
+            poolDialog.PoolLimitGiB.Text="6";poolDialog.PhysicalFloorGiB.Text="";poolDialog.CommitFloorGiB.Text="";poolDialog.CpuPercent.Text="35";
+            check("ACC-U03 shared pool limit is written as 1024 based bytes",poolDialog.TryApplySettings()&&poolDialog.Value is {Pool:ResourcePolicy.PoolShared,PoolMemoryLimit:6UL*ResourcePolicy.GiB} sharedValue&&sharedValue.JobMemoryLimit==4*ResourcePolicy.GiB);
+            poolDialog.ModeChoice.SelectedIndex=1;poolDialog.TryApplySettings();
+            check("ACC-U03 leaving custom keeps the pool choice and limit",poolDialog.Value is {Mode:"practical",Pool:ResourcePolicy.PoolShared,PoolMemoryLimit:6UL*ResourcePolicy.GiB});poolDialog.Close();
 
             config=Fixture();Healthy();Render();var dropped=Enumerable.Repeat(Store.Root,ResourcePolicy.MaxSlots).ToArray();await ApplyDroppedDirectoriesAsync(dropped,null,config.Draft.Revision);
             check("ACC-L02 sixteen dropped directories are applied atomically",config.Draft.Slots.Count==ResourcePolicy.MaxSlots&&config.Draft.Slots.All(s=>s.Directory==Store.Root));

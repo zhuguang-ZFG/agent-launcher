@@ -595,7 +595,7 @@ powershell -NoProfile -File scripts/test.ps1
 - 设置改为可调整**之后批次**的内存参数；活动 Job 不改，活动期间共享根 CPU 继续锁定。解释额度包括工具子进程。旧 Receipt 无新字段仍可读取，旧 profile 和配置默认值不改。
 - 新增/增强 P02 原生、Receipt 往返和跨批次集成检查；真实夹具先运行 2 GiB 作业，在配置改成 4 GiB 后走正常 waiver/reserve，再启动下一项，最终回执分别证明 2/4 GiB 且都有非零 OS 峰值。新增 WPF 检查验证内存可编辑、CPU 禁改且不能由程序赋值绕过。
 - 验证：完整 `scripts/test.ps1`（含浏览器）exit 0，原生/模型 **69/69**、集成 **0 失败**、WPF **143/143**、原型 **5/5**、浏览器检查全部通过；证据 `artifacts/startup-diagnosis/vibe-s0-gate.txt`、`artifacts/ui/ui-checks.json`（Dpi 120）、`artifacts/integration-results.json`。本轮之前 `-SkipBrowser` 的同套结果见 `omp-authorized-gate.txt`。中间失败保留在 `omp-final-gate.txt` / `omp-sequential-gate.txt`：新夹具启用槽不匹配、软授权缺失已经修正；一次 Git 准备 pipe broken 在后续顺序执行中未再出现，尚无独立根因结论。
-- 生产候选目录 `artifacts/preview-omp-stability` 按当前工作区重建（14 文件），四个程序集 marker 扫描 CLEAN；SHA-256（含参数预设、版本探测、任务队列、共享池创建/回收生命周期与冻结额度）：App `f9f8ce3fdde49503f1593d13a4c10c76e27005fcd29a0b374966620a8d191bcb`、Windows `bb2be1ea314eb3e029c54a91682392352cd1c7c9c53cd40e640a1f67bde5874a`、Worker `9484d345aa4a4a81b0620c41669cc3cb83b35dacedb4a9eba9d2a7cffdc34abd`。当前生产进程与用户配置未替换/修改，仍可能使用 2 GiB 旧限制；交付切换、对应最终提交 CI 与 30 分钟 × 3 轮代表性负载仍属待完成事项。本轮不宣称频繁退出已彻底解决。
+- 生产候选目录 `artifacts/preview-omp-stability` 按当前工作区重建（14 文件），四个程序集 marker 扫描 CLEAN；SHA-256（含参数预设、版本探测、任务队列、共享池创建/回收生命周期、池冻结额度与资源对话框池选择）：App `30aac5807c7724feadf5d32f26b3c76f7ce27e58ccb726d57f7dbdb4b4fbb0b6`、Windows `55d6fab454dcbea5ddf0165abcf47633a7a8cd47f04a8733691e21f880423bb0`、Worker `8c9677764ebd213a77d38556b14094f8458cbc9e2c1038ad5b1da1c9a08560c6`。当前生产进程与用户配置未替换/修改，仍可能使用 2 GiB 旧限制；交付切换、对应最终提交 CI 与 30 分钟 × 3 轮代表性负载仍属待完成事项。本轮不宣称频繁退出已彻底解决。
 - 用户随后要求进入扩展规划阶段，新增 [扩展规格](superpowers/specs/2026-11-11-vibe-workbench-spec.md) 与 [实施计划](superpowers/plans/2026-11-11-vibe-workbench-plan.md)。参数预设、任务队列、共享池、审查中心和 Omp 多会话均为后续计划；稳定性封板为 S0 前置门槛。
 
 ## 23. 参数预设与 CLI 能力核对（2026-11-11）
@@ -644,4 +644,8 @@ powershell -NoProfile -File scripts/test.ps1
 - 集成证据（ACC-S3B01–B03）：B01 共享池只计费一次、内核额度 4 GiB/1 GiB、工厂小额度（池 192 MiB/单项 96 MiB）能拒绝 256 MiB 分配、`[根, 池, 单项]` 链可启动并在回执后结算；B02 直接挂在池下的进程在单项结算后仍持有池与预算，成员退出后池才释放，重启后账本健康；B03 监视器在直接成员存活时崩溃，重启后保留池记录并停用启动，成员退出后仍需人工移除记录才能恢复（名字重开的限制见 ACC-S3P06）。
 - 测试夹具协议：池测试必须在 `Store.AttemptLock` 互斥量内完成 `begin`→创建进程→写回执，且互斥量跨 `await` 会触发 `ReleaseMutex` 线程归属错误，因此该区间使用同步等待；这与 RunPane 的实际持锁顺序一致。
 - 验证（S3.2）：完整 `scripts/test.ps1` exit 0，原生/模型 **90/90**、集成 **0 失败**、WPF **155/155**（Dpi 120）、原型 **5/5**、浏览器检查全部通过；证据 `artifacts/startup-diagnosis/vibe-s3-pool-lifecycle-gate.txt`、`artifacts/ui/ui-checks.json`、`artifacts/integration-results.json`。期间修正两处真实竞态：池标记文件在写入过程中被读会导致“文件被占用”，监控器与测试夹具都改为可共享读并重试；池阻塞提示现在优先于通用未归属提示。
+- 交互（S3.4）：资源模式对话框新增“内存并行方式”（独立/共享）与共享池上限输入。共享模式默认给出不低于单项 Job 上限的池额度，低于单项上限、超过 8 GiB 或低于 1 GiB 都会被拒绝并显示原因；离开自定义模式只重置数值，池选择与上限保留。池模式与上限只作用于之后的新批次，运行中的 Job 不迁移。主窗口新增内存摘要：共享模式显示池上限、单项 Job 上限、当前占用与峰值（系统未按池上报，明确写“未知”）以及账本保留的池记录数；独立模式显示每项独立保护。
+- 状态合同：`Response` 增加 `Pools`（账本池记录，无记录时为 null），并纳入状态签名，客户端缓存能感知池变化；旧客户端忽略该字段，旧 Worker 不返回该字段时界面按“无池记录”显示。
+- 队列移除：任务卡片“移出队列”只删除排队项，不改变任务、尝试记录或运行中的进程；ACC-B07 覆盖“排队项可移除且尝试数不变”。
+- 验证（S3.4）：完整 `scripts/test.ps1` exit 0，原生/模型 90/90、集成 0 失败、WPF 162/162（Dpi 120）、原型 5/5、浏览器检查全部通过；证据：`artifacts/startup-diagnosis/vibe-s34-gate.txt`、`artifacts/ui/ui-checks.json`、`artifacts/integration-results.json`。
 

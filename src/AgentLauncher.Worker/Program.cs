@@ -467,9 +467,9 @@ internal sealed class Monitor : IDisposable
         foreach(var entry in terminal){var size=StatusEntry(entry).Bytes;if(bytes+size>768*1024)break;kept.Add(entry);bytes+=size;}
         kept.Reverse();var omittedReason=UnrepresentableReason(withheld);
         var reason=omittedReason??AdmissionBlockedReason();
-        var signature=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new{Epoch=epoch,Blocked=blocked,Reason=reason,RootCpuRate=rootCpuRate,ReconcileOffered=reconcileOffered,Active=active.Select(e=>StatusEntry(e).Signature),History=kept.Select(e=>StatusEntry(e).Signature)},Store.Json)));
+        var signature=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new{Epoch=epoch,Blocked=blocked,Reason=reason,RootCpuRate=rootCpuRate,ReconcileOffered=reconcileOffered,Active=active.Select(e=>StatusEntry(e).Signature),History=kept.Select(e=>StatusEntry(e).Signature),Pools=ledger.Pools.Select(p=>new{p.Id,p.MemoryLimit})},Store.Json)));
         var unchanged=request?.StatusEpoch==epoch&&request.StatusSignature==signature;
-        return new(blocked==null&&withheld.Length==0,omittedReason??blocked??"监控器已核对",unchanged?null:active.Where(entry=>!withheld.Contains(entry)).Concat(kept).ToArray(),sample,epoch,reason,Unchanged:unchanged,StatusSignature:signature,RootCpuRate:rootCpuRate,ReconcileOffered:reconcileOffered);
+        return new(blocked==null&&withheld.Length==0,omittedReason??blocked??"监控器已核对",unchanged?null:active.Where(entry=>!withheld.Contains(entry)).Concat(kept).ToArray(),sample,epoch,reason,Unchanged:unchanged,StatusSignature:signature,RootCpuRate:rootCpuRate,ReconcileOffered:reconcileOffered,Pools:ledger.Pools.Count==0?null:ledger.Pools.ToArray());
     }
     // Fail-closed, user-confirmed release: settle only entries whose resource group provably no longer exists and whose receipt already proves the whole managed tree exited (Finished) or never ran (FailedBeforeStart). A dead recorded parent alone is not proof: jobs have no KILL_ON_JOB_CLOSE, so descendants may survive the handle loss and cannot be enumerated without it.
     private Response ReconcileRequests()

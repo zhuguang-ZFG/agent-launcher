@@ -92,6 +92,7 @@
          <Button DockPanel.Dock="Right" x:Name="ResourceSettingsButton" Content="资源模式 / 设置" Style="{StaticResource QuietButton}" Click="ResourceClick" VerticalAlignment="Center"/>
         </DockPanel>
         <TextBlock x:Name="ResourceModeText" Text="资源模式：实用（默认）" Style="{StaticResource Caption}" Margin="0,4,0,0"/>
+        <TextBlock x:Name="PoolSummaryText" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="内存池摘要"/>
         <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
          <StackPanel><TextBlock Text="现在可用内存" Style="{StaticResource Caption}"/><TextBlock x:Name="AvailableValue" Text="—" FontFamily="Consolas" FontSize="20" Margin="0,2,0,0"/></StackPanel>
          <StackPanel Grid.Column="1"><TextBlock Text="本次规划" Style="{StaticResource Caption}"/><TextBlock x:Name="BudgetValue" Text="—" FontFamily="Consolas" FontSize="20" Margin="0,2,0,0"/></StackPanel>
