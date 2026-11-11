@@ -29,6 +29,20 @@ Test("P01 rapid native sampling retains a valid CPU interval",()=>{
     }
     Assert(reused>0,"native burst did not exercise an unchanged CPU tick");
 });
+Test("P01 regressing CPU counters preserve the baseline and never renew stale evidence",()=>{
+    var sampler=new Sampler();sampler.Sample();Thread.Sleep(250);var valid=sampler.Sample();
+    Assert(double.IsFinite(valid.CpuPercent),"CPU warmup failed");
+    const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+    var kernel=typeof(Sampler).GetField("kernel",flags)!;var previous=typeof(Sampler).GetField("previous",flags)!;
+    // Put the baseline ahead of the live counter to deterministically exercise a backwards interval.
+    const long futureCounter=long.MaxValue/4;kernel.SetValue(sampler,futureCounter);
+    var cached=sampler.Sample();
+    Assert(cached.CpuPercent==valid.CpuPercent&&cached.At==valid.At,"counter regression discarded or renewed CPU evidence");
+    Assert((long)kernel.GetValue(sampler)! == futureCounter,"regressing counter replaced the valid baseline");
+    previous.SetValue(sampler,valid with{At=DateTimeOffset.UtcNow.AddSeconds(-ResourcePolicy.SampleTtlSeconds-1)});
+    var stale=sampler.Sample();
+    Assert(!ResourcePolicy.IsSampleValid(stale),"repeated counter regression renewed stale evidence");
+});
 Test("P01 unavailable CPU sends a readable fail-closed resource response",()=>{
     foreach(var cpu in new[]{double.NaN,double.PositiveInfinity,double.NegativeInfinity})
     {

@@ -51,9 +51,9 @@ public sealed class Sampler
         var m = new Native.MemoryStatus { Length = (uint)Marshal.SizeOf<Native.MemoryStatus>() };
         Native.Check(Native.GlobalMemoryStatusEx(ref m)); Native.Check(Native.GetSystemTimes(out var i, out var k, out var u));
         var total = k - kernel + u - user;
-        // Back-to-back authorization checks can fall within the same OS CPU tick. Keep the
+        // Back-to-back checks can see unchanged or briefly regressing OS counters. Keep the
         // CPU baseline and its timestamp until counters advance; memory is still read now.
-        if(initialized&&total==0&&previous!=null)
+        if(initialized&&total<=0&&previous!=null)
             return previous with{Total=m.TotalPhysical,Available=m.AvailablePhysical,CommitLimit=m.TotalPage,CommitAvailable=m.AvailablePage};
         var cpu = initialized && total > 0 ? Math.Clamp(100.0 * (total - (i - idle)) / total, 0, 100) : double.NaN;
         idle=i; kernel=k; user=u; initialized=true;

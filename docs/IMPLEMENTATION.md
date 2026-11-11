@@ -578,3 +578,9 @@ powershell -NoProfile -File scripts/test.ps1
 - 完整脚本在 WPF 阶段两次超时，落盘断言指向 ACC-L02：环境 TEMP 为 `D:\Temp\User`，物理路径为 `D:\temp\User`，既有断言使用大小写敏感的字符串相等。使用物理路径拼写的独立测试根重跑原 WPF 检查后 142 项全部通过、exit 0；本次未改该断言。浏览器原型检查执行但受阻于 `CDP timeout: Page.enable`，因此不宣称整条 `scripts/test.ps1` 全绿。
 - 已备份旧 preview 至 `artifacts/startup-diagnosis/preview-before-fix`，生产修复构建为 `artifacts/preview-sampling-fix`，已替换 `artifacts/preview`；桌面原快捷方式仍指向该目录。生产 `AgentLauncher.Windows.dll` SHA-256：`89537208DEE178C2CE48647D3A833FB41836BB33B250D33752FFF3A16244BB33`。四个生产程序集均未发现测试根/模拟采样标记。未手工修改用户配置、control.json 或回执，未提交或推送代码。
 - 后续生产验证：可用内存降至约 3.6 GiB，原四项需要 3 GiB 规划 + 2 GiB 系统余量，正常拒绝；用户明确选择「先启动前两项 Omp + Codex，保留另外两项配置」。通过界面取消第三、四项勾选，保留路径/参数；第一次两项申请因内存瞬时不足在预约前拒绝，核对无新条目后重试。15:13 成功启动 Omp（`D:\Users\monidianlu`，PID 6640）及 Codex 的 Node 入口（`D:\Users\claude`，PID 17772，原生 Codex 子进程 27704），两条 Started 回执、对应进程持续存活，Windows Terminal 新窗口已打开。证据 `artifacts/startup-diagnosis/production-two-agent-result.json`；只确认启动与存活，不将其表述为模型会话已就绪或任务已完成。配置和账本变更由产品正常流程写入。
+
+### CI 跟进与计数倒退补充
+
+- `40a1fb5` 已提交推送 main；GitHub run `42978866856` 在 R13 同步 ResumeThread 拒绝测试失败，原因是其前面的句柄丢失场景将合成进程加入共用根 Job，未归属成员可被主 monitor 观察到，导致后续预约正常拒绝。该场景现使用唯一根 Job，反射 monitor 也绑定同一隔离组；新增断言在幸存进程仍活着时验证主 monitor 未受污染。保留原有全部安全断言、阈值和 CI 步骤。
+- 本地追加验证暴露真实 CPU 计数短暂倒退：原始 `GetSystemTimes` 20 万次采样捕获 9 次负总差值，之前的零差值保护不足。现对总差值 <=0 均保留原 CPU 基线和原时间戳，内存继续重采；确定性回归把基线置于真实计数之前，验证倒退不破坏有效读数、不改写基线，也不能给超过 3 秒的旧证据续期。IPC 非有限数保护仍然存在。
+- `scripts/test.ps1 -SkipBrowser`（环境 TEMP/TMP 使用实际 `D:\temp\User` 拼写）exit 0：模型/原生 **68/68**、集成 **93/93**、WPF **142/142**、原型 **5/5**；真实采样独立 monitor 追加 **10×50 轮 status/waiver** 全部通过。证据 `artifacts/startup-diagnosis/counter-final-gate.txt`、`counter-targeted.txt`。本地浏览器仍按前述 CDP 超时记录，远程完整 gate 将验证浏览器。

@@ -40,7 +40,8 @@ internal static class Integration
             System.Reflection.FieldInfo Field(string name)=>type.GetField(name,flags)??throw new MissingFieldException(type.FullName,name);
             var handle=type.GetMethod("Handle",flags)??throw new MissingMethodException(type.FullName,"Handle");
             var finItem=Item("lost-finished",["--hold","1"]);var deadTreeItem=Item("lost-dead-tree",["--hold","1"]);var liveItem=Item("lost-live",["--hold","1"]);
-            using var rootJob=new Job(Store.RootJob,root:true);
+            var isolatedRoot=Store.RootJob+"-reconcile-"+Guid.NewGuid().ToString("N");
+            using var rootJob=new Job(isolatedRoot,root:true);
             using(var treeJob=new Job(Store.JobName(deadTreeItem.Id),ResourcePolicy.AgentBudget))
             {
                 using var parent=new ProtectedProcess(new(Environment.ProcessPath!,["--hold","30000"],"exe"),cwd,rootJob,treeJob);
@@ -57,6 +58,8 @@ internal static class Integration
                 Assert(!survivor.Process.HasExited,"scenario broken: surviving tree member exited with the job object");
                 try
                 {
+                    var sharedStatus=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+                    Assert(sharedStatus.Ok,"reconcile fixture contaminated the shared monitor: "+sharedStatus.Message);
                     var finEntry=new ControlEntry{Plan=finItem,Digest=Store.Digest(finItem),State="Creating",Detail="正在创建进程"};
                     var deadTreeEntry=new ControlEntry{Plan=deadTreeItem,Digest=Store.Digest(deadTreeItem),State="Creating",Detail="正在创建进程"};
                     var liveEntry=new ControlEntry{Plan=liveItem,Digest=Store.Digest(liveItem),State="Creating",Detail="正在创建进程"};
@@ -67,7 +70,7 @@ internal static class Integration
                     Field("sample").SetValue(monitor,new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow));
                     Field("ledger").SetValue(monitor,new Ledger{Entries=[finEntry,deadTreeEntry,liveEntry]});
                     Field("ledgerPath").SetValue(monitor,Path.Combine(Store.Root,"reconcile-"+Guid.NewGuid().ToString("N")+".json"));
-                    Field("root").SetValue(monitor,new Job(Store.RootJob,root:true));
+                    Field("root").SetValue(monitor,new Job(isolatedRoot,root:true));
                     var response=(Response)handle.Invoke(monitor,[new Request("reconcile",Guid.NewGuid())])!;
                     Assert(finEntry.State=="Settled"&&finEntry.Detail.Contains("核对释放"),"finished-tree receipt was not released: "+finEntry.State+" "+finEntry.Detail);
                     Assert(deadTreeEntry.State=="Creating"&&deadTreeEntry.Detail.Contains("拒绝"),"dead parent with a live surviving tree member was released: "+deadTreeEntry.State+" "+deadTreeEntry.Detail);

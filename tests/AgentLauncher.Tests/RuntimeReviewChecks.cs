@@ -48,7 +48,7 @@ internal static class RuntimeReviewChecks
         for(var i=0;i<50;i++)
         {
             var status=await monitor.SendAsync(new("status",Guid.NewGuid()));
-            Assert(status.Memory is {} sample&&double.IsFinite(sample.CpuPercent),"native status lost the CPU sample");
+            Assert(status.Memory is {} sample&&double.IsFinite(sample.CpuPercent),"native status lost the CPU sample: "+JsonSerializer.Serialize(status,Store.Json));
             var reply=await monitor.SendAsync(new("waiver",Guid.NewGuid(),items));
             Assert(reply.Memory==null||double.IsFinite(reply.Memory.CpuPercent),"waiver returned a non-finite CPU reading");
             Assert(reply.Ok||!string.IsNullOrWhiteSpace(reply.Message),"denial lost its reason");
