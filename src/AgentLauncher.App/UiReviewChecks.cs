@@ -71,8 +71,15 @@ public partial class MainWindow
         var healthy=ReviewSample();
         status=new Response(true,"healthy",[],healthy,Epoch:null,AdmissionBlockedReason:"资源压力尚未连续恢复，稍后重新检查。");UpdateLaunch();
         Check("CR07 monitor admission reason blocks a healthy sample",!LaunchButton.IsEnabled&&LaunchHint.Text.Contains("资源压力"));
+        Check("R-reconcile pressure block does not offer release",ReconcileButton.Visibility==Visibility.Collapsed);
+        status=new Response(true,"blocked",[],healthy,Epoch:null,AdmissionBlockedReason:"资源组句柄丢失，无法证明后代已退出；保留预算，系统重启后可核对释放。",ReconcileOffered:true);UpdateLaunch();
+        Check("R-reconcile handle-lost block offers explicit release",ReconcileButton.Visibility==Visibility.Visible&&ReconcileButton.IsEnabled&&!LaunchButton.IsEnabled);
+        busy=true;UpdateLaunch();
+        Check("R-reconcile release hidden while busy",ReconcileButton.Visibility==Visibility.Collapsed);
+        busy=false;
         status=new Response(true,"healthy",[],healthy);UpdateLaunch();
         Check("CR07 healthy admission allows launch",LaunchButton.IsEnabled);
+        Check("R-reconcile healthy status hides release",ReconcileButton.Visibility==Visibility.Collapsed);
         await RefreshAsync();
 
         // Queue a newer draft while the consumer is definitely suspended; every caller waits for that same consumer.

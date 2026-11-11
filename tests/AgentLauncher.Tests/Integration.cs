@@ -34,6 +34,36 @@ internal static class Integration
             }
             await Task.CompletedTask;
         });
+        await Test("R-handle-lost reconcile releases provably dead entry and refuses live process",async()=>{
+            var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
+            const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            System.Reflection.FieldInfo Field(string name)=>type.GetField(name,flags)??throw new MissingFieldException(type.FullName,name);
+            var handle=type.GetMethod("Handle",flags)??throw new MissingMethodException(type.FullName,"Handle");
+            using(var dead=Process.Start(new ProcessStartInfo(Environment.ProcessPath!,["--hold","1"]){UseShellExecute=false,CreateNoWindow=true})!)
+            {
+                var deadPid=dead.Id;var deadTime=dead.StartTime.ToUniversalTime().ToFileTimeUtc();dead.WaitForExit();
+                using var live=Process.Start(new ProcessStartInfo(Environment.ProcessPath!,["--hold","30000"]){UseShellExecute=false,CreateNoWindow=true})!;
+                try
+                {
+                    var deadItem=Item("lost-dead",["--hold","1"]);var liveItem=Item("lost-live",["--hold","1"]);
+                    var deadEntry=new ControlEntry{Plan=deadItem,Digest=Store.Digest(deadItem),State="Creating",Detail="正在创建进程"};
+                    var liveEntry=new ControlEntry{Plan=liveItem,Digest=Store.Digest(liveItem),State="Creating",Detail="正在创建进程"};
+                    Store.Save(Store.ReceiptPath(deadItem.Id),new Receipt("Exited",deadPid,deadTime,-1073740791,"进程已退出，退出码 -1073740791",DateTimeOffset.UtcNow));
+                    Store.Save(Store.ReceiptPath(liveItem.Id),new Receipt("Started",live.Id,live.StartTime.ToUniversalTime().ToFileTimeUtc(),null,"已启动进程（不代表任务完成）",DateTimeOffset.UtcNow));
+                    using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;
+                    Field("sample").SetValue(monitor,new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow));
+                    Field("ledger").SetValue(monitor,new Ledger{Entries=[deadEntry,liveEntry]});
+                    Field("ledgerPath").SetValue(monitor,Path.Combine(Store.Root,"reconcile-"+Guid.NewGuid().ToString("N")+".json"));
+                    Field("root").SetValue(monitor,new Job(Store.RootJob,root:true));
+                    var response=(Response)handle.Invoke(monitor,[new Request("reconcile",Guid.NewGuid())])!;
+                    Assert(deadEntry.State=="Settled","provably dead handle-lost entry was not released");
+                    Assert(liveEntry.State=="Creating"&&liveEntry.Detail.Contains("拒绝"),"entry with a live recorded process did not keep its refusal evidence");
+                    Assert(response.Ok==false&&response.Entries?.SingleOrDefault(e=>e.Plan.Id==deadItem.Id)!=null,"reconcile outcome did not keep the live-process block while reporting the release");
+                }
+                finally{try{live.Kill();live.WaitForExit(5000);}catch(System.InvalidOperationException){}}
+            }
+            await Task.CompletedTask;
+        });
         await Test("R13 synchronous ResumeThread rejection reclaims never-run child",async()=>{
             var output=Path.Combine(Store.Root,"resume-rejection-must-not-exist.json");var item=Item("resume-rejected",["--echo",output]);var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserved.Ok,reserved.Message);
             try

@@ -524,3 +524,35 @@ powershell -NoProfile -File scripts/test.ps1
 - 通过独立窄执行器链接**未改动的** `WorkspaceReviewChecks.cs`，只执行 CI 中失败的原两个用例。测试根长度同 CI 均为 **104 字符**：旧版 **0 通过 / 2 失败，exit 1**；修正后 **2 通过 / 0 失败，exit 0**。测试源 SHA-256 和窄执行器 DLL 哈希一致；本轮 19 个固定测试/runner/策略输入及 CI 工作流均未修改。复现不是重新跑旧 CI 求偶然绿色，而是在本机等长路径上区分原因并验证同一断言。
 - 原始 `red.json`、`green.json`、Git 参数对照及窄执行器归档 `artifacts/ci-git-path/review-inputs.zip`，新增诊断输入待评审，不接入或替换固定测试集；源码和临时编译输出清理。`task_verify run` 仍为 **unverified / project-or-git-baseline-unavailable，checks=[]**；手动红绿不替代 [PR #2](https://github.com/zhuguang-ZFG/agent-launcher/pull/2) 当前提交的完整 Windows gate。
 - 本修复只针对已复现的 Git 创建边界，与第 18 节未归因的 15/16 部分启动不同；不宣称后者已修复。现有 CI 阈值、测试断言和工作流保持不变，完整 CI 成功后才允许合并。
+
+## 20. 「资源组句柄丢失」的用户确认核对释放（2026-11-11）
+
+### 缺口与触发
+
+- 生产 monitor 因 2026-11-10 的陈旧 `Creating` 条目（回执 `Exited`、Job 内核对象已不存在）永久阻塞准入，此前唯一产品内恢复路径是系统重启（boot-id 变化整批 Settled）；上一轮已用与 boot 恢复等价的人工转换解除。该缺口属于产品能力缺失：没有任何界面路径让用户在证明成立时释放预算。
+- 本轮新增用户确认的「核对并释放占用」流程，恢复条件不放松：重启仍是无法证明时的兜底，释放只做 fail-closed 证明，不结束任何进程、不删除任何记录。
+
+### 设计与实现
+
+- 协议：`Response` 追加可选 `ReconcileOffered`（旧客户端忽略新字段；新客户端遇旧 monitor 得到 null，不显示入口）；分页帧一致性比较纳入该字段。新增 IPC 操作 `reconcile`，App 侧经 `Ipc.EnsureAsync`（必要时拉起 monitor）发送。
+- monitor：Refresh 在「资源组句柄丢失」阻塞分支置 `reconcileOffered=true`（每次 Refresh 重置），`BuildStatus` 上报并纳入状态签名。`ReconcileRequests()` 对每条非终态非 Pending 记录依次证明：取得 attempt gate（创建者不在运行；持不到即拒绝）、打开资源组返回 Win32=2（对象确不存在；可打开则不属本流程，交常规恢复）、回执存在且为 `Finished`/`FailedBeforeStart` 直接落终态，否则按 PID 与创建时间（FILETIME UTC）核对记录进程已退出——**PID 复用不算存活**，启动时间读不出时按存活处理拒绝。证明全部满足才置 `Settled`/`FailedBeforeStart` 并把证明写入 Detail 后原子保存；任一不满足保持阻塞并写明「核对释放被拒绝：…」。随后 Refresh 重算阻塞并返回含记录快照的响应。
+- App：资源面板新增 `ReconcileButton`（`QuietButton`，默认隐藏），仅当 `status.ReconcileOffered==true` 且非 busy 时显示；点击先弹 YesNo 确认（说明证明内容、不结束进程、不删除记录），确认后调用 `reconcile` 并刷新状态，结果写入进度/错误区。确认走既有 `TestConfirm` 测试钩子。
+- 文档：CONTRACTS C4 增加该恢复路径的 fail-closed 合同。
+
+### 回归证据（红 → 绿）
+
+- 新增集成回归「R-handle-lost reconcile releases provably dead entry and refuses live process」：合成两条 `Creating` 条目（资源组从未存在）——死进程（真实 PID+FILETIME，回执 `Exited`）与活进程（`--hold 30000`，回执 `Started`）。断言死条目释放为 `Settled`、活条目保持 `Creating` 且 Detail 含「拒绝」、响应 `Ok=false` 且已释放条目在 Entries 中。
+- 红：旧 Worker 二进制上该用例失败（反射包装「未知协议操作。」），同套件其余全部通过（发布件哈希可核对）。
+- 绿：修复后集成套件 **0 失败**（证据根 `D:\temp\User\AgentLauncher-tests-integration-green4-1794373927`）；期间发现并修复一处派发落点错误——`reconcile` 原写在条目查找之后，被「启动请求不存在或已过期」拦截，移到查找之前，单因修复后通过，未放宽任何断言。
+- 完整门禁 `scripts/test.ps1`：模型 **65/65**、集成 **0 失败**、UI 检查 **142 通过 / 0 失败**、原型 **5/5**、浏览器检查通过。
+- `UiReviewChecks` 新增 4 项断言（全部通过）：压力阻塞不提供入口、句柄丢失阻塞提供入口且启动仍禁用、busy 时隐藏、健康状态隐藏；UI 检查总数由 138 增至 142。
+
+### 固定输入变更披露
+
+- 本轮为新增回归修改了两个 pinned 测试输入：`tests/AgentLauncher.Tests/Integration.cs`（+1 用例）与 `src/AgentLauncher.App/UiReviewChecks.cs`（+4 断言），两者哈希随之变化；只增不改，既有断言与阈值原样。与 `artifacts/preview-delivery-6ce19ec/verification.json` 基线逐项核对：21 项固定输入中其余 19 项 SHA-256 不变（含 `.github/workflows/ci.yml`、`Directory.Build.props`）。新用例与断言在 operator 建立基线前属待评审输入；手动绿色不替代 operator 基线。
+
+### 限制
+
+- 核对释放在「资源组可打开但无进程」等常规可恢复情形下不介入（常规 Refresh 已处理）；仅覆盖句柄丢失类阻塞。无法证明的记录（回执缺失、进程存活、创建者仍在、其它 Win32 错误）一律保持阻塞，只能等系统重启或人工按 .bak 核对。
+- 生产环境上一轮人工修复的条目维持原样（Detail 已含证明）；本轮不改动用户 `control.json`/`.bak`/回执。
+- 历史 15/16 部分启动仍未归因，与本流程无关，不因本轮绿色而关闭。

@@ -97,6 +97,7 @@ internal sealed class Monitor : IDisposable
     private MemorySnapshot? sample;
     private DateTime lastActivity=DateTime.UtcNow;
     private string? blocked;
+    private bool reconcileOffered;
     private bool ledgerBroken;
     private readonly PressureTracker pressureTracker=new();
     private bool pressure=>pressureTracker.Pressure;
@@ -192,7 +193,7 @@ internal sealed class Monitor : IDisposable
             catch(Exception e)when(e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){floor=ResourcePolicy.DefaultPhysicalFloor(sample.Total);}
             pressureTracker.Observe(sample,floor);
         }
-        var changed=false;blocked=ledgerBroken?"控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。":null;
+        var changed=false;blocked=ledgerBroken?"控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。":null;reconcileOffered=false;
         foreach(var e in ledger.Entries.Where(e=>!Store.IsTerminal(e)&&e.State!="Pending"))
         {
             using var gate=new Mutex(false,Store.AttemptLock(e.Plan.Id));bool own;
@@ -207,7 +208,7 @@ internal sealed class Monitor : IDisposable
                     catch(System.ComponentModel.Win32Exception ex)when(ex.NativeErrorCode==2){/* Last handle may be gone while processes still exist; absence is not exit evidence. */}
                 }
                 var receipt=ReadReceipt(e.Plan.Id);
-                if(j==null && receipt?.Phase is not ("Finished" or "FailedBeforeStart")) {blocked="资源组句柄丢失，无法证明后代已退出；保留预算，系统重启后可核对释放。";e.Detail=blocked;continue;}
+                if(j==null && receipt?.Phase is not ("Finished" or "FailedBeforeStart")) {blocked="资源组句柄丢失，无法证明后代已退出；保留预算，系统重启后可核对释放。";e.Detail=blocked;reconcileOffered=true;continue;}
                 var members=j?.Members()??[];
                 if(members.Length==0){e.State=receipt?.Phase is "Started" or "Exited" or "ResumeIntent" or "Finished"?"Settled":"FailedBeforeStart";e.Detail=receipt?.Detail??"创建者已退出，核对无存活进程";changed=true;continue;}
                 if(receipt?.Phase is "SpawnIntent" or "CreatedSuspended")
@@ -332,6 +333,7 @@ internal sealed class Monitor : IDisposable
             try{Save();}catch{ledger.Entries.RemoveAll(e=>entries.Contains(e));throw;}
             return new(true,"已预约预算与工作目录",entries,sample,epoch);
         }
+        if(request.Operation=="reconcile")return ReconcileRequests();
         var entry=ledger.Entries.SingleOrDefault(e=>e.Plan.Id==request.Attempt)??throw new IOException("启动请求不存在或已过期。");
         if(request.Operation=="revoke")
         {
@@ -368,9 +370,66 @@ internal sealed class Monitor : IDisposable
         foreach(var entry in terminal){var size=StatusEntry(entry).Bytes;if(bytes+size>768*1024)break;kept.Add(entry);bytes+=size;}
         kept.Reverse();var omittedReason=UnrepresentableReason(withheld);
         var reason=omittedReason??AdmissionBlockedReason();
-        var signature=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new{Epoch=epoch,Blocked=blocked,Reason=reason,RootCpuRate=rootCpuRate,Active=active.Select(e=>StatusEntry(e).Signature),History=kept.Select(e=>StatusEntry(e).Signature)},Store.Json)));
+        var signature=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new{Epoch=epoch,Blocked=blocked,Reason=reason,RootCpuRate=rootCpuRate,ReconcileOffered=reconcileOffered,Active=active.Select(e=>StatusEntry(e).Signature),History=kept.Select(e=>StatusEntry(e).Signature)},Store.Json)));
         var unchanged=request?.StatusEpoch==epoch&&request.StatusSignature==signature;
-        return new(blocked==null&&withheld.Length==0,omittedReason??blocked??"监控器已核对",unchanged?null:active.Where(entry=>!withheld.Contains(entry)).Concat(kept).ToArray(),sample,epoch,reason,Unchanged:unchanged,StatusSignature:signature,RootCpuRate:rootCpuRate);
+        return new(blocked==null&&withheld.Length==0,omittedReason??blocked??"监控器已核对",unchanged?null:active.Where(entry=>!withheld.Contains(entry)).Concat(kept).ToArray(),sample,epoch,reason,Unchanged:unchanged,StatusSignature:signature,RootCpuRate:rootCpuRate,ReconcileOffered:reconcileOffered);
+    }
+    // Fail-closed, user-confirmed release: settle only entries whose resource group provably no longer exists and whose recorded process is provably exited.
+    private Response ReconcileRequests()
+    {
+        var settled=0;var changed=false;var refusals=new List<(ControlEntry Entry,string Reason)>();
+        foreach(var e in ledger.Entries.Where(e=>!Store.IsTerminal(e)&&e.State!="Pending").ToArray())
+        {
+            using var gate=new Mutex(false,Store.AttemptLock(e.Plan.Id));bool own;
+            try{own=gate.WaitOne(0);}catch(AbandonedMutexException){own=true;}
+            if(!own){refusals.Add((e,"创建者仍在运行，不能证明无后代"));continue;}
+            try
+            {
+                var jobGone=false;
+                if(!jobs.ContainsKey(e.Plan.Id))
+                {
+                    try{using(var probe=new Job(Store.JobName(e.Plan.Id),openOnly:true)){}}
+                    catch(System.ComponentModel.Win32Exception ex)when(ex.NativeErrorCode==2){jobGone=true;}
+                    catch(System.ComponentModel.Win32Exception){/* Existence cannot be disproved; leave the entry to the normal recovery path. */}
+                }
+                if(!jobGone)continue;
+                var receipt=ReadReceipt(e.Plan.Id);
+                if(receipt==null){refusals.Add((e,"缺少回执，无法证明进程已退出"));continue;}
+                if(receipt.Phase is "Finished" or "FailedBeforeStart")
+                {
+                    e.State=receipt.Phase=="Finished"?"Settled":"FailedBeforeStart";
+                    e.Detail=$"经确认的核对释放：资源组不存在，回执阶段 {receipt.Phase}；{receipt.Detail??"无附加说明"}";
+                    settled++;changed=true;continue;
+                }
+                if(receipt.Pid>0&&ProcessAlive(receipt.Pid,receipt.ProcessTime)){refusals.Add((e,$"记录的进程（PID {receipt.Pid}）仍在运行"));continue;}
+                e.State="Settled";e.Detail=$"经确认的核对释放：资源组不存在且记录进程（PID {receipt.Pid}）按 PID 与创建时间核对确已退出；原阶段 {receipt.Phase}。";settled++;changed=true;
+            }
+            catch(Exception ex)when(ex is not OutOfMemoryException){refusals.Add((e,"核对失败："+ex.Message));}
+            finally{gate.ReleaseMutex();}
+        }
+        if(changed)Save();
+        Refresh(forceSample:true);
+        foreach(var (entry,reason) in refusals)entry.Detail="核对释放被拒绝："+reason+"。";
+        if(refusals.Count>0)Save();
+        var snapshot=BuildStatus(null);
+        var ok=refusals.Count==0&&snapshot.Ok;
+        var message=settled>0||refusals.Count>0
+            ?$"已核对释放 {settled} 条占用"+(refusals.Count>0?$"；{refusals.Count} 条保持阻塞："+string.Join("；",refusals.Select(r=>r.Reason)):"。")
+            :"没有需要核对释放的占用。";
+        if(!ok&&refusals.Count==0&&snapshot.AdmissionBlockedReason!=null)message+="当前仍阻塞："+snapshot.AdmissionBlockedReason;
+        return snapshot with{Ok=ok,Message=message};
+    }
+    // PID reuse is not survival: the recorded start time (FILETIME UTC) must match exactly. When the start time cannot be read, treat the process as alive and refuse release.
+    private static bool ProcessAlive(int pid,long processTimeUtc)
+    {
+        try
+        {
+            using var process=Process.GetProcessById(pid);
+            if(process.HasExited)return false;
+            return process.StartTime.ToUniversalTime().ToFileTimeUtc()==processTimeUtc;
+        }
+        catch(ArgumentException){return false;}
+        catch(Exception e)when(e is InvalidOperationException or System.ComponentModel.Win32Exception){return true;}
     }
     private readonly record struct StatusFields(LaunchItem Plan,string State,string Epoch,string Digest,DateTimeOffset Created,string Detail,string? Mode,ulong? JobMemoryLimit,ulong? PlanningBytes,ulong? PhysicalFloor,ulong? CommitFloor,int? CpuRate,Guid? WaiverId);
     private sealed record StatusEntryCache(StatusFields Fields,string Signature,long Bytes,bool Representable);

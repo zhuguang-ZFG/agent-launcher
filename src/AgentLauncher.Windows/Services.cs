@@ -75,6 +75,7 @@ public static class Store
 public static class Ipc
 {
     public static Task<Response> SendAsync(Request request,CancellationToken ct=default)=>SendCoreAsync(request,ct,false);
+    public static Task<Response> EnsureAsync(Request request,CancellationToken ct=default)=>SendCoreAsync(request,ct,true);
     private static async Task<Response> SendCoreAsync(Request request,CancellationToken ct,bool ensureMonitor)
     {
         using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);timeout.CancelAfter(TimeSpan.FromSeconds(8));
@@ -127,7 +128,7 @@ public static class Ipc
         {
             if(++frames>MaxResponseFrames)throw new IOException("协议分页帧数量超出边界。");
             var nextFrame=await ReadFrameAsync<Response>(stream,ct);var next=nextFrame.Message;
-            if(next.Ok!=first.Ok||next.Message!=first.Message||next.Memory!=first.Memory||next.Epoch!=first.Epoch||next.AdmissionBlockedReason!=first.AdmissionBlockedReason||next.StatusSignature!=first.StatusSignature||next.Unchanged!=first.Unchanged||next.RootCpuRate!=first.RootCpuRate)throw new IOException("协议分页帧不一致，已拒绝混合响应。");
+            if(next.Ok!=first.Ok||next.Message!=first.Message||next.Memory!=first.Memory||next.Epoch!=first.Epoch||next.AdmissionBlockedReason!=first.AdmissionBlockedReason||next.StatusSignature!=first.StatusSignature||next.Unchanged!=first.Unchanged||next.RootCpuRate!=first.RootCpuRate||next.ReconcileOffered!=first.ReconcileOffered)throw new IOException("协议分页帧不一致，已拒绝混合响应。");
             if(next.Entries is not {Length:>0})throw new IOException("协议分页帧缺少记录。");
             bytes+=nextFrame.Size;
             if(bytes>MaxResponseBytes)throw new IOException("协议分页响应超出边界。");
