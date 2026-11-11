@@ -612,12 +612,22 @@ powershell -NoProfile -File scripts/test.ps1
 - 数据合同（`src/AgentLauncher.Core/Tasks.cs`）：`TaskCard` 保存项目、Agent、参数、验收清单、目录策略、优先级、依赖与修订号；`QueueEntry` 在入队时冻结任务修订、已解析命令与程序指纹；`TaskRun` 记录尝试、状态、工作区物理键、程序指纹与可空的 `ResumeOf`/`SessionRef`。`tasks.json` 带 SchemaVersion、修订号、入队序号与数量上限；版本或结构不符即拒绝读写，不覆盖原文件。
 - 持久化：`TaskStore` 把读-改-写放在同一跨进程命名互斥内，调用方必须持有当前修订号，过期修订返回“已被其他窗口修改”，不会静默覆盖；保存沿用既有原子替换与 `.bak`。队列分发另有独立互斥 `Local\AgentLauncher-queue-<Scope>`，另一个窗口正在分发时本窗口跳过，避免同一排队项被两个窗口同时领取。
 - 调度（`QueuePolicy`）：优先级降序、同优先级按入队序号，一次只派发一项；`MaxRunning` 默认 1；依赖任务必须已被人工完成；同一任务不允许重复入队。修订号只在影响启动的编辑（项目、Agent、目录策略、优先级、依赖、参数、资源）时递增，并同时移除该任务的排队项；只改名称、说明或勾选验收不改变修订号，也不影响排队。
-- 执行：分发前重新解析命令并比对冻结的程序指纹、可执行文件与参数，任一变化即挂起并提示重新入队，不启动。随后用任务自己的单槽草稿走既有 `WorkspacePreparer`（共享/独立目录语义与活动目录冲突检查）、资源准入与 `reserve`，再用既有 `SubmitTerminal` 提交。队列沿用当前保存的资源策略；软预算需要一次性确认时不自动确认，转为挂起原因。
+- 执行：任务 Profile 保存原始参数，QueueEntry.Command 保存入队时冻结的已解析命令；派发从 Profile 重建命令，不能把已解析 argv 回填 Profile（Node shim 会因此重复入口脚本）。派发比对冻结的程序指纹、可执行文件、适配器与参数，任一变化即挂起并提示重新入队，不启动。随后用任务自己的单槽草稿走既有 `WorkspacePreparer`（共享/独立目录语义与活动目录冲突检查），再次核对准备后的工作区/命令，再执行资源准入、`reserve` 与 `SubmitTerminal`。准备目录可以复用，但每次返回的尝试、批次与池身份重新生成。软预算需要一次性确认时不自动确认，转为挂起原因。
 - 结果核对：监控记录 `Settled`（回执 Finished）→ 任务进入“等待验收”，必须人工点“标记完成”；`FailedBeforeStart`/`Revoked` → 失败；`Pending` 超过 5 分钟先撤销，确认撤销成功后才标记失败。无法证明结束的尝试保持“运行中”，不猜测终态，也不会自动重放。
-- 续接：只对已终态、同工作区物理键、同程序指纹、且没有被其他未结束尝试占用同一 `SessionRef` 的上次尝试开放；版本探测必须精确命中已验证版本，参数来自 S1 预设表（Omp `--resume <会话>`，Codex `resume <会话>`）。任务参数中已有续接/继续项时拒绝，避免双重恢复；会话标识由用户核对填写，不自动猜测。
+- 会话登记与续接：首次尝试结束后可用「登记会话」记录由用户核对的会话标识；登记要求终态、同工作区物理键、同程序指纹、已验证 CLI 版本，拒绝空白/NUL/超过 200 字符及已占用会话。已被排队续接引用的登记不能改成另一会话。续接对话框修改会话时，重新登记与入队在同一任务文件事务内保存；取消不写文件。派发时重新探测精确版本、从原始参数追加 S1 预设再解析（Omp `--resume <会话>`，Codex `resume <会话>`），保留 Node shim 入口；未知版本、已有续接/继续参数、父尝试/登记/工作区/程序变化或未结束尝试占用相同会话时拒绝。`StartRun` 在持任务文件锁的写入前再次核对冻结队列意图、任务修订与会话占用，拒绝时不消费队列、不追加历史。
 - 验证：完整 `scripts/test.ps1`（含浏览器）exit 0，原生/模型 **75/75**、集成 **0 失败**、WPF **155/155**、原型 **5/5**、浏览器检查通过；证据 `artifacts/startup-diagnosis/vibe-s2-gate-2.txt`（提交 `f12bcf4` 对应代码）与 `vibe-s2-gate-3.txt`（补充分发互斥断言后重跑）、`artifacts/ui/ui-checks.json`（Dpi 120）、`artifacts/integration-results.json`。新增原生 ACC-B01–B04 覆盖优先级/FIFO/并发与依赖门禁、仅启动相关编辑使排队失效、续接的四重门禁、修订冲突、分发互斥独占以及损坏任务文件不被覆盖；WPF 新增 ACC-B05/B06 覆盖卡片渲染、验收勾选持久化、续接按钮仅在已结算会话出现、队列默认暂停、并发 1–4 调整、程序指纹变化时只挂起不启动、损坏任务文件停用队列且保留原文件。期间修正了验收勾选在后台线程读取 WPF 控件导致的跨线程失败，以及并发调整时陈旧修订号覆盖的问题。
 - 与原计划的差异：队列消费者放在 App（以便复用资源确认、Terminal 提交和目录准备），不是 Worker；两个 App 窗口用任务修订号 + 分发互斥避免重复领取，Worker 仍只负责单次启动的预算与进程生命周期。
 - 限制：队列由 App 进程消费，关闭窗口后不再分发（已运行的进程不受影响），重启后按文件状态继续核对。任务级资源设置只决定该项的 Job/规划值，监控准入策略仍取当前保存配置，任务不会绕过配置边界。`prepared` 目录策略对任务未开放（任务没有逐槽目录字段）。App 崩溃在“已提交 Terminal、未写回执”窗口内会留下需人工核对的尝试，队列不会自动重试；本轮没有做进程崩溃注入（领取前后强杀、关闭窗口瞬间）自动化测试，这类时序仍靠人工验收。多窗口依靠任务文件修订与分发互斥避免重复领取，但两次领取之间仍可能出现短暂双预约，后到者会撤销自己的预约。
+
+### 24.1 队列与续接反馈修复（2026-11-12）
+
+- 核验结果：重复准备复用尝试身份的反馈已过期，当前 `WorkspacePreparer` 最终返回已有新 ID；未额外重写身份。真实缺陷是 raw/resolved 参数边界混用，以及首次尝试没有登记入口、派发时未复核会话占用。假设“安装或版本真的变化”与“解析时重复入口”通过冻结命令和真实 shim 派发区分：旧版未改动的命令被误判变化，修正参数边界后同一任务两次执行均成功。
+- RED 证据：`artifacts/queue-review-shim-red-fc3406a5/ui-checks.json` 在首次 shim 派发失败（此前 78 项通过）；`artifacts/queue-focus-registration-red-32c60dfb/result.json` 在首次会话登记入口失败（此前 9 项通过）；原生 ACC-B09 两项失败分别为入队后会话被占用仍能派发、登记会话变化未拒绝，原始结果保存在临时根 `AgentLauncher-tests-122a67486bde4e34ac3cc2d99676e904/results.json`。
+- GREEN 证据：`dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release` 实跑 **95/95**（`AgentLauncher-tests-bf63afb0b7914835aed526fede6f6dbc/results.json`）；聚焦 WPF/真实 Terminal 的 ACC-B08/B09/B10 **26/26**（`artifacts/queue-focus-final-c6445425/result.json`）；原有 `--ui-check` 全量 WPF **192/192**、Dpi 120（`artifacts/queue-review-final-ed37f0b0/ui-checks.json`）。实际覆盖同一 shim 任务重复派发、子进程精确 argv/cwd/退出回执、首次登记、登记/续接取消零写入、关联续接新尝试、派发前占用拒绝、排队期间 CLI 升级到未验证版本拒绝。未运行真实 Omp/Codex 云端会话恢复，不宣称恢复结果正确；CLI 夹具只验证启动器的参数与保护协议。
+- 中间失败未隐藏：全量 UI 的一次手动根采用 `Temp` 大小写，既有目录字面断言与规范化后的 `temp` 不同；另一次在既有布局检查阶段失败，尚未执行新用例。未修改这两条断言，改用规范化隔离根与聚焦窗口入口区分产品失败；最后完整 WPF 运行通过。子代理交付的两处 `WorkspaceIdentity`/路径类型错误由主线程修正后编译通过。
+- 审查边界：只新增 `TaskChecks.cs` 与 `TaskUiChecks.cs` 的行为回归，未削弱原断言、未修改 `scripts/test.ps1` 或验证策略。临时聚焦入口位于 artifacts，不加入产品或门禁，完成后删除源码。`task_verify` 返回 **unverified / project-or-git-baseline-unavailable**，没有配置检查被执行；上述人工运行不替代操作员基线。新增测试与临时执行输入需要用户审查，仍为 unverified。
+- 候选发布：`powershell -NoProfile -File scripts/build.ps1 -Output ./artifacts/preview-queue-resume` 成功，完整 App/Worker 产物在独立目录；未覆盖正在使用的预览、未切换桌面入口，生产运行和长期稳定性未在本轮验证。
+
 ## 25. 共享资源池内核原型（2026-11-11）
 
 按计划的 S3 第一关先做隔离夹具验证，不接入产品，也不改变现有独立模式。

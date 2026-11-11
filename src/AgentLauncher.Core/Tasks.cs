@@ -205,6 +205,18 @@ public static class QueuePolicy
         if (string.IsNullOrWhiteSpace(previous.SessionRef)) return (false, "该尝试没有可核对的会话标识，只能新开任务。");
         return (true, "");
     }
+
+    /// <summary>Dispatch authority for one queue entry: normal entries pass, resume entries must match their frozen parent and registered session.</summary>
+    public static (bool Allowed, string Reason) CanDispatchResume(TaskBook book, QueueEntry entry, string workspaceKey, string programFingerprint)
+    {
+        if (entry.ResumeOf is null && entry.SessionRef is null) return (true, "");
+        if (entry.ResumeOf is not { } attemptId || string.IsNullOrWhiteSpace(entry.SessionRef)) return (false, "续接队列项缺少上次尝试或会话标识，请重新入队。");
+        var previous = book.Attempts.SingleOrDefault(run => run.AttemptId == attemptId);
+        if (previous is null) return (false, "续接引用的上次尝试不存在。");
+        if (previous.TaskId != entry.TaskId) return (false, "续接引用的尝试不属于同一任务。");
+        if (!string.Equals(previous.SessionRef, entry.SessionRef, StringComparison.Ordinal)) return (false, "队列项会话标识与尝试登记不一致，请重新核对。");
+        return CanResume(previous, workspaceKey, programFingerprint, book.Attempts);
+    }
 }
 
 /// <summary>Book mutations shared by the app and tests. Callers persist the result through the task store.</summary>
@@ -251,8 +263,16 @@ public static class TaskBookOps
         if (!QueuePolicy.CanEnqueue(book.Queue, taskId)) throw new InvalidDataException("该任务已在队列中。");
         if (book.Queue.Count >= TaskSchema.MaxQueueEntries) throw new InvalidDataException("队列已满。");
         if (programFingerprint.Length != 64) throw new InvalidDataException("程序指纹无效，请重新检查 Agent。");
-        if (sessionRef is { Length: > 200 } || sessionRef?.Contains('\0') == true) throw new InvalidDataException("会话标识过长或含 NUL。");
-        if (resumeOf is null != string.IsNullOrWhiteSpace(sessionRef)) throw new InvalidDataException("续接必须同时给出上次尝试和会话标识。");
+        var session = string.IsNullOrWhiteSpace(sessionRef) ? null : sessionRef.Trim();
+        if (session is { Length: > 200 } || session?.Contains('\0') == true) throw new InvalidDataException("会话标识过长或含 NUL。");
+        if (resumeOf is null != session is null) throw new InvalidDataException("续接必须同时给出上次尝试和会话标识。");
+        if (resumeOf is { } attemptId)
+        {
+            var previous = book.Attempts.SingleOrDefault(run => run.AttemptId == attemptId) ?? throw new InvalidDataException("续接引用的上次尝试不存在。");
+            if (previous.TaskId != taskId) throw new InvalidDataException("续接引用的尝试不属于同一任务。");
+            if (!previous.Terminal) throw new InvalidDataException("只能续接已经结束的尝试。");
+            if (!string.Equals(previous.SessionRef, session, StringComparison.Ordinal)) throw new InvalidDataException("续接会话与尝试登记不一致，请重新核对。");
+        }
         if (command.Executable.Length == 0 || command.Arguments.Any(argument => argument.Contains('\0'))) throw new InvalidDataException("任务命令无效，请重新检查 Agent。");
         task.Validate();
         var entry = new QueueEntry
@@ -261,7 +281,7 @@ public static class TaskBookOps
             EnqueuedAt = DateTimeOffset.UtcNow, Project = task.Project, AgentId = task.AgentId,
             Command = command with { Arguments = [.. command.Arguments] }, ProgramFingerprint = programFingerprint,
             DirectoryMode = task.DirectoryMode, Resource = (task.Resource ?? new ResourceSettings()).Copy(), DependsOn = [.. task.DependsOn],
-            ResumeOf = resumeOf, SessionRef = string.IsNullOrWhiteSpace(sessionRef) ? null : sessionRef
+            ResumeOf = resumeOf, SessionRef = session
         };
         book.NextSequence = entry.Sequence;
         book.Queue.Add(entry);
@@ -274,13 +294,40 @@ public static class TaskBookOps
     {
         if (book.Attempts.Count(run => !run.Terminal) >= book.MaxRunning) throw new InvalidDataException("并发上限已满，稍后再试。");
         if (book.Attempts.Any(run => run.AttemptId == attemptId)) throw new InvalidDataException("尝试身份重复。");
+        var queued = book.Queue.SingleOrDefault(candidate => candidate.Id == entry.Id) ?? throw new InvalidDataException("队列项已被移除，不能再次派发。");
+        if (!SameIntent(queued, entry)) throw new InvalidDataException("队列项已变化，请重新确认。");
+        var task = book.Tasks.SingleOrDefault(candidate => candidate.Id == entry.TaskId) ?? throw new InvalidDataException("任务不存在。");
+        if (task.Revision != entry.TaskRevision) throw new InvalidDataException("任务已被修改，请重新入队。");
+        if (resumeOf != entry.ResumeOf || !string.Equals(sessionRef, entry.SessionRef, StringComparison.Ordinal)) throw new InvalidDataException("续接参数与队列项不一致，请重新确认。");
+        if (entry.ResumeOf is not null || entry.SessionRef is not null)
+        {
+            var (allowed, reason) = QueuePolicy.CanDispatchResume(book, entry, workspaceKey, entry.ProgramFingerprint);
+            if (!allowed) throw new InvalidDataException(reason);
+        }
         var run = new TaskRun
         {
             TaskId = entry.TaskId, TaskRevision = entry.TaskRevision, AttemptId = attemptId, BatchId = batchId, State = "Running",
-            At = DateTimeOffset.UtcNow, ResumeOf = resumeOf, SessionRef = sessionRef, WorkspaceKey = workspaceKey, ProgramFingerprint = entry.ProgramFingerprint
+            At = DateTimeOffset.UtcNow, ResumeOf = entry.ResumeOf, SessionRef = entry.SessionRef, WorkspaceKey = workspaceKey, ProgramFingerprint = entry.ProgramFingerprint
         };
         book.Attempts.Add(run);
         book.Queue.RemoveAll(candidate => candidate.Id == entry.Id);
+        return run;
+    }
+
+    /// <summary>Records the Agent session of a settled attempt after checking its physical identity, live leases, and queued resume intent.</summary>
+    public static TaskRun RegisterSession(TaskBook book, Guid attemptId, string sessionRef, string workspaceKey, string programFingerprint)
+    {
+        var session = (sessionRef ?? "").Trim();
+        if (session.Length == 0 || session.Length > 200 || session.Contains('\0')) throw new InvalidDataException("会话标识缺失、过长或含 NUL。");
+        var run = book.Attempts.SingleOrDefault(candidate => candidate.AttemptId == attemptId) ?? throw new InvalidDataException("尝试不存在。");
+        if (!run.Terminal) throw new InvalidDataException("只能为已经结束的尝试登记会话。");
+        if (!string.Equals(run.WorkspaceKey, workspaceKey, StringComparison.Ordinal)) throw new InvalidDataException("工作目录物理身份已改变，不能登记会话。");
+        if (!string.Equals(run.ProgramFingerprint, programFingerprint, StringComparison.Ordinal)) throw new InvalidDataException("Agent 程序已升级或更换，不能登记会话。");
+        if (book.Attempts.Any(candidate => candidate.AttemptId != attemptId && !candidate.Terminal && string.Equals(candidate.SessionRef, session, StringComparison.Ordinal)))
+            throw new InvalidDataException("该会话仍被其他尝试占用。");
+        if (book.Queue.Any(candidate => candidate.ResumeOf == attemptId && !string.Equals(candidate.SessionRef, session, StringComparison.Ordinal)))
+            throw new InvalidDataException("该尝试仍被排队续接引用，不能改写会话标识。");
+        run.SessionRef = session;
         return run;
     }
 
@@ -324,6 +371,13 @@ public static class TaskBookOps
     }
 
     public static TaskRun? LastRun(TaskBook book, Guid taskId) => book.Attempts.LastOrDefault(run => run.TaskId == taskId);
+
+    private static bool SameIntent(QueueEntry left, QueueEntry right) =>
+        left.TaskId == right.TaskId && left.TaskRevision == right.TaskRevision && left.ProgramFingerprint == right.ProgramFingerprint
+        && left.ResumeOf == right.ResumeOf && string.Equals(left.SessionRef, right.SessionRef, StringComparison.Ordinal)
+        && string.Equals(left.Command.Executable, right.Command.Executable, StringComparison.Ordinal)
+        && string.Equals(left.Command.Adapter, right.Command.Adapter, StringComparison.Ordinal)
+        && left.Command.Arguments.SequenceEqual(right.Command.Arguments);
 
     private static bool SameResource(ResourceSettings? left, ResourceSettings? right)
     {

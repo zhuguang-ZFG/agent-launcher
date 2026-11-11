@@ -155,6 +155,12 @@ public partial class MainWindow
             complete.Click += async (_, _) => await GuardAsync(async () => { if (await UpdateTasksAsync(editor => TaskBookOps.Complete(editor, task.Id), "完成失败")) QueueStatusText.Text = "已标记完成；队列继续执行下一项。"; });
             actions.Children.Add(complete);
         }
+        if (last is { Terminal: true } settled)
+        {
+            var register = TaskButton("登记会话 " + task.Name, settled.SessionRef is { Length: > 0 } ? "修改会话" : "登记会话");
+            register.Click += async (_, _) => await GuardAsync(() => RegisterSessionAsync(task.Id));
+            actions.Children.Add(register);
+        }
         if (last is { } previous && previous.Terminal && previous.SessionRef is { Length: > 0 })
         {
             var resume = TaskButton("续接会话 " + task.Name, "续接会话");
@@ -380,17 +386,46 @@ public partial class MainWindow
         var task = book.Tasks.Single(candidate => candidate.Id == entry.TaskId);
         if (task.Revision != entry.TaskRevision) { await HoldEntryAsync(entry, "任务已被修改，请重新入队。"); return; }
 
+        var profile = task.Profile.Copy();
+        var resume = entry.ResumeOf is not null || !string.IsNullOrWhiteSpace(entry.SessionRef);
+        if (resume && (entry.ResumeOf is null || string.IsNullOrWhiteSpace(entry.SessionRef)))
+        {
+            await HoldEntryAsync(entry, "续接项缺少上次尝试或会话标识，请重新入队。");
+            return;
+        }
+        if (resume && profile.Arguments.Any(IsResumeArgument))
+        {
+            await HoldEntryAsync(entry, "任务参数已包含续接/继续参数，请先移除后再续接。");
+            return;
+        }
         CommandSpec resolved;
-        try { resolved = await Task.Run(() => Commands.Resolve(task.AgentId, new AgentProfile { Executable = task.Profile.Executable, Arguments = [.. entry.Command.Arguments] })); }
+        try { resolved = await Task.Run(() => Commands.Resolve(task.AgentId, profile)); }
         catch (Exception e) when (e is IOException or FileNotFoundException or UnauthorizedAccessException) { await HoldEntryAsync(entry, "命令无法解析：" + e.Message); return; }
         var fingerprint = await Task.Run(() => AgentProbe.Fingerprint(resolved.Executable));
-        if (fingerprint != entry.ProgramFingerprint || !string.Equals(resolved.Executable, entry.Command.Executable, StringComparison.OrdinalIgnoreCase) || !resolved.Arguments.SequenceEqual(entry.Command.Arguments))
+        var workspace = PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(entry.Project)).Path);
+        var (dispatchAllowed, dispatchReason) = QueuePolicy.CanDispatchResume(book, entry, workspace.Key, fingerprint);
+        if (!dispatchAllowed) { await HoldEntryAsync(entry, dispatchReason); return; }
+        if (resume)
+        {
+            AgentCapability capability;
+            try { capability = await AgentProbe.ProbeCapabilityAsync(task.AgentId, profile, entry.Project, TimeSpan.FromSeconds(8)); }
+            catch (Exception e) when (e is not OutOfMemoryException) { await HoldEntryAsync(entry, "无法核对 Agent 版本，不能续接：" + e.Message); return; }
+            var preset = ResumePreset(capability, task.AgentId);
+            if (preset is null) { await HoldEntryAsync(entry, $"当前版本（{capability.Version ?? "未知"}）没有已验证的续接参数。"); return; }
+            try
+            {
+                profile.Arguments = [.. profile.Arguments, .. preset.Fill(entry.SessionRef).Arguments];
+                resolved = await Task.Run(() => Commands.Resolve(task.AgentId, profile));
+                fingerprint = await Task.Run(() => AgentProbe.Fingerprint(resolved.Executable));
+            }
+            catch (Exception e) when (e is not OutOfMemoryException) { await HoldEntryAsync(entry, "无法准备续接命令：" + e.Message); return; }
+        }
+        if (fingerprint != entry.ProgramFingerprint || !SameCommand(resolved, entry.Command))
         {
             await HoldEntryAsync(entry, "程序或参数已变化，请重新入队。");
             return;
         }
 
-        var workspace = PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(entry.Project)).Path);
         var draft = new Draft
         {
             SchemaVersion = config.Draft.SchemaVersion,
@@ -399,7 +434,7 @@ public partial class MainWindow
             DirectoryMode = entry.DirectoryMode,
             Layout = "vertical",
             Resource = entry.Resource.Copy(),
-            Slots = [new Slot { Id = task.Id, Enabled = true, AgentId = task.AgentId, Profiles = new() { [task.AgentId] = new AgentProfile { Executable = task.Profile.Executable, Arguments = [.. entry.Command.Arguments] } } }]
+            Slots = [new Slot { Id = task.Id, Enabled = true, AgentId = task.AgentId, Profiles = new() { [task.AgentId] = profile } }]
         };
 
         LaunchItem[] planned;
@@ -417,6 +452,11 @@ public partial class MainWindow
         }
         if (planned.Length != 1) { await HoldEntryAsync(entry, "任务只允许一个启动项。"); return; }
         var plan = planned[0];
+        if (!string.Equals(plan.Workspace.Key, workspace.Key, StringComparison.Ordinal) || !SameCommand(plan.Command, entry.Command))
+        {
+            await HoldEntryAsync(entry, "准备结果与冻结的工作目录或命令不一致，请重新入队。");
+            return;
+        }
 
         ResourcePolicySnapshot policy;
         try
@@ -474,38 +514,94 @@ public partial class MainWindow
         }, "队列状态保存失败");
     }
 
+    /// <summary>Registers or updates the session of the last terminal attempt; the dialog value is read on the UI thread.</summary>
+    private async Task RegisterSessionAsync(Guid id)
+    {
+        if (taskBook is null) return;
+        var task = taskBook.Tasks.SingleOrDefault(candidate => candidate.Id == id);
+        var run = TaskBookOps.LastRun(taskBook, id);
+        if (task is null || run is null) { ErrorText.Text = "任务还没有可登记会话的尝试。"; return; }
+        if (!run.Terminal) { ErrorText.Text = "上一次尝试仍在进行或结果未确认，结束后才能登记会话。"; return; }
+        var profile = task.Profile.Copy();
+        if (profile.Arguments.Any(IsResumeArgument)) { ErrorText.Text = "任务参数已包含续接/继续参数，请先在任务编辑中移除后再登记会话。"; return; }
+        string fingerprint;
+        WorkspaceIdentity workspace;
+        try
+        {
+            (_, fingerprint, workspace) = await Task.Run(() =>
+            {
+                var spec = Commands.Resolve(task.AgentId, profile);
+                return (spec, AgentProbe.Fingerprint(spec.Executable), PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(task.Project)).Path));
+            });
+        }
+        catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法核对任务命令：" + e.Message; return; }
+        if (!string.Equals(run.WorkspaceKey, workspace.Key, StringComparison.Ordinal)) { ErrorText.Text = "上次尝试的工作目录与当前任务不一致，不能登记续接。"; return; }
+        if (!string.Equals(run.ProgramFingerprint, fingerprint, StringComparison.Ordinal)) { ErrorText.Text = "Agent 程序已升级或更换，不能登记旧能力。"; return; }
+        AgentCapability capability;
+        try { capability = await AgentProbe.ProbeCapabilityAsync(task.AgentId, profile, task.Project, TimeSpan.FromSeconds(8)); }
+        catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法核对 Agent 版本，不能登记会话：" + e.Message; return; }
+        var preset = ResumePreset(capability, task.AgentId);
+        if (preset is null) { ErrorText.Text = $"当前 {Agents.Get(task.AgentId).Name} 版本（{capability.Version ?? "未知"}）没有已验证的续接参数。"; return; }
+        var ask = new FormWindow(this, "登记会话", [("session", preset.ValueLabel ?? "会话标识", run.SessionRef ?? "", false)],
+            $"会话登记到第 {run.AttemptId.ToString("N")[..8]} 次尝试；工作目录、程序指纹与已验证版本 {capability.Version} 会在续接派发时再次核对。取消不改变任何任务。");
+        if (ask.ShowDialog() != true) return;
+        var session = ask.Values["session"].Trim();
+        if (SessionProblem(session) is { Length: > 0 } problem) { ErrorText.Text = problem; return; }
+        if (await UpdateTasksAsync(book => TaskBookOps.RegisterSession(book, run.AttemptId, session, workspace.Key, fingerprint), "会话登记失败"))
+            QueueStatusText.Text = "已登记会话；续接会核对工作目录、程序指纹和已验证版本。";
+    }
+
     private async Task ResumeTaskAsync(Guid id)
     {
         if (taskBook is null) return;
         var task = taskBook.Tasks.SingleOrDefault(candidate => candidate.Id == id);
         var previous = TaskBookOps.LastRun(taskBook, id);
         if (task is null || previous is null) { ErrorText.Text = "任务还没有可续接的尝试。"; return; }
-        CommandSpec command;
+        if (!previous.Terminal) { ErrorText.Text = "上一次尝试仍在进行或结果未确认。"; return; }
+        if (previous.SessionRef is not { Length: > 0 } registered) { ErrorText.Text = "该尝试还没有登记会话，请先使用「登记会话」。"; return; }
+        var profile = task.Profile.Copy();
+        if (profile.Arguments.Any(IsResumeArgument)) { ErrorText.Text = "任务参数已包含续接/继续参数，请先在任务编辑中移除后再续接。"; return; }
         string fingerprint;
-        try { (command, fingerprint) = await Task.Run(() => { var spec = Commands.Resolve(task.AgentId, task.Profile); return (spec, AgentProbe.Fingerprint(spec.Executable)); }); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or FileNotFoundException) { ErrorText.Text = "无法准备续接命令：" + e.Message; return; }
-        var workspace = PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(task.Project)).Path).Key;
-        var (allowed, reason) = QueuePolicy.CanResume(previous, workspace, fingerprint, taskBook.Attempts);
+        WorkspaceIdentity workspace;
+        try { (_, fingerprint, workspace) = await Task.Run(() => { var spec = Commands.Resolve(task.AgentId, profile); return (spec, AgentProbe.Fingerprint(spec.Executable), PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(task.Project)).Path)); }); }
+        catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法准备续接命令：" + e.Message; return; }
+        var (allowed, reason) = QueuePolicy.CanResume(previous, workspace.Key, fingerprint, taskBook.Attempts);
         if (!allowed) { ErrorText.Text = reason; return; }
         AgentCapability capability;
-        try { capability = await AgentProbe.ProbeCapabilityAsync(task.AgentId, task.Profile, task.Project, TimeSpan.FromSeconds(8)); }
-        catch (Exception e) when (e is IOException or TimeoutException or InvalidOperationException) { ErrorText.Text = "无法核对 Agent 版本，不能续接：" + e.Message; return; }
-        var preset = AgentPresets.For(task.AgentId, capability.Version).FirstOrDefault(candidate => candidate.Semantic == "resume-session" && candidate.NeedsValue);
+        try { capability = await AgentProbe.ProbeCapabilityAsync(task.AgentId, profile, task.Project, TimeSpan.FromSeconds(8)); }
+        catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法核对 Agent 版本，不能续接：" + e.Message; return; }
+        var preset = ResumePreset(capability, task.AgentId);
         if (preset is null) { ErrorText.Text = $"当前 {Agents.Get(task.AgentId).Name} 版本（{capability.Version ?? "未知"}）没有已验证的续接参数。"; return; }
-        if (task.Profile.Arguments.Any(IsResumeArgument)) { ErrorText.Text = "任务参数已包含续接/继续参数，请先在任务编辑中移除后再续接。"; return; }
-        var ask = new FormWindow(this, "续接会话", [("session", preset.ValueLabel ?? "会话标识", previous.SessionRef ?? "", false)],
-            $"只续接同一次尝试的工作目录与程序指纹；已验证版本 {capability.Version}。会话标识需要你在 Agent 记录中核对，取消不改变任何任务。");
+        var ask = new FormWindow(this, "续接会话", [("session", preset.ValueLabel ?? "会话标识", registered, false)],
+            $"只续接同一次尝试的工作目录与程序指纹；已验证版本 {capability.Version}。修改标识会先把该尝试重新登记，再与入队在同一事务保存；取消不改变任何任务。");
         if (ask.ShowDialog() != true) return;
         var session = ask.Values["session"].Trim();
-        if (session.Length == 0) { ErrorText.Text = "会话标识不能为空。"; return; }
-        var arguments = new List<string>(task.Profile.Arguments);
-        arguments.AddRange(preset.Fill(session).Arguments);
-        var resumeCommand = command with { Arguments = [.. arguments] };
-        if (!await UpdateTasksAsync(book => TaskBookOps.Enqueue(book, id, resumeCommand, fingerprint, previous.AttemptId, session), "续接入队失败")) return;
+        if (SessionProblem(session) is { Length: > 0 } problem) { ErrorText.Text = problem; return; }
+        try { profile.Arguments = [.. profile.Arguments, .. preset.Fill(session).Arguments]; }
+        catch (InvalidDataException e) { ErrorText.Text = e.Message; return; }
+        CommandSpec resumeCommand;
+        try { resumeCommand = await Task.Run(() => Commands.Resolve(task.AgentId, profile)); }
+        catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法准备续接命令：" + e.Message; return; }
+        var resumeFingerprint = await Task.Run(() => AgentProbe.Fingerprint(resumeCommand.Executable));
+        if (!string.Equals(resumeFingerprint, fingerprint, StringComparison.Ordinal)) { ErrorText.Text = "准备续接命令期间 Agent 程序已变化，请稍后重试。"; return; }
+        if (!await UpdateTasksAsync(book =>
+        {
+            TaskBookOps.RegisterSession(book, previous.AttemptId, session, workspace.Key, resumeFingerprint);
+            TaskBookOps.Enqueue(book, id, resumeCommand, resumeFingerprint, previous.AttemptId, session);
+        }, "续接入队失败")) return;
         if (!queueEnabled) { queueEnabled = true; taskTimer.Start(); RenderTasks(); }
-        QueueStatusText.Text = "续接已入队；执行队列会沿用上次工作目录与程序指纹。";
+        QueueStatusText.Text = "续接已入队；执行队列会重新核对登记会话、工作目录与程序指纹。";
         await PumpQueueAsync();
     }
+
+    private static ArgumentPreset? ResumePreset(AgentCapability capability, string agentId) =>
+        AgentPresets.For(agentId, capability.Version).FirstOrDefault(candidate => candidate.Semantic == "resume-session" && candidate.NeedsValue);
+
+    private static string SessionProblem(string session) =>
+        session.Length == 0 ? "会话标识不能为空。"
+        : session.Length > 200 ? "会话标识不能超过 200 个字符。"
+        : session.Contains('\0') ? "会话标识不能包含 NUL。"
+        : "";
 
     private static bool IsResumeArgument(string argument)
     {
@@ -513,4 +609,9 @@ public partial class MainWindow
         return token.Equals("resume", StringComparison.OrdinalIgnoreCase) || token.Equals("continue", StringComparison.OrdinalIgnoreCase)
             || token.StartsWith("resume=", StringComparison.OrdinalIgnoreCase) || token.StartsWith("continue=", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool SameCommand(CommandSpec left, CommandSpec right) =>
+        string.Equals(left.Executable, right.Executable, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(left.Adapter, right.Adapter, StringComparison.Ordinal)
+        && left.Arguments.SequenceEqual(right.Arguments);
 }
