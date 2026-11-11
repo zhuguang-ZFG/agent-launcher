@@ -699,3 +699,10 @@ powershell -NoProfile -File scripts/test.ps1
 - 最终完整门禁：`TEMP=D:/temp/User TMP=D:/temp/User powershell -NoProfile -File scripts/test.ps1` exit 0（332.50 秒）。原生/模型 **108/108**，集成 **0 失败**（104 条带 passed 的断言，另有诊断测量记录），WPF **205/205**、Dpi 120，原型 **5/5**，浏览器检查通过。原生根 `AgentLauncher-tests-f8b0dc47aeb74551b6ca8a9911cc23ff`；集成根 `AgentLauncher-tests-integration-bfb8013d7ac84a9f92509d7ad8374ac9`；最终文件 `artifacts/ui/ui-checks.json`、`artifacts/integration-results.json`。
 - 完整候选发布：`artifacts/preview-vibe-review/AgentLauncher.App.exe`，App/Worker 及依赖同目录；UTF-8/UTF-16LE 测试标记扫描四个程序集均 CLEAN。SHA-256：App `b94c43e25b1d5a819246f4e5db13767ce85502e4da20950a9ab3fe789e662fc9`、Windows `6acf0880c3f61ac159d1b8c21e5bae7f38279d3855a4f59c5bca9a1a9f269c20`、Core `e1fd0956e90518a8c3c5d4fe05500a8edab749e4216c8ea3fcac26c7f4f41a0b`、Worker `c1dadc095fcacde281c3cbdf808443f103af7605c53e9986c57db58074836786`；清单 `artifacts/preview-vibe-review/verification.json`。未替换现有入口，未终止用户 Agent；S0.6 长时观察与生产切换仍未完成，因此 S5 按计划前置门槛保持未实现/未启用。
 
+### 26.2 远程门禁的慢请求 EOF 补充
+
+- `8557a943886c18c35bc451dc98533ee89992fd0f` 的 CI run `43076100797` 未通过：原生 108/108、新增 S4 集成全部通过，但两个既有 CR02 worktree 场景报告 `Unable to read beyond the end of the stream`，集成总失败 2；不能以本地绿覆盖该远程失败。
+- 取证发现 monitor 的同一 3 秒 token 覆盖读完整请求、同步 Refresh/Handle 与写响应；配置/账本互斥等待消耗掉回包期限后，已完成的操作会在写回应时直接取消。隔离真实 monitor 在连接已接受后持配置文件互斥 3.5 秒，旧 Worker 稳定得到同一 EndOfStreamException；无需空闲退场或坏 JSON。这证明一条可产生远程同类 EOF 的具体边界，远程缺少服务端详细跟踪，不能证明其两次异常都只来自此处。
+- 修复只拆分请求读取与回复发送各自的 3 秒时间窗；客户端 8 秒上限、资源策略、授权签名与不自动重放保持不变。相同窄回归新 Worker 通过；随后实际 worktree 准备/复用/替换拒绝/冲突检查 **7/7** 通过。证据 `artifacts/ipc-deadline-regression.json`（含旧 RED、新 GREEN 和工作区场景）；新增 RuntimeReviewChecks 断言保留在原集成入口，临时探针源码已删除。测试增量仍需操作员审查。
+- 补丁后的候选目录仍为 `artifacts/preview-vibe-review`，重新生产构建与双编码标记扫描 CLEAN；本次产物替换上节候选哈希：App `80bbefe028023d269f14975adb0fa8c8577f1724a4efb54055ed78883c18c6f1`、Windows `161a96bbbffe262018bc8eb6487a6ef287603e0a1b6f2fffbe554a03e4504f29`、Core `640bd068f35ad21b6ea53eec8326e3986344979fc0e019bb94587807b76f9ae5`、Worker `11a0aa651f80a75ab2b9ef25ab2698ed1475905e23bfa220c5ec116a34edca95`。生产入口未切换。
+

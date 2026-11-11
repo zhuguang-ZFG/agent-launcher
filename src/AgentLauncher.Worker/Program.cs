@@ -193,13 +193,15 @@ internal sealed class Monitor : IDisposable
                         }
                     }
                     lastActivity=DateTime.UtcNow;
-                    using var deadline=new CancellationTokenSource(3000);
+                    using var readDeadline=new CancellationTokenSource(3000);
                     try
                     {
-                        var request=Ipc.ReadAsync<Request>(pipe,deadline.Token).GetAwaiter().GetResult();Refresh(forceSample:!ledger.Entries.Any(e=>!Store.IsTerminal(e)));
+                        var request=Ipc.ReadAsync<Request>(pipe,readDeadline.Token).GetAwaiter().GetResult();Refresh(forceSample:!ledger.Entries.Any(e=>!Store.IsTerminal(e)));
                         Response response;
                         try{response=Handle(request);}catch(Exception e)when(e is not OutOfMemoryException){response=new(false,e.Message);}
-                        Ipc.WriteResponseAsync(pipe,response,deadline.Token).GetAwaiter().GetResult();
+                        // Completed authority work must not spend the time reserved for transmitting its outcome.
+                        using var replyDeadline=new CancellationTokenSource(3000);
+                        Ipc.WriteResponseAsync(pipe,response,replyDeadline.Token).GetAwaiter().GetResult();
                         if(retireForCpuChange&&CanRetire())return 0;
                     }
                     catch(Exception e)when(e is IOException or OperationCanceledException or JsonException){/* Peer failure never grants additional authorization. */}

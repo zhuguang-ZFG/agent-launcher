@@ -29,6 +29,7 @@ internal static class RuntimeReviewChecks
         await test("CR07 pressure exposes an admission reason without changing reconciliation health",()=>PressureReasonAsync(cwd));
         await test("ACC-S02 idle monitor keeps the 15-second window and pending attempts",()=>IdleRetirementAsync(cwd));
         await test("CR10 a merely busy pipe does not start a second monitor",()=>BusyPipeAsync(cwd));
+        await test("CR10 a complete request retains its response budget while authority reads are busy",()=>SlowAuthorityReplyAsync(cwd));
         await test("ACC-S03 status signatures invalidate on activity history blockers and epoch",()=>StatusSignatureAsync(cwd));
         await test("ACC-C01 status exposes the existing root CPU and rejects an idle configuration mismatch",()=>RootCpuAsync(cwd));
         await test("ACC-S03 unchanged receipt metadata skips reads but still reconciles Job members",()=>ReceiptCacheAsync(cwd));
@@ -307,6 +308,40 @@ internal static class RuntimeReviewChecks
         return Task.CompletedTask;
     }
 
+    private static async Task SlowAuthorityReplyAsync(string cwd)
+    {
+        using var monitor=await OwnedMonitor.StartAsync(cwd);
+        var configPath=Path.Combine(monitor.Root,"configuration.json");
+        Store.Save(configPath,new Configuration());
+        await using var client=new NamedPipeClientStream(".",OwnedMonitor.PipeFor(monitor.Root),PipeDirection.InOut,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly);
+        using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        await client.ConnectAsync(deadline.Token);
+        // The connection is accepted before the controlled authority contention; no idle-retirement race or malformed frame.
+        await Task.Delay(100);
+        var key=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(configPath).ToUpperInvariant())));
+        using var acquired=new ManualResetEventSlim();using var release=new ManualResetEventSlim();
+        Exception? failure=null;
+        var holder=new Thread(()=>
+        {
+            try
+            {
+                using var gate=new Mutex(false,@"Local\AgentLauncher-file-"+key);
+                gate.WaitOne();acquired.Set();release.Wait(TimeSpan.FromSeconds(3.5));gate.ReleaseMutex();
+            }
+            catch(Exception error){failure=error;acquired.Set();}
+        }){IsBackground=true};
+        holder.Start();acquired.Wait();
+        try
+        {
+            if(failure is not null)throw failure;
+            await Ipc.WriteAsync(client,new Request("status",Guid.NewGuid()),deadline.Token);
+            var response=await Ipc.ReadResponseAsync(client,deadline.Token);
+            Assert(response.Ok,"complete status request did not receive a valid response after authority contention");
+            Assert(!monitor.WaitForExit(TimeSpan.Zero),"monitor exited instead of retaining the accepted request");
+        }
+        finally{release.Set();holder.Join();}
+    }
+
     private static async Task IdleRetirementAsync(string cwd)
     {
         using var monitor=await OwnedMonitor.StartAsync(cwd);
@@ -454,6 +489,6 @@ internal static class RuntimeReviewChecks
         {
             try{if(!process.HasExited&&!process.WaitForExit(5000)&&Store.Read<int>(Path.Combine(Root,"monitor-pid.json"))==process.Id&&process.StartTime==started){process.Kill();process.WaitForExit(3000);}}finally{process.Dispose();}
         }
-        private static string PipeFor(string root)=>"AgentLauncher-"+Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(WindowsIdentity.GetCurrent().User!.Value+root)))[..20];
+        public static string PipeFor(string root)=>"AgentLauncher-"+Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(WindowsIdentity.GetCurrent().User!.Value+root)))[..20];
     }
 }
