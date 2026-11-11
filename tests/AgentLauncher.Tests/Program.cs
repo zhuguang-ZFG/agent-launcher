@@ -76,6 +76,17 @@ Test("G1 Job hard memory cap causes allocation refusal",()=>{
  using var root=new Job(@"Local\AL-memory-root-"+Guid.NewGuid(),root:true);using var job=new Job(@"Local\AL-memory-child-"+Guid.NewGuid(),96*1024*1024);
  using var p=new ProtectedProcess(new(Environment.ProcessPath!,["--allocate"],"exe"),temp,root,job);p.Resume();Assert(p.Process.WaitForExit(6000),"child timeout");Assert(p.Process.ExitCode==0,"allocation not refused cleanly");
 });
+Test("P02 Job memory evidence survives child exit and never invents crash cause",()=>{
+ using var root=new Job(@"Local\AL-evidence-root-"+Guid.NewGuid(),root:true);using var job=new Job(@"Local\AL-evidence-child-"+Guid.NewGuid(),96*ResourcePolicy.MiB);
+ using var p=new ProtectedProcess(new(Environment.ProcessPath!,["--allocate"],"exe"),temp,root,job);p.Resume();Assert(p.Process.WaitForExit(6000),"child timeout");
+ var evidence=job.QueryMemory();Assert(evidence is {PeakBytes:>0}&&evidence.LimitBytes==96*ResourcePolicy.MiB,"missing kernel peak or limit");
+ job.Handle.Dispose();Assert(job.QueryMemory()==null,"unavailable handle fabricated evidence");
+ Assert(ExitDiagnostics.Describe(-1073740791,null).Contains("0xC0000409")&&!ExitDiagnostics.Describe(-1073740791,null).Contains("已接近"),"exit code invented memory evidence");
+ Assert(!ExitDiagnostics.NearLimit(new(100,89))&&ExitDiagnostics.NearLimit(new(100,90))&&!ExitDiagnostics.NearLimit(new(0,100)),"pressure threshold incorrect");
+ var receipt=new Receipt("Finished",1,2,-1073740791,"test",DateTimeOffset.UtcNow,evidence);
+ Assert(JsonSerializer.Deserialize<Receipt>(JsonSerializer.Serialize(receipt,Store.Json),Store.Json)?.JobMemory==evidence,"receipt lost evidence");
+ Assert(JsonSerializer.Deserialize<Receipt>("{\"Phase\":\"Finished\",\"Pid\":1,\"ProcessTime\":2,\"ExitCode\":0,\"Detail\":\"old\",\"At\":\"2026-11-11T00:00:00Z\"}",Store.Json)?.JobMemory==null,"legacy receipt compatibility lost");
+});
 Test("G1 Job survives monitor handle close while runner retains ownership",()=>{
  var name=@"Local\AL-survive-"+Guid.NewGuid();using var root=new Job(@"Local\AL-survive-root-"+Guid.NewGuid(),root:true);var job=new Job(name,128*1024*1024);using var runnerHandle=new Job(name,openOnly:true);
  using var p=new ProtectedProcess(new(Environment.ProcessPath!,["--hold","1200"],"exe"),temp,root,job);p.Resume();job.Dispose();using var reopened=new Job(name,openOnly:true);Assert(reopened.Members().Contains(p.Process.Id),"Job lost after monitor close");Assert(p.Process.WaitForExit(4000),"child timeout");

@@ -118,6 +118,18 @@ public sealed class Job : IDisposable
         }
         finally{Marshal.FreeHGlobal(p);}
     }
+    public JobMemoryEvidence? QueryMemory()
+    {
+        if(Handle.IsClosed||Handle.IsInvalid)return null;
+        var size=Marshal.SizeOf<Native.ExtendedLimits>();var p=Marshal.AllocHGlobal(size);
+        try
+        {
+            if(!Native.QueryInformationJobObject(Handle,9,p,(uint)size,IntPtr.Zero))return null;
+            var limits=Marshal.PtrToStructure<Native.ExtendedLimits>(p);
+            return new(limits.JobMemory.ToUInt64(),limits.PeakJob.ToUInt64());
+        }
+        finally{Marshal.FreeHGlobal(p);}
+    }
     private void Set<T>(int kind,T data) where T:struct
     {
         var size=Marshal.SizeOf<T>();var p=Marshal.AllocHGlobal(size);

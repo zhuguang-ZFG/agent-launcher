@@ -51,6 +51,7 @@ public sealed class ResourceSettingsWindow : Window
         panel.Children.Add(new TextBlock{Text="资源数值",FontWeight=FontWeights.SemiBold,Margin=new(0,0,0,4)});
         var maxJob=Math.Min(ResourcePolicy.MaxJobMemoryLimit,sample.Total);var maxPhysical=Math.Min(ResourcePolicy.MaxCustomPhysicalFloor,sample.Total/2);var maxCommit=Math.Min(ResourcePolicy.MaxCustomCommitFloor,sample.CommitLimit/4);
         Field(JobLimitGiB,$"每项 Job 内存上限（GiB；1～{GiB(maxJob)}）");
+        panel.Children.Add(new TextBlock{Text="该上限由 Agent、MCP、浏览器和编译等全部工具子进程共享。多工具任务可为新批次提高上限，同时减少并行项；规划估算应反映实际工作负载。",Style=(Style)FindResource("Caption"),Margin=new(0,0,0,12)});
         Field(PlanningMiB,"每项规划估算（MiB；至少 256，不能超过该项 Job 上限）");
         Field(PhysicalFloorGiB,$"物理临界余量（GiB；1.5～{GiB(maxPhysical)}；留空自动，当前默认 {GiB(ResourcePolicy.DefaultPhysicalFloor(sample.Total))}）");
         Field(CommitFloorGiB,$"提交临界余量（GiB；1～{GiB(maxCommit)}；留空自动，当前默认 {GiB(ResourcePolicy.DefaultCommitFloor(sample.CommitLimit))}）");
@@ -63,7 +64,7 @@ public sealed class ResourceSettingsWindow : Window
         panel.Children.Add(details);
         root.Children.Add(new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled});Content=root;
         LoadValues(initial);ModeChoice.SelectedValue=initial.Mode;ModeChoice.IsEnabled=!readOnly;apply.IsEnabled=!readOnly;
-        ModeChoice.SelectionChanged+=(_,_)=>{if(SelectedMode!="custom")LoadValues(new ResourceSettings());else if(activeOrUnknown)LoadValues(initial);UpdateEditable();ValidationMessage.Text="";};
+        ModeChoice.SelectionChanged+=(_,_)=>{if(SelectedMode!="custom")LoadValues(new ResourceSettings());UpdateEditable();ValidationMessage.Text="";};
         UpdateEditable();UiScale.Apply(this);apply.Click+=(_,_)=>{if(TryApplySettings())DialogResult=true;};Loaded+=(_,_)=>ModeChoice.Focus();
         void Field(TextBox input,string label)
         {
@@ -86,10 +87,12 @@ public sealed class ResourceSettingsWindow : Window
     }
     private void UpdateEditable()
     {
-        var editable=SelectedMode=="custom"&&!activeOrUnknown&&!readOnly;
-        foreach(var box in new[]{JobLimitGiB,PlanningMiB,PhysicalFloorGiB,CommitFloorGiB,CpuPercent}){box.IsReadOnly=!editable;box.IsTabStop=editable;}
+        var editable=SelectedMode=="custom"&&!readOnly;
+        foreach(var box in new[]{JobLimitGiB,PlanningMiB,PhysicalFloorGiB,CommitFloorGiB}){box.IsReadOnly=!editable;box.IsTabStop=editable;}
+        CpuPercent.IsReadOnly=!editable||activeOrUnknown;CpuPercent.IsTabStop=!CpuPercent.IsReadOnly;
+        if(activeOrUnknown)CpuPercent.Text=(initial.CpuRate/100m).ToString("0.##",CultureInfo.CurrentCulture);
         fieldStatus.Text=editable
-            ?"可编辑：新数值只作用于之后启动的批次，不会热改正在运行的 Job。"
+            ?activeOrUnknown?"可编辑下一批内存设置：当前任务维持原上限；CPU 共用上限在任务运行期间保持只读。":"可编辑：新数值只作用于之后启动的批次，不会热改正在运行的 Job。"
             :readOnly
                 ?"只读：当前配置只读或采样/运行状态不可用，只能查看，不会应用资源设置。"
                 :activeOrUnknown
@@ -104,7 +107,6 @@ public sealed class ResourceSettingsWindow : Window
         {
             ResourceSettings next;
             if(SelectedMode!="custom")next=new(){Mode=SelectedMode};
-            else if(activeOrUnknown){next=initial.Copy();next.Mode="custom";}
             else
             {
                 if(!int.TryParse(CpuPercent.Text.Trim(),NumberStyles.None,CultureInfo.CurrentCulture,out var percent)||percent is <15 or >80)throw new InvalidDataException("CPU 封顶请输入 15～80 的整数百分比；未应用。 ");
@@ -115,6 +117,7 @@ public sealed class ResourceSettingsWindow : Window
                     CommitFloorOverride=string.IsNullOrWhiteSpace(CommitFloorGiB.Text)?null:ReadBytes(CommitFloorGiB.Text,ResourcePolicy.GiB,"提交临界余量"),CpuRate=percent*100
                 };
             }
+            if(activeOrUnknown&&next.CpuRate!=initial.CpuRate)throw new InvalidDataException("活动批次仍使用当前 CPU 上限；请保持此值，待任务结束后再修改。");
             ResourcePolicy.ValidateSettings(next,sample.Total,sample.CommitLimit);Value=next;ValidationMessage.Text="";return true;
         }
         catch(InvalidDataException error){ValidationMessage.Text=error.Message;return false;}

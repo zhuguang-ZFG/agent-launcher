@@ -15,6 +15,8 @@
 | [REVIEW-v0.4-followup.md](REVIEW-v0.4-followup.md) | 第二轮 7 项缺陷及 v0.5 防护映射，区分规格与实现状态 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 工程依赖、进程边界、UI 信息来源 |
 | [IMPLEMENTATION.md](IMPLEMENTATION.md) | 技术预览运行方法、实现差异与实测证据 |
+| [vibe coding 扩展规格](superpowers/specs/2026-11-11-vibe-workbench-spec.md) | 后续参数预设、任务队列、共享资源池、审查与 Omp 多会话规划（未实现） |
+| [扩展实施计划](superpowers/plans/2026-11-11-vibe-workbench-plan.md) | 稳定性前置门槛、分阶段改动、验收与回退 |
 | [prototype.html](prototype.html) | v0.6 离线交互稿，3 项状态问题已修复并通过浏览器回归 |
 
 现已有 C# / WPF 原生源码、可运行技术预览、真实 Windows Job/Git/Terminal 测试和 WPF 截图。发布包入口和证据见 IMPLEMENTATION；不能将局部断言等同于 51 项完整验收通过。性能阈值仍是门槛，未测项目和失败数据必须保留。

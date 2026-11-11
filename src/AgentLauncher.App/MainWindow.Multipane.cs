@@ -186,13 +186,12 @@ public partial class MainWindow
             if(revision!=config.Draft.Revision){ErrorText.Text="配置已改变，资源设置未应用；请重新打开。";return;}
             ResourcePolicy.ValidateSettings(next,latest.Total,latest.CommitLimit);
             var nowActive=status.Entries is null||status.Entries.Any(e=>!Store.IsTerminal(e));
-            if(nowActive&&next.Mode=="custom"&&!SameResourceLimits(initial,next)){ErrorText.Text="存在活动批次或尚未核对的预约，自定义上限只读，设置未应用；请重新打开。";return;}
+            if(nowActive&&next.CpuRate!=initial.CpuRate){ErrorText.Text="存在活动批次或尚未核对的预约，CPU 上限不能修改；请重新打开。";return;}
             if(!Edit(d=>d.Resource=next.Copy()))return;
             await saveTask;await RefreshAsync();ProgressText.Text="资源设置已更新，只作用于之后的新批次；不会更改已运行 Job。";
         }
         finally{showingResourceSettings=false;}
     }
-    private static bool SameResourceLimits(ResourceSettings first,ResourceSettings second)=>first.JobMemoryLimit==second.JobMemoryLimit&&first.PlanningBytes==second.PlanningBytes&&first.PhysicalFloorOverride==second.PhysicalFloorOverride&&first.CommitFloorOverride==second.CommitFloorOverride&&first.CpuRate==second.CpuRate;
 
     private bool ConfirmResourceWaiver(LaunchItem[] items,AdmissionDecision decision,MemorySnapshot sample)
     {

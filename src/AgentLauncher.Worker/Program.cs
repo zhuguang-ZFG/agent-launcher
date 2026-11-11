@@ -24,6 +24,7 @@ internal static class Program
         try{owned=mutex.WaitOne(0);}catch(AbandonedMutexException){owned=true;}
         if(!owned)throw new IOException("该启动请求正在处理。");
         ProtectedProcess? child=null;Job? root=null;Job? job=null;var resumeIntent=false;
+        JobMemoryEvidence? exitMemory=null;
         try
         {
             var claim=Path.Combine(Store.Root,"attempts",id.ToString("N"),"claim");Directory.CreateDirectory(Path.GetDirectoryName(claim)!);
@@ -62,9 +63,11 @@ internal static class Program
         try
         {
             child!.Process.WaitForExit();var exit=child.Process.ExitCode;
-            Write("Exited",child.Process.Id,child.CreationTime,exit,$"进程已退出，退出码 {exit}");
+            exitMemory=job!.QueryMemory();var detail=ExitDiagnostics.Describe(exit,exitMemory);
+            Write("Exited",child.Process.Id,child.CreationTime,exit,"进程已退出。"+detail);
+            if(interactive&&exit!=0)Console.WriteLine("\nAgent 异常退出。"+detail+"\n工作目录已保留；如仍有工具运行，将等待它们结束。");
             while(job!.Members().Length>0)Thread.Sleep(1000);
-            Write("Finished",child.Process.Id,child.CreationTime,exit,$"全部受管进程已退出，退出码 {exit}");
+            Write("Finished",child.Process.Id,child.CreationTime,exit,"全部受管进程已退出。"+detail);
 #if !INTEGRATION_TESTS
             if(interactive){Console.WriteLine($"\nAgent 已退出（{exit}）。工作目录已保留。按 Enter 关闭此窗格。");Console.ReadLine();}
 #endif
@@ -73,7 +76,7 @@ internal static class Program
         finally{child?.Dispose();job?.Dispose();root?.Dispose();}
         void Write(string phase,int pid,long time,int? code,string detail)
         {
-            Store.Save(Store.ReceiptPath(id),new Receipt(phase,pid,time,code,detail,DateTimeOffset.UtcNow));
+            Store.Save(Store.ReceiptPath(id),new Receipt(phase,pid,time,code,detail,DateTimeOffset.UtcNow,exitMemory));
 #if INTEGRATION_TESTS
             if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")==phase)Environment.Exit(97);
 #endif
@@ -221,7 +224,8 @@ internal sealed class Monitor : IDisposable
                 {
                     var state=receipt?.Phase switch{"Started"=>"Started","Exited"=>"Exited",_=>"Unknown"};
                     if(e.State!=state){e.State=state;changed=true;}
-                    e.Detail=receipt?.Phase=="Exited"?"Agent 已退出，工具仍运行":receipt?.Phase=="Started"?"已启动进程（不代表任务完成）":"结果未确认；占用保留";
+                    e.Detail=receipt?.Phase=="Exited"?"Agent 已退出，工具仍运行。"+receipt.Detail:receipt?.Phase=="Started"?"已启动进程（不代表任务完成）":"结果未确认；占用保留";
+                    if(receipt?.Phase=="Started"&&j?.QueryMemory() is {} memory&&ExitDiagnostics.NearLimit(memory))e.Detail+="。"+ExitDiagnostics.MemoryText(memory);
                 }
             }
             catch(Exception ex)when(ex is not OutOfMemoryException){blocked="恢复核对失败："+ex.Message;e.Detail=blocked;}

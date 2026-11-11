@@ -19,6 +19,7 @@ internal static class RuntimeReviewChecks
         if(!File.Exists(Store.WorkerPath))throw new FileNotFoundException("Runtime review checks require the published Worker beside the test executable.",Store.WorkerPath);
         Directory.CreateDirectory(cwd);
         await test("P01 real CPU sampling keeps status and waiver replies readable",()=>NativeSamplingAsync(cwd));
+        await test("P02 future memory changes preserve active Job and exit evidence",()=>FutureMemoryAsync(cwd));
         await test("CR04 revoke save failure restores state and detail before later begin",()=>RevokeRollbackAsync(cwd));
         await test("CR06 oversized plan is rejected before persistence",()=>OversizedPlanAsync(cwd));
         await test("CR06 ledger stays readable while active reservations survive pruning",()=>LedgerBoundAsync(cwd));
@@ -34,6 +35,40 @@ internal static class RuntimeReviewChecks
     }
 
     private static void Assert(bool value,string message){if(!value)throw new Exception(message);}
+
+    private static async Task FutureMemoryAsync(string cwd)
+    {
+        using var monitor=await OwnedMonitor.StartAsync(cwd);
+        var config=new Configuration();config.Draft.Project=cwd;config.Draft.DirectoryMode="shared";
+        foreach(var slot in config.Draft.Slots)slot.Enabled=false;config.Draft.Slots[0].Enabled=true;
+        Store.Save(Path.Combine(monitor.Root,"configuration.json"),config);
+        LaunchItem Plan(int slot,ulong budget,string[] arguments)=>new(Guid.NewGuid(),Guid.NewGuid(),slot+1,"memory-fixture",cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,arguments,"exe"),budget,SourceSlotId:config.Draft.Slots[slot].Id,AgentId:config.Draft.Slots[slot].AgentId);
+        Process Run(LaunchItem item)
+        {
+            var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
+            start.ArgumentList.Add("run");start.ArgumentList.Add(item.Id.ToString());start.Environment["AGENT_LAUNCHER_TEST_ROOT"]=monitor.Root;
+            return Process.Start(start)!;
+        }
+        Receipt? Read(LaunchItem item)=>Store.Read<Receipt>(Path.Combine(monitor.Root,"attempts",item.Id.ToString("N"),"receipt.json"));
+        var first=Plan(0,2*ResourcePolicy.GiB,["--hold","5000"]);
+        var reserve=await monitor.SendAsync(new("reserve",Guid.NewGuid(),[first]));Assert(reserve.Ok,reserve.Message);
+        using var firstRunner=Run(first);
+        for(var i=0;i<50&&Read(first)?.Phase!="Started";i++)await Task.Delay(100);
+        Assert(Read(first)?.Phase=="Started","first child did not start");
+        config.Draft.Resource=new(){Mode="custom",JobMemoryLimit=4*ResourcePolicy.GiB};config.Draft.Revision++;
+        config.Draft.Slots[0].Enabled=false;config.Draft.Slots[1].Enabled=true;
+        Store.Save(Path.Combine(monitor.Root,"configuration.json"),config);
+        var second=Plan(1,4*ResourcePolicy.GiB,["--hold","10"]);
+        var waiver=await monitor.SendAsync(new("waiver",Guid.NewGuid(),[second]));Assert(waiver.Ok&&waiver.WaiverId!=null,waiver.Message);
+        var next=await monitor.SendAsync(new("reserve",Guid.NewGuid(),[second],WaiverId:waiver.WaiverId));Assert(next.Ok,next.Message);
+        using var secondRunner=Run(second);
+        await Task.WhenAll(firstRunner.WaitForExitAsync(),secondRunner.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert(firstRunner.ExitCode==0&&secondRunner.ExitCode==0,"memory fixture runner failed");
+        Assert(Read(first) is {Phase:"Finished",JobMemory:{LimitBytes:2*ResourcePolicy.GiB,PeakBytes:>0}},"existing Job changed or lost peak");
+        Assert(Read(second) is {Phase:"Finished",JobMemory:{LimitBytes:4*ResourcePolicy.GiB,PeakBytes:>0}},"new Job did not use new limit or lost peak");
+        var status=await monitor.SendAsync(new("status",Guid.NewGuid()));
+        Assert(status.Ok&&status.Entries!.All(Store.IsTerminal),"memory update broke reconciliation");
+    }
 
     private static async Task NativeSamplingAsync(string cwd)
     {

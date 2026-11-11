@@ -584,3 +584,16 @@ powershell -NoProfile -File scripts/test.ps1
 - `40a1fb5` 已提交推送 main；GitHub run `42978866856` 在 R13 同步 ResumeThread 拒绝测试失败，原因是其前面的句柄丢失场景将合成进程加入共用根 Job，未归属成员可被主 monitor 观察到，导致后续预约正常拒绝。该场景现使用唯一根 Job，反射 monitor 也绑定同一隔离组；新增断言在幸存进程仍活着时验证主 monitor 未受污染。保留原有全部安全断言、阈值和 CI 步骤。
 - 本地追加验证暴露真实 CPU 计数短暂倒退：原始 `GetSystemTimes` 20 万次采样捕获 9 次负总差值，之前的零差值保护不足。现对总差值 <=0 均保留原 CPU 基线和原时间戳，内存继续重采；确定性回归把基线置于真实计数之前，验证倒退不破坏有效读数、不改写基线，也不能给超过 3 秒的旧证据续期。IPC 非有限数保护仍然存在。
 - `scripts/test.ps1 -SkipBrowser`（环境 TEMP/TMP 使用实际 `D:\temp\User` 拼写）exit 0：模型/原生 **68/68**、集成 **93/93**、WPF **142/142**、原型 **5/5**；真实采样独立 monitor 追加 **10×50 轮 status/waiver** 全部通过。证据 `artifacts/startup-diagnosis/counter-final-gate.txt`、`counter-targeted.txt`。本地浏览器仍按前述 CDP 超时记录，远程完整 gate 将验证浏览器。
+- 后续核验：提交 `ffdfe78ba3d3f84ed7b6ae67e1131744df12fa4f` 的 GitHub Actions run `42982614811` 已 completed/success，完整远程 gate 通过；该结果仅覆盖该提交，不覆盖下节尚在工作区的 Omp 修复。
+
+## 22. Omp 原生退出诊断与下一批内存设置（2026-11-11）
+
+- 用户确认异常退出窗格为 Omp，退出码 `-1073740791`（`0xC0000409`）。Windows Application 事件记录 PID 20352 在 15:42:11 的故障模块为 Omp 18.18.8 的 `pi_natives.win32-x64-baseline.node`；对应回执 15:42:14 Finished。历史作业未保存峰值，不能认定所有同码退出都由同一个原因导致。
+- 读取当前内核 Job：一个 Omp 作业树约 2048.1 MiB 峰值 / 2048 MiB 限额，含多个 Omp、MCP 与工具进程。证据 `artifacts/startup-diagnosis/omp-job-peaks.json`。限额是整棵树共享，不能把单个 omp.exe 的私有内存当作作业总量。
+- 隔离探针用 Node 24.14.0 加载同一 18.18.8 原生模块，`countTokens('abc '.repeat(16*1024*1024))`：128 MiB Job 下输出 `memory allocation of 134217730 bytes failed` / `pi-natives alloc crash`，返回同一退出码；512 MiB 下同输入成功、exit 0。探针位于 `artifacts/startup-diagnosis/native-probe/`。这是原生分配失败机制的受控复现，不等同于完整 Omp/Bun 的实际任务回放。
+- 实现：增加可空 `JobMemoryEvidence`，查询真实 Job 上限与提交峰值；父进程退出时保存到 Receipt，Finished 保留同一份退出时证据。查询不可用明确未知。异常退出在等待工具排干前即打印诊断；状态中接近上限时显示峰值提示。退出码本身不被当成内存因果证据。
+- 设置改为可调整**之后批次**的内存参数；活动 Job 不改，活动期间共享根 CPU 继续锁定。解释额度包括工具子进程。旧 Receipt 无新字段仍可读取，旧 profile 和配置默认值不改。
+- 新增/增强 P02 原生、Receipt 往返和跨批次集成检查；真实夹具先运行 2 GiB 作业，在配置改成 4 GiB 后走正常 waiver/reserve，再启动下一项，最终回执分别证明 2/4 GiB 且都有非零 OS 峰值。新增 WPF 检查验证内存可编辑、CPU 禁改且不能由程序赋值绕过。
+- 验证：完整 `scripts/test.ps1`（含浏览器）exit 0，原生/模型 **69/69**、集成 **0 失败**、WPF **143/143**、原型 **5/5**、浏览器检查全部通过；证据 `artifacts/startup-diagnosis/vibe-s0-gate.txt`、`artifacts/ui/ui-checks.json`（Dpi 120）、`artifacts/integration-results.json`。本轮之前 `-SkipBrowser` 的同套结果见 `omp-authorized-gate.txt`。中间失败保留在 `omp-final-gate.txt` / `omp-sequential-gate.txt`：新夹具启用槽不匹配、软授权缺失已经修正；一次 Git 准备 pipe broken 在后续顺序执行中未再出现，尚无独立根因结论。
+- 生产候选目录 `artifacts/preview-omp-stability` 按当前工作区重建（15 文件），四个程序集 marker 扫描 CLEAN；SHA-256：App `C0536CF043806941F3928944C4DE774A9653EBB95F433D651FEEC519EB917C6F`、Windows `194601A5701EFEE95FD2AC6AB8B47140AE5328F96D84994013B0D9E7D9C20D90`、Worker `EB167560656F7CF2EFF91439055438893F58C9EAD5B62295EA54CE989B06DADE`。当前生产进程与用户配置未替换/修改，仍可能使用 2 GiB 旧限制；交付切换、对应最终提交 CI 与 30 分钟 × 3 轮代表性负载仍属待完成事项。本轮不宣称频繁退出已彻底解决。
+- 用户随后要求进入扩展规划阶段，新增 [扩展规格](superpowers/specs/2026-11-11-vibe-workbench-spec.md) 与 [实施计划](superpowers/plans/2026-11-11-vibe-workbench-plan.md)。参数预设、任务队列、共享池、审查中心和 Omp 多会话均为后续计划；稳定性封板为 S0 前置门槛。

@@ -98,8 +98,10 @@ public partial class MainWindow
             resourceDialog.ModeChoice.SelectedIndex=1;resourceDialog.TryApplySettings();
             check("ACC-U03 leaving custom resets resource defaults",resourceDialog.Value is {Mode:"practical",JobMemoryLimit:ResourcePolicy.DefaultJobMemoryLimit,PlanningBytes:ResourcePolicy.DefaultPlanningBytes,CpuRate:ResourcePolicy.DefaultCpuRate,PhysicalFloorOverride:null,CommitFloorOverride:null});resourceDialog.Close();
             var activeDialog=new ResourceSettingsWindow(this,new ResourceSettings{Mode="custom",JobMemoryLimit=3*ResourcePolicy.GiB},Sample(),true,false);
-            activeDialog.JobLimitGiB.Text="1";activeDialog.TryApplySettings();
-            check("ACC-U03 active batches prevent editing their resource limits",activeDialog.ModeChoice.IsEnabled&&activeDialog.JobLimitGiB.IsReadOnly&&activeDialog.CpuPercent.IsReadOnly&&activeDialog.Value?.JobMemoryLimit==3*ResourcePolicy.GiB);activeDialog.Close();
+            activeDialog.JobLimitGiB.Text="4";activeDialog.TryApplySettings();
+            check("ACC-U03 active batches allow future memory limits but lock shared CPU",activeDialog.ModeChoice.IsEnabled&&!activeDialog.JobLimitGiB.IsReadOnly&&activeDialog.CpuPercent.IsReadOnly&&activeDialog.Value?.JobMemoryLimit==4*ResourcePolicy.GiB);
+            activeDialog.CpuPercent.Text="40";
+            check("ACC-U03 programmatic CPU edit cannot bypass active protection",!activeDialog.TryApplySettings()&&activeDialog.Value is null);activeDialog.Close();
 
             config=Fixture();Healthy();Render();var dropped=Enumerable.Repeat(Store.Root,ResourcePolicy.MaxSlots).ToArray();await ApplyDroppedDirectoriesAsync(dropped,null,config.Draft.Revision);
             check("ACC-L02 sixteen dropped directories are applied atomically",config.Draft.Slots.Count==ResourcePolicy.MaxSlots&&config.Draft.Slots.All(s=>s.Directory==Store.Root));
