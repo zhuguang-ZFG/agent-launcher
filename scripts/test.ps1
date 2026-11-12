@@ -1,7 +1,7 @@
-param([switch]$SkipUi, [switch]$SkipBrowser)
+param([switch]$SkipUi, [switch]$SkipBrowser, [string]$RuntimeDirectory = (Join-Path $PSScriptRoot '../artifacts/test-runtime'))
 $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$runtime=Join-Path $root 'artifacts/test-runtime'
+$runtime=[IO.Path]::GetFullPath($RuntimeDirectory)
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
 foreach($project in @('tests/AgentLauncher.Tests','src/AgentLauncher.Worker','src/AgentLauncher.App')){
@@ -11,7 +11,10 @@ foreach($project in @('tests/AgentLauncher.Tests','src/AgentLauncher.Worker','sr
 }
 $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-integration-'+[guid]::NewGuid().ToString('N'))
 $env:AGENT_LAUNCHER_FAKE_SAMPLE='1'
+$previousPiAgentDir=$env:PI_CODING_AGENT_DIR
 try {
+  # Even --version may initialize Pi's configuration. Tests must never write to the user's real agent directory.
+  $env:PI_CODING_AGENT_DIR=Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'pi-config'
   $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-repairs-'+[guid]::NewGuid().ToString('N'))
   & (Join-Path $runtime 'AgentLauncher.Tests.exe') --repair-checks
   if($LASTEXITCODE -ne 0){throw 'Repair checks failed'}
@@ -49,6 +52,7 @@ try {
   if($LASTEXITCODE -ne 0){throw 'Prototype model tests failed'}
   if(-not $SkipBrowser){& node (Join-Path $root 'scripts/test-browser.mjs');if($LASTEXITCODE -ne 0){throw 'Browser tests failed'}}
 } finally {
+  $env:PI_CODING_AGENT_DIR=$previousPiAgentDir
   Remove-Item Env:AGENT_LAUNCHER_FAKE_SAMPLE -ErrorAction SilentlyContinue
   Remove-Item Env:AGENT_LAUNCHER_TEST_ROOT -ErrorAction SilentlyContinue
 }

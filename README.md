@@ -2,7 +2,7 @@
 
 Windows 原生配置窗口 + Windows Terminal 分屏。默认只启用一个 Agent；同项目多项使用独立 Git worktree，或明确选用现有目录/共享目录。
 
-本轮 CR-N01～N04 的完整候选为 `artifacts/preview-review-20261112/AgentLauncher.App.exe`，分发包为 `artifacts/preview-review-20261112.zip`；完整验证结果见实现记录第 33 节及包内 `verification.json`。请保留同目录所有 DLL、Worker 和 runtimeconfig 文件。其他电脑需要 .NET 8 Desktop Runtime x64、Windows Terminal、所选 CLI；自动 worktree 需要 Git。此包不是自包含安装包，也不是已经完成长时负载验证的稳定版。
+本机现有入口为 `artifacts/preview-claim-recovery/AgentLauncher.App.exe`，版本与对应 CI 记录见包内 `verification.json`；分发包按提交号保存为 `artifacts/AgentLauncher-preview-<提交号>.zip`。请保留同目录所有 DLL、Worker 和 runtimeconfig 文件。其他电脑需要 .NET 8 Desktop Runtime x64、Windows Terminal、所选 CLI；自动 worktree 需要 Git。此包不是自包含安装包，也不是已经完成长时负载验证的稳定版。
 当前机器桌面已有 **多 Agent 启动器** 快捷方式（`D:/Desktop/多 Agent 启动器.lnk`）。版本切换需先核对活动 Worker，不能覆盖正在运行的包；完整候选和回退路径见实现记录。资源不足可选择按资源依次启动并等待，启动器不会绕过保护强行运行。
 本轮另生成 `artifacts/spec-candidate/AgentLauncher.App.exe`（win-x64 自包含技术预览，内含 .NET 8.0.25）。仍须保留整个目录，外部 Git / Terminal / CLI 不内置；尚未签名或通过完整发布验收。当前验证范围与限制见实现记录第 8 节。
 
@@ -37,9 +37,9 @@ Windows 原生配置窗口 + Windows Terminal 分屏。默认只启用一个 Age
 
 构建：`powershell -NoProfile -File scripts/build.ps1`。
 
-开发验证：`powershell -NoProfile -File scripts/test.ps1`。测试构建使用隔离临时目录、短生命周期进程，包含故障注入和模拟准入采样；会短暂打开一个测试 Terminal 双窗格。该测试模式不编入 preview 生产配置。不要用测试目录的 exe 日常运行。
+开发验证：`powershell -NoProfile -File scripts/test.ps1`。测试构建使用隔离临时目录、短生命周期进程，包含故障注入和模拟准入采样；会短暂打开双窗格及 16 窗格测试。Pi 版本检查使用临时配置目录，不写入用户配置。旧测试监控器占用默认构建目录时，可用 `-RuntimeDirectory artifacts/test-runtime-<唯一名称>` 指定新目录。该测试模式不编入 preview 生产配置。不要用测试目录的 exe 日常运行。
 
-历史 CR01～CR12 修复见[实现记录](docs/IMPLEMENTATION.md)第 10～12 节；这些章节的数量与发布路径是当时结果。当前审查与修复见第 32～34 节，旧 `artifacts/preview` 与第 8 节自包含包不包含本轮修复。新增回归仍待独立审查；operator `task_verify` 未有可用基线，手动检查结果不等于完整 spec 验收。
+历史 CR01～CR12 修复见[实现记录](docs/IMPLEMENTATION.md)第 10～12 节；这些章节的数量与发布路径是当时结果。后续审查、修复和验收见第 32 节起的记录，旧 `artifacts/preview` 与第 8 节自包含包不包含本轮修复。新增回归仍待独立审查；operator `task_verify` 未有可用基线，手动检查结果不等于完整 spec 验收。
 
 
 源码使用 .NET BCL/WPF，没有引用第三方 NuGet UI 库。Git、Terminal 和各 CLI 是用户已有的外部程序，不随包复制。工具默认在 `%LOCALAPPDATA%\AgentLauncher` 保存配置、备份、授权记录及准备目录；不会自动删除工作目录或计划，控制账本的已结束历史按大小上限裁剪。配置中参数按本地执行需要保存，请勿在参数中填写长期密钥。

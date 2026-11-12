@@ -900,3 +900,12 @@ powershell -NoProfile -File scripts/test.ps1
 - 本机匹配测试构建 `artifacts/concurrent-start-fixed/`：独立 16 Worker 回归 **16/16 就绪，统一释放后全部 Finished/0**；新增两项排队边界检查 **2/2 通过**。其中正常释放场景在互斥内等待 9 秒，超过 IPC 预算，仍保持 Pending、无子进程输出/回执且 status 可查询；另一场景让互斥所有者 exit 97，等待项随后正常执行并 Settled。测试夹具只操作独立 AgentLauncher-tests-* 根。
 - `scripts/test.ps1` 将两项边界检查作为独立启动阶段，随后继续直接并发、真实 Terminal、全量集成、WPF、原型及浏览器检查，失败诊断仍上传。最终对应 SHA 的 CI、生产包和入口切换证据单独保存在 artifacts；不以本机定向通过替代完整门禁。
 - S0.6 的 30 分钟三轮、真实中文 CLI 两小时、生产 Terminal F12 人工交互、无障碍/干净环境分发与 S5 的能力前置仍须实际完成；本节不将它们标成通过。缺失身份的旧记录与无法证明结束的进程树继续保留待核对状态。
+
+## 39. 本机 Pi / Terminal 集成前提补齐（2026-11-12）
+
+- `7e014a02a6a2df91d1ab0f3a1389ec5f4e4199d2` 的完整 CI run `43248830224` 于 **2026-11-12 15:45:54 UTC** 成功完成，覆盖新增启动排队边界、直接 16 Worker、真实 16 窗格、全量集成、WPF、原型及浏览器；这才是第 38 节修复的完整 CI 证据。后续测试脚本维护提交仍须核对其自身 SHA 的 CI。
+- 本机 Pi 已安装 **1.5.2**，CI 固定为 **1.5.0**。Pi 官方 `PI_CODING_AGENT_DIR` 指向隔离可写目录后，真实 `--version` exit 0；没有修改原用户配置。`scripts/test.ps1` 现为 Pi 设置独立测试配置根，并在 finally 恢复调用者的变量，消除版本检查初始化原用户目录引发的 EPERM。
+- 官方 Terminal **1.25.3131.0 x64** 便携 ZIP 已下载到 artifacts，SHA-256 与官方 release asset digest 完全匹配，WindowsTerminal.exe 签名为 Valid。便携模式只写工作区，测试进程的 PATH 包含此入口；没有安装系统包、修改全局 PATH 或 Terminal 设置。真实独立 16 窗格检查通过；随后全量集成再次包含 16 窗格，结果 **121/121、0 失败**，此前 117/120 的三个本机前提失败已补齐（新增一项为 16 窗格回归）。证据：`artifacts/local-integration-complete-7e014a0.json`。
+- 同一产品修复的原生/模型 **131/131、0 失败**。测试 runner 增加 `-RuntimeDirectory`，允许在旧测试监控器仍持有默认目录时使用新发布目录；不会为重建而结束旧进程。正在验证的本机统一脚本使用此选项、隔离 Pi 及便携 Terminal；浏览器仍另以完整 CI 验证，本机脚本的 SkipBrowser 会明确记录，不能标为本机完整 gate。
+- 2026-11-12 **15:36:51 UTC** 原生内存预检可用物理内存 **3,175,452,672 bytes**，S0.6 默认双任务要求 **3,758,096,384 bytes**，准入不满足，已执行轮数仍为 0。证据：`artifacts/acceptance-preflight-7e014a0.json`。独立真实长期负载、S5 与人工验收继续按实际状态保留；不靠降低门槛、终止用户进程或远端普通 CI 成功替代。
+- 最终生产 App/Worker 必须按同一最终提交顺序发布，扫描无测试钩子，并在匹配 SHA 的完整 CI 成功后替换 `artifacts/preview-claim-recovery/`；原快捷方式的目标路径不变。逐文件 SHA-256、ZIP 和旧目录备份保存在 artifacts 的最终提交交付清单中，操作结果以清单为准。

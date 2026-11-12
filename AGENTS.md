@@ -46,6 +46,7 @@ powershell -NoProfile -File scripts/build.ps1
 
 # Full verification: model tests → integration → WPF UI checks → node tests → browser tests
 powershell -NoProfile -File scripts/test.ps1            # add -SkipUi and/or -SkipBrowser to shorten
+# Use -RuntimeDirectory artifacts/test-runtime-<unique-name> if an older test monitor still holds the default runtime.
 
 # Fastest loop: model/native tests only
 dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release
@@ -90,6 +91,7 @@ dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Rel
 
 - **Single supported gate**: `scripts/test.ps1`. Phases: model/Win32 tests; sequential `INTEGRATION_TESTS` publishes; repair checks; startup queue, direct 16-Worker, real 16-pane Terminal and full integration suites in separate fresh test roots; WPF checks (30 s without progress, 90 s total maximum); prototype and headless-Edge CDP checks. WPF expects `artifacts/ui/ui-checks.json`; failed CI retains diagnostics.
 - **Never run test-build exes from `artifacts/test-runtime` interactively** (README warning); integration tests require `AGENT_LAUNCHER_TEST_ROOT` containing `AgentLauncher-tests-` as a hard guard.
+- Pi checks use a temporary `PI_CODING_AGENT_DIR` and restore the caller's value; never depend on or write to real user agent configuration.
 - No coverage tooling, no mocking framework; the test exe doubles as a child-process fixture (`--echo`, `--hold`, `--allocate`).
 - New tests go in `tests/AgentLauncher.Tests/Program.cs` (`Test("ID name", …)`), `Integration.cs` (`await Test(...)`), or `tests/prototype.test.cjs` (`test('ID: name', …)`), keyed to `docs/ACCEPTANCE.md` IDs.
 - Evidence discipline: record test ID, build, machine, expected vs actual, and artifact paths in `docs/IMPLEMENTATION.md`; never weaken tests, edit thresholds, or fabricate results to go green (`docs/ACCEPTANCE.md` §gates).
