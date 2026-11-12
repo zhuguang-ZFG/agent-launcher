@@ -13,6 +13,7 @@ internal static class Program
         try
         {
             if(args is ["monitor"])return new Monitor().Run();
+            if(args is ["root-anchor"])return 0;
             if(args.Length>=6&&args[0]=="pool-host")return PoolHost(args);
             if(args.Length==2 && args[0] is "pane" or "run" && Guid.TryParse(args[1],out var id))return RunPane(id,args[0]=="pane");
             Console.Error.WriteLine("用法: monitor | pane <attempt-guid> | pool-host <池> <项> <就绪> <释放> <新建池>");return 2;
@@ -237,6 +238,14 @@ internal sealed class Monitor : IDisposable
                 try{Save();}catch(Exception e)when(e is InvalidDataException or IOException){ledgerBroken=true;ledgerBrokenDetail="控制账本无法安全写入，已停止启动与回收："+e.Message;blocked=ledgerBrokenDetail;}
             }
             root=new Job(Store.RootJob,root:true,cpuRate:RootCpuRate());
+            if(root.CreatedNew)
+            {
+                // Fix the root's ancestor chain from the monitor before a Terminal-owned Worker can be its first member.
+                // Otherwise an empty root first used by Terminal can inherit a different outer Job and reject later pool helpers.
+                using var anchor=new ProtectedProcess(new(Store.WorkerPath,["root-anchor"],"exe"),Store.Root,[root],createNoWindow:true);
+                anchor.Resume();
+                if(!anchor.Process.WaitForExit(5000)||anchor.Process.ExitCode!=0)throw new IOException("资源保护根初始化未完成，已停止启动；请核对监控器记录。");
+            }
             RefreshRootCpu();
             sampler.Sample();Thread.Sleep(250);Refresh();
             while(true)
@@ -271,7 +280,13 @@ internal sealed class Monitor : IDisposable
                         if(!pipe.IsConnected)continue;
                         var request=Ipc.ReadAsync<Request>(pipe,readDeadline.Token).GetAwaiter().GetResult();Refresh(forceSample:!ledger.Entries.Any(e=>!Store.IsTerminal(e)));
                         Response response;
-                        try{response=Handle(request);}catch(Exception e)when(e is not OutOfMemoryException){response=new(false,e.Message);}
+                        try{response=Handle(request);}
+                        catch(Exception e)when(e is not OutOfMemoryException)
+                        {
+                            if(e is System.ComponentModel.Win32Exception)
+                                try{Store.Save(Store.FilePath("monitor-native-error.json"),new{At=DateTimeOffset.UtcNow,request.Operation,request.Attempt,Type=e.GetType().FullName,e.HResult,Error=e.ToString()});}catch(Exception writeError)when(writeError is not OutOfMemoryException){}
+                            response=new(false,e.Message);
+                        }
                         // Completed authority work must not spend the time reserved for transmitting its outcome.
                         using var replyDeadline=new CancellationTokenSource(3000);
                         Ipc.WriteResponseAsync(pipe,response,replyDeadline.Token).GetAwaiter().GetResult();
@@ -724,7 +739,7 @@ internal sealed class Monitor : IDisposable
         var ready=PoolMarker(id,"ready");var release=PoolMarker(id,"release");
         Directory.CreateDirectory(Path.GetDirectoryName(ready)!);
         File.Delete(ready);File.Delete(release);
-        using var helper=new ProtectedProcess(new(Store.WorkerPath,["pool-host",Store.PoolName(id),"",ready,release,"1",limit.ToString(System.Globalization.CultureInfo.InvariantCulture)],"exe"),Store.Root,[root!]);
+        using var helper=new ProtectedProcess(new(Store.WorkerPath,["pool-host",Store.PoolName(id),"",ready,release,"1",limit.ToString(System.Globalization.CultureInfo.InvariantCulture)],"exe"),Store.Root,[root!],createNoWindow:true);
         helper.Resume();
         WaitForPool(ready,id);
         var pool=new Job(Store.PoolName(id),openOnly:true);
@@ -752,7 +767,7 @@ internal sealed class Monitor : IDisposable
         var ready=PoolMarker(itemId,"ready");var release=PoolMarker(itemId,"release");
         Directory.CreateDirectory(Path.GetDirectoryName(ready)!);
         File.Delete(ready);File.Delete(release);
-        using var helper=new ProtectedProcess(new(Store.WorkerPath,["pool-host",Store.PoolName(poolId),Store.JobName(itemId),ready,release,"0",limit.ToString(System.Globalization.CultureInfo.InvariantCulture),itemLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)],"exe"),Store.Root,[root!,pool]);
+        using var helper=new ProtectedProcess(new(Store.WorkerPath,["pool-host",Store.PoolName(poolId),Store.JobName(itemId),ready,release,"0",limit.ToString(System.Globalization.CultureInfo.InvariantCulture),itemLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)],"exe"),Store.Root,[root!,pool],createNoWindow:true);
         helper.Resume();
         WaitForPool(ready,itemId);
         var item=new Job(Store.JobName(itemId),openOnly:true);

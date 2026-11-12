@@ -69,6 +69,32 @@ internal static class Integration
             }
             finally { Store.Save(Store.FilePath("configuration.json"),original??new Configuration()); }
         }
+        async Task TerminalPair()
+        {
+            var terminal=Commands.Terminal("");
+            await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
+            var batch=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-two.release");var items=Enumerable.Range(1,2).Select(n=>Item("Terminal fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-{n}.json"),release,"中文 & ; spaces"]) with{BatchId=batch,Position=n,Shared=true}).ToArray();
+            var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
+            try
+            {
+                Commands.SubmitTerminal(terminal,items,"vertical");
+                for(var i=0;i<100&&!items.All(item=>File.Exists(Path.Combine(Store.Root,$"terminal-{item.Position}.json")));i++)await Task.Delay(100);
+                foreach(var item in items)
+                {
+                    var actual=JsonDocument.Parse(File.ReadAllText(Path.Combine(Store.Root,$"terminal-{item.Position}.json"))).RootElement;
+                    Assert(actual.GetProperty("Cwd").GetString()==item.Cwd&&actual.GetProperty("Args")[0].GetString()=="中文 & ; spaces","Terminal changed the child cwd or literal arguments");
+                }
+            }
+            finally
+            {
+                File.WriteAllText(release,"release");
+                for(var i=0;i<100&&items.Any(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase!="Finished");i++)await Task.Delay(100);
+                await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            }
+            for(var i=0;i<100;i++){if(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"))break;await Task.Delay(100);}
+            Assert(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"),"Terminal panes did not complete");
+            Assert(File.Exists(Path.Combine(Store.Root,"terminal-1.json"))&&File.Exists(Path.Combine(Store.Root,"terminal-2.json")),"terminal command did not execute");await Ipc.SendAsync(new("status",Guid.NewGuid()));
+        }
         ProtectedProcess LaunchPooled(Job root,Guid poolId,Guid? itemId,string[] args)
         {
             using var pool=new Job(Store.PoolName(poolId),openOnly:true);
@@ -155,6 +181,7 @@ internal static class Integration
         }
         if(terminalOnly)
         {
+            if(!directBatch)await Test("Terminal two panes exact child cwd and arguments",TerminalPair);
             await Test("Terminal sixteen panes all become ready before any fixture exits",TerminalBatch);
             Store.Save(Store.FilePath("integration-results.json"),evidence);
             return evidence.Any(e=>e.GetType().GetProperty("passed")?.GetValue(e) is false)?1:0;
@@ -499,26 +526,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             for(var i=0;i<100&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase!="Finished";i++)await Task.Delay(100);
             Assert(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0}&&File.Exists(output),"literal title changed Terminal command parsing");await Ipc.SendAsync(new("status",Guid.NewGuid()));
         });
-        await Test("Terminal two panes exact child cwd and arguments",async()=>{
-            var terminal=Commands.Terminal("");
-            await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
-            var batch=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-two.release");var items=Enumerable.Range(1,2).Select(n=>Item("Terminal fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-{n}.json"),release,"中文 & ; spaces"]) with{BatchId=batch,Position=n,Shared=true}).ToArray();
-            var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
-            try
-            {
-                Commands.SubmitTerminal(terminal,items,"vertical");
-                for(var i=0;i<100&&!items.All(item=>File.Exists(Path.Combine(Store.Root,$"terminal-{item.Position}.json")));i++)await Task.Delay(100);
-                foreach(var item in items)
-                {
-                    var actual=JsonDocument.Parse(File.ReadAllText(Path.Combine(Store.Root,$"terminal-{item.Position}.json"))).RootElement;
-                    Assert(actual.GetProperty("Cwd").GetString()==item.Cwd&&actual.GetProperty("Args")[0].GetString()=="中文 & ; spaces","Terminal changed the child cwd or literal arguments");
-                }
-            }
-            finally{File.WriteAllText(release,"release");}
-            for(var i=0;i<100;i++){if(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"))break;await Task.Delay(100);}
-            Assert(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"),"Terminal panes did not complete");
-            Assert(File.Exists(Path.Combine(Store.Root,"terminal-1.json"))&&File.Exists(Path.Combine(Store.Root,"terminal-2.json")),"terminal command did not execute");await Ipc.SendAsync(new("status",Guid.NewGuid()));
-        });
+        await Test("Terminal two panes exact child cwd and arguments",TerminalPair);
         await Test("Terminal sixteen panes all become ready before any fixture exits",TerminalBatch);
         await Test("ACC-S3B01 shared pool bills once, keeps kernel caps and launches on a root-pool-item chain",async()=>{
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};

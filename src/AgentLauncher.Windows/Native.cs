@@ -164,8 +164,8 @@ public sealed class ProtectedProcess : IDisposable
     private Native.ProcessInfo info;
     public Process Process { get; }
     public long CreationTime { get; }
-    public ProtectedProcess(CommandSpec command,string cwd,Job root,Job child,bool redirected=false):this(command,cwd,[root,child],redirected){}
-    public ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,bool redirected=false)
+    public ProtectedProcess(CommandSpec command,string cwd,Job root,Job child,bool redirected=false,bool createNoWindow=false):this(command,cwd,[root,child],redirected,createNoWindow){}
+    public ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,bool redirected=false,bool createNoWindow=false)
     {
         if(chain.Count<1)throw new ArgumentException("启动链至少需要一个任务组。",nameof(chain));
         var attributeCount=redirected?2:1;
@@ -185,7 +185,7 @@ public sealed class ProtectedProcess : IDisposable
                 startup.Info.Flags=0x100;startup.Info.StdInput=std[0];startup.Info.StdOutput=std[1];startup.Info.StdError=std[2];
             }
             var line=new StringBuilder(string.Join(" ",new[]{command.Executable}.Concat(command.Arguments).Select(Quote)));
-            Native.Check(Native.CreateProcess(command.Executable,line,IntPtr.Zero,IntPtr.Zero,redirected,0x00080000|0x4,IntPtr.Zero,cwd,ref startup,out info));
+            Native.Check(Native.CreateProcess(command.Executable,line,IntPtr.Zero,IntPtr.Zero,redirected,0x00080000|0x4|(createNoWindow?0x08000000u:0),IntPtr.Zero,cwd,ref startup,out info));
             foreach(var level in chain){Native.Check(Native.IsProcessInJob(info.Process,level.Handle,out var joined));if(!joined)throw new IOException("进程未进入要求的资源组。");}
             Process=Process.GetProcessById((int)info.Pid);_ = Process.Handle;CreationTime=Process.StartTime.ToUniversalTime().ToFileTimeUtc();
         }

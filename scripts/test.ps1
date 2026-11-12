@@ -26,7 +26,7 @@ try {
     finally {
     $diagnostics=Join-Path $root ('artifacts/ci-diagnostics/'+$suite)
     New-Item -ItemType Directory -Path $diagnostics -Force | Out-Null
-    foreach($name in @('control.json','control.json.bak','monitor-pid.json','monitor-error.json','terminal-16-diagnostics.json','integration-results.json','attempts')){
+    foreach($name in @('control.json','control.json.bak','monitor-pid.json','monitor-error.json','monitor-native-error.json','terminal-16-diagnostics.json','integration-results.json','attempts')){
       $source=Join-Path $env:AGENT_LAUNCHER_TEST_ROOT $name
       if(Test-Path -LiteralPath $source){Copy-Item -LiteralPath $source -Destination $diagnostics -Recurse -Force}
     }

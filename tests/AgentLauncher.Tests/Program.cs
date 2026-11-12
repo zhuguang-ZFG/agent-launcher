@@ -25,7 +25,13 @@ if(args.Length>0&&args[0]=="--echo") { File.WriteAllText(args[1],JsonSerializer.
 if(args.Length>=3&&args[0]=="--pane-ready")
 {
     var paneReadyOutput=args[1];var paneRelease=args[2];
-    using(var file=new FileStream(paneReadyOutput,FileMode.CreateNew,FileAccess.Write,FileShare.Read))JsonSerializer.Serialize(file,new{Pid=Environment.ProcessId,Cwd=Environment.CurrentDirectory,Args=args.Skip(3).ToArray()});
+    var pendingReady=paneReadyOutput+"."+Guid.NewGuid().ToString("N")+".tmp";
+    try
+    {
+        using(var file=new FileStream(pendingReady,FileMode.CreateNew,FileAccess.Write,FileShare.Read)){JsonSerializer.Serialize(file,new{Pid=Environment.ProcessId,Cwd=Environment.CurrentDirectory,Args=args.Skip(3).ToArray()});file.Flush(true);}
+        File.Move(pendingReady,paneReadyOutput); // Atomic visibility; never overwrite another execution's readiness proof.
+    }
+    finally{if(File.Exists(pendingReady))File.Delete(pendingReady);}
     var deadline=Stopwatch.StartNew();
     while(!File.Exists(paneRelease)){if(deadline.Elapsed>TimeSpan.FromSeconds(60))return 3;Thread.Sleep(50);}
     return 0;

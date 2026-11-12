@@ -919,3 +919,12 @@ powershell -NoProfile -File scripts/test.ps1
 - 更新双窗格夹具为与长期 CLI 相符的就绪/释放屏障，继续真实核对 cwd 与中文、分号、空格字面参数。新增外部 Terminal 替身验证“未领取不发送下一项、取消不继续发送”，并保留真实 Terminal 检查。真实 16 窗格连续 **8 轮、128 项全部通过**；启动事务正常/崩溃释放与断连检查均通过。生产 solution 编译 **0 警告、0 错误**。新增快照和夹具之后仍以最终 SHA 的完整 gate 为发布依据。
 - `artifacts/production-pane-check/result.json` 对 `ca6def3` 生产 Worker 的真实 Terminal 自动化检查 **3/3 通过**：异常退出、明确内存受限两种情形忽略缓冲 Enter，F12 可关闭；正常退出 Enter 可关闭。该探针使用真实生产程序集和 console input，并非 `INTEGRATION_TESTS` 跳过等待；仍不冒充独立人类验收。后续产品提交须核对相同逻辑及最终包。
 - 长期代表性负载、两小时真实中文 CLI、S5 及无障碍/干净环境人工验收未获得新通过证据，继续保留实际状态。当前处理的是可执行的故障修复、完整门禁与最终交付，不将短回归或 CI 代替这些要求。
+
+## 41. 资源根首次归属与夹具原子就绪（2026-11-13，Asia/Shanghai）
+
+- `f54e405dbc99497ec20fb693386da94df574146f` 的完整 CI run `43261584312` 于 **2026-11-12 16:59:16 UTC** 成功。同期本机 `local-final-pane-claims` 的统一脚本 exit 1：新双窗格夹具在文件存在但尚未写完时读取就绪 JSON，出现共享冲突，继而未等待全部收尾使后续准入失败。该次失败完整保留，不冒充本机通过。
+- 就绪证明改为先以 CreateNew 写临时文件并 flush，关闭后无覆盖 Move 到最终文件；测试只读原子发布的文件。重复执行仍因最终文件已存在而失败。双窗格 finally 释放后等待 Finished 并核对 status，避免失败污染后续预算；它与 16 窗格现共用独立 Terminal 专项门禁。
+- 新顺序 **“空资源根先启动 Terminal 独立双项 → 排干 → 预约共享池 16 项”** 稳定触发另一个真实错误：monitor reserve 在 `ProtectedProcess.CreateProcess` 创建 pool-host 时返回 **Win32 5 拒绝访问**。源调用栈由 `monitor-native-error.json` 保存，证据为 `artifacts/root-job-ancestry-red.json`。这是 Job 层级首次归属问题：空根首次由 Terminal 家族创建成员后，后续来自另一个外层 Job 家族的 monitor helper 不再兼容；不应删除限制或启用 breakaway 绕过。
+- 新建根 Job 时，monitor 在提供服务前创建并等待一个 `root-anchor` 短进程，使用原保护创建路径固定与 monitor 一致的祖先链，保留 CPU 上限和原子 Job 关联；打开已有根时不改变它。初始化未完成则阻止启动。anchor 与 pool-host 使用 CREATE_NO_WINDOW，避免内部助手闪出控制台，不改变交互 Agent 的控制台行为。
+- 同一输入修复前双窗格通过、共享池预约拒绝；修复后专项门禁 **3 轮全部通过，每轮真实双窗格与共享 16 窗格均完成**。证据 `artifacts/anchor-hidden-1.json`～`anchor-hidden-3.json`，本机 Test/Worker 顺序发布 0 警告、0 错误。新增 native 错误诊断仅记录操作、attempt、类型/错误码/堆栈，不记录参数；CI 保留此文件。最终提交仍须完整 CI 后交付。
+- 这些复现不证明用户历史 cmd 退出或所有 15/16 都是同一个原因。可确认的缺陷、缓解效果、长期验证与无法证明的历史事件继续分别记录；未知退出、无身份旧记录不自动释放或重放。
