@@ -460,6 +460,65 @@ internal static class ResourcePolicyChecks
             }
         });
 
+        Test("QQ-C11 raw schema3 claim presence fails closed while legacy files migrate to empty", () =>
+        {
+            var temp = Path.Combine(Path.GetTempPath(), "AgentLauncher-tests-ledger-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            string Raw(string name, string json)
+            {
+                var path = Path.Combine(temp, name);
+                File.WriteAllText(path, json);
+                return path;
+            }
+            void Rejected(string name, string json)
+            {
+                var path = Raw(name, json);
+                var rejected = false;
+                try { LedgerMigration.Accept(Store.Read<Ledger>(path)!); } catch (InvalidDataException) { rejected = true; }
+                if (!rejected) throw new Exception(name + " was accepted without a TaskClaims presence proof");
+                if (File.ReadAllText(path) != json) throw new Exception(name + " was rewritten by a rejected read");
+            }
+            Rejected("ledger-missing-claims.json", """{"SchemaVersion":3,"BootId":"boot","Entries":[],"Pools":[]}""");
+            Rejected("ledger-null-claims.json", """{"SchemaVersion":3,"BootId":"boot","Entries":[],"Pools":[],"TaskClaims":null}""");
+            Rejected("ledger-legacy-null-claims.json", """{"SchemaVersion":2,"BootId":"boot","Entries":[],"Pools":[],"TaskClaims":null}""");
+            foreach (var version in new[] { 1, 2 })
+            {
+                var raw = "{\"SchemaVersion\":" + version + ",\"BootId\":\"boot\",\"Entries\":[],\"Pools\":[]}";
+                var path = Raw("ledger-missing-claims-v" + version + ".json", raw);
+                var migrated = LedgerMigration.Accept(Store.Read<Ledger>(path)!);
+                if (migrated.SchemaVersion != LedgerMigration.CurrentSchemaVersion || migrated.TaskClaims.Count != 0)
+                    throw new Exception("legacy schema " + version + " missing claims did not migrate to an empty list");
+                if (File.ReadAllText(path) != raw) throw new Exception("legacy schema " + version + " was rewritten by migration");
+            }
+            var present = Raw("ledger-empty-claims.json", """{"SchemaVersion":3,"BootId":"boot","Entries":[],"Pools":[],"TaskClaims":[]}""");
+            if (LedgerMigration.Accept(Store.Read<Ledger>(present)!).TaskClaims.Count != 0) throw new Exception("explicit empty claims did not stay empty");
+            LedgerMigration.Accept(new Ledger());
+            var roundTrip = Path.Combine(temp, "ledger-default-round-trip.json");
+            Store.Save(roundTrip, new Ledger());
+            LedgerMigration.Accept(Store.Read<Ledger>(roundTrip)!);
+        });
+
+        Test("QQ-C12 raw schema3 claim identity validation stays fail-closed", () =>
+        {
+            var temp = Path.Combine(Path.GetTempPath(), "AgentLauncher-tests-ledger-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            var path = Path.Combine(temp, "ledger-invalid-claims.json");
+            var attempt = Guid.NewGuid();
+            var raw = """{"SchemaVersion":3,"BootId":"boot","Entries":[],"Pools":[],"TaskClaims":[{"EntryId":"1f4e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b","AttemptId":"00000000-0000-0000-0000-000000000000"}]}""";
+            File.WriteAllText(path, raw);
+            var rejected = false;
+            try { LedgerMigration.Accept(Store.Read<Ledger>(path)!); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("raw empty AttemptId was accepted");
+            raw = "{\"SchemaVersion\":3,\"BootId\":\"boot\",\"Entries\":[],\"Pools\":[],\"TaskClaims\":["
+                + "{\"EntryId\":\"" + Guid.NewGuid() + "\",\"AttemptId\":\"" + attempt + "\"},"
+                + "{\"EntryId\":\"" + Guid.NewGuid() + "\",\"AttemptId\":\"" + attempt + "\"}]}";
+            File.WriteAllText(path, raw);
+            rejected = false;
+            try { LedgerMigration.Accept(Store.Read<Ledger>(path)!); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("raw duplicate AttemptId was accepted");
+            if (File.ReadAllText(path) != raw) throw new Exception("invalid claim file was rewritten");
+        });
+
         Test("ACC-S3A07 boot rollover settles entries and retires pool records", () =>
         {
             var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,

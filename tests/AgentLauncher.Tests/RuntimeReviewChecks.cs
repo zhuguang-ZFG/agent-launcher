@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
@@ -38,6 +39,10 @@ internal static class RuntimeReviewChecks
         await test("QQ-C03 failed ledger publish rolls back both reservation and queue claim",()=>TaskClaimRollbackAsync(cwd));
         await test("QQ-C04 revoked and pruned attempt history never releases a durable queue claim",()=>TaskClaimPruningAsync(cwd));
         await test("QQ-C05 legacy unrecorded task reservations block fresh claims",()=>LegacyTaskClaimAsync(cwd));
+        await test("QQ-C07 empty attempt identity is refused before any ledger change",()=>EmptyAttemptAsync(cwd));
+        await test("QQ-C08 pruned attempt identity cannot be re-claimed for another queue entry",()=>PrunedAttemptReuseAsync(cwd));
+        await test("QQ-C09 schema3 ledger with missing or null TaskClaims stops the monitor without rewrite",()=>MissingClaimsRestartAsync(cwd));
+        await test("QQ-C10 generic reservation cannot resurrect a retained task attempt",()=>GenericRetainedAttemptAsync(cwd));
     }
 
     private static void Assert(bool value,string message){if(!value)throw new Exception(message);}
@@ -159,6 +164,111 @@ internal static class RuntimeReviewChecks
         var refused=await monitor.SendAsync(TaskReservation(entry,fresh,policy));
         Assert(!refused.Ok&&(await monitor.SendAsync(new("status",Guid.NewGuid()))).Entries?.Single().Plan.Id==prior.Id,
             "upgrade guessed a new authorization for a legacy reservation without StartRun");
+    }
+
+    private static async Task EmptyAttemptAsync(string cwd)
+    {
+        using var monitor=await OwnedMonitor.StartAsync(cwd);
+        var (entry,plan,policy)=PendingTask(monitor.Root);
+        var ledgerPath=Path.Combine(monitor.Root,"control.json");
+        var before=File.ReadAllBytes(ledgerPath);
+        var refused=await monitor.SendAsync(TaskReservation(entry,plan with{Id=Guid.Empty},policy));
+        Assert(!refused.Ok,"empty attempt identity was accepted as a queue claim");
+        Assert(!string.IsNullOrWhiteSpace(refused.Message),"refused empty attempt did not explain itself");
+        Assert(File.ReadAllBytes(ledgerPath).SequenceEqual(before),"refused empty attempt changed control.json");
+        var status=await monitor.SendAsync(new("status",Guid.NewGuid()));
+        Assert(status.Ok,"refused empty attempt broke monitor health: "+status.Message);
+        Assert(status.Entries is {Length:0},"refused empty attempt appeared in the ledger");
+        var accepted=plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()};
+        var valid=await monitor.SendAsync(TaskReservation(entry,accepted,policy));
+        Assert(valid.Ok,"refused empty attempt blocked the next valid claim: "+valid.Message);
+        var disk=Store.Read<Ledger>(ledgerPath)!;
+        Assert(disk.TaskClaims.Single()==new TaskReservationClaim(entry.Id,accepted.Id),"valid claim did not replace the refused identity");
+        LedgerMigration.Accept(disk);
+        monitor.Crash();
+        using var restarted=await OwnedMonitor.StartAsync(cwd,existingRoot:monitor.Root);
+        var replay=await restarted.SendAsync(TaskReservation(entry,accepted,policy));
+        Assert(replay.Ok&&replay.Entries?.Single().Plan.Id==accepted.Id,"restart after a refused empty attempt lost the valid claim");
+        Assert(Store.Read<Ledger>(ledgerPath)!.TaskClaims.Single()==new TaskReservationClaim(entry.Id,accepted.Id),"restart changed the persisted claim");
+    }
+
+    private static async Task PrunedAttemptReuseAsync(string cwd)
+    {
+        var root=OwnedRoot(cwd);
+        var (entry,plan,policy)=PendingTask(root);
+        var ledgerPath=Path.Combine(root,"control.json");
+        var owner=Guid.NewGuid();
+        Store.Save(ledgerPath,new Ledger{BootId=Store.BootId(),TaskClaims=[new(owner,plan.Id)]});
+        using var monitor=await OwnedMonitor.StartAsync(cwd,existingRoot:root);
+        var before=File.ReadAllBytes(ledgerPath);
+        var reused=await monitor.SendAsync(TaskReservation(entry,plan,policy));
+        Assert(!reused.Ok,"a pruned attempt identity was re-claimed for another queue entry");
+        Assert(File.ReadAllBytes(ledgerPath).SequenceEqual(before),"refused reused attempt changed control.json");
+        var persisted=Store.Read<Ledger>(ledgerPath)!;
+        Assert(persisted.TaskClaims.Single()==new TaskReservationClaim(owner,plan.Id),"refused reused attempt displaced or duplicated the retained claim");
+        LedgerMigration.Accept(persisted);
+        var accepted=plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()};
+        var valid=await monitor.SendAsync(TaskReservation(entry,accepted,policy));
+        Assert(valid.Ok,"refused reused attempt blocked the next valid claim: "+valid.Message);
+        persisted=Store.Read<Ledger>(ledgerPath)!;
+        Assert(persisted.TaskClaims.Count==2&&persisted.TaskClaims.Any(claim=>claim.AttemptId==accepted.Id),"valid claim was not added beside the retained claim");
+        LedgerMigration.Accept(persisted);
+        monitor.Crash();
+        using var restarted=await OwnedMonitor.StartAsync(cwd,existingRoot:root);
+        var replay=await restarted.SendAsync(TaskReservation(entry,accepted,policy));
+        Assert(replay.Ok&&replay.Entries?.Single().Plan.Id==accepted.Id,"restart lost the valid claim beside a retained pruned attempt");
+        Assert(Store.Read<Ledger>(ledgerPath)!.TaskClaims.Count==2,"restart changed the durable claim set");
+    }
+
+    private static async Task MissingClaimsRestartAsync(string cwd)
+    {
+        foreach(var variant in new[]{"missing","null"})
+        {
+            var root=OwnedRoot(cwd);
+            var (entry,plan,policy)=PendingTask(root);
+            var ledgerPath=Path.Combine(root,"control.json");
+            Store.Save(ledgerPath,new Ledger{BootId=Store.BootId(),TaskClaims=[new(entry.Id,plan.Id)]});
+            var node=JsonNode.Parse(File.ReadAllText(ledgerPath))!.AsObject();
+            if(variant=="missing")Assert(node.Remove("TaskClaims"),"fixture ledger did not publish TaskClaims");
+            else node["TaskClaims"]=null;
+            File.WriteAllText(ledgerPath,node.ToJsonString());
+            var malformed=File.ReadAllBytes(ledgerPath);
+            using var monitor=await OwnedMonitor.StartAsync(cwd,existingRoot:root,requireHealthy:false);
+            var status=await monitor.SendAsync(new("status",Guid.NewGuid()));
+            Assert(!status.Ok&&!string.IsNullOrWhiteSpace(status.AdmissionBlockedReason),$"schema3 ledger with {variant} TaskClaims did not stop the monitor");
+            var retry=await monitor.SendAsync(TaskReservation(entry,plan,policy));
+            Assert(!retry.Ok,$"schema3 ledger with {variant} TaskClaims reauthorized a previously claimed attempt");
+            Assert(File.ReadAllBytes(ledgerPath).SequenceEqual(malformed),$"malformed {variant} schema3 ledger was rewritten");
+        }
+    }
+
+    private static async Task GenericRetainedAttemptAsync(string cwd)
+    {
+        var root=OwnedRoot(cwd);
+        var claimed=Guid.NewGuid();
+        var ledgerPath=Path.Combine(root,"control.json");
+        Store.Save(ledgerPath,new Ledger{BootId=Store.BootId(),TaskClaims=[new(Guid.NewGuid(),claimed)]});
+        using var monitor=await OwnedMonitor.StartAsync(cwd,existingRoot:root);
+        var before=File.ReadAllBytes(ledgerPath);
+        var reused=Item("claim-generic-reused",["--hold","1"],Path.Combine(root,"projects","reused")) with{Id=claimed};
+        var refused=await monitor.SendAsync(new("reserve",Guid.NewGuid(),[reused]));
+        Assert(!refused.Ok,"generic reserve resurrected a pruned task attempt identity");
+        Assert(File.ReadAllBytes(ledgerPath).SequenceEqual(before),"refused generic reuse changed control.json");
+        var persisted=Store.Read<Ledger>(ledgerPath)!;
+        Assert(persisted.Entries.Count==0&&persisted.TaskClaims.Single().AttemptId==claimed,"refused generic reuse mutated the ledger");
+        LedgerMigration.Accept(persisted);
+        var fresh=Item("claim-generic-fresh",["--hold","1"],Path.Combine(root,"projects","fresh"));
+        var accepted=await monitor.SendAsync(new("reserve",Guid.NewGuid(),[fresh]));
+        Assert(accepted.Ok,"refused generic reuse blocked a fresh reservation: "+accepted.Message);
+        var replay=await monitor.SendAsync(new("reserve",Guid.NewGuid(),[fresh]));
+        Assert(replay.Ok&&replay.Entries?.Single().Plan.Id==fresh.Id,"legitimate exact replay broke after the claim guard");
+        var disk=Store.Read<Ledger>(ledgerPath)!;
+        Assert(disk.Entries.Single().Plan.Id==fresh.Id&&disk.TaskClaims.Single().AttemptId==claimed,"fresh reservation or retained claim changed unexpectedly");
+        LedgerMigration.Accept(disk);
+        monitor.Crash();
+        using var restarted=await OwnedMonitor.StartAsync(cwd,existingRoot:root);
+        Assert((await restarted.SendAsync(new("status",Guid.NewGuid()))).Ok,"restart after generic reuse refusal is unreadable");
+        Assert(Store.Read<Ledger>(ledgerPath)!.Entries.Single().Plan.Id==fresh.Id,"restart changed the fresh reservation");
     }
 
     private static async Task FutureMemoryAsync(string cwd)
@@ -578,7 +688,7 @@ internal static class RuntimeReviewChecks
         public string Root { get; }
         private readonly string pipe;private readonly Process process;private readonly DateTime started;
         private OwnedMonitor(string root,string pipe,Process process){Root=root;this.pipe=pipe;this.process=process;started=process.StartTime;}
-        public static async Task<OwnedMonitor> StartAsync(string cwd,bool fakeSample=true,string? existingRoot=null)
+        public static async Task<OwnedMonitor> StartAsync(string cwd,bool fakeSample=true,string? existingRoot=null,bool requireHealthy=true)
         {
             var root=existingRoot??OwnedRoot(cwd);Directory.CreateDirectory(root);
             var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
@@ -586,15 +696,15 @@ internal static class RuntimeReviewChecks
             if(fakeSample)start.Environment["AGENT_LAUNCHER_FAKE_SAMPLE"]="1";else start.Environment.Remove("AGENT_LAUNCHER_FAKE_SAMPLE");
             var process=Process.Start(start)??throw new IOException("无法启动隔离监控器。");process.StandardInput.Close();
             var monitor=new OwnedMonitor(root,PipeFor(root),process);
-            try{await monitor.WaitReadyAsync();return monitor;}
+            try{await monitor.WaitReadyAsync(requireHealthy);return monitor;}
             catch{monitor.Dispose();throw;}
         }
-        private async Task WaitReadyAsync()
+        private async Task WaitReadyAsync(bool requireHealthy)
         {
             var deadline=DateTime.UtcNow.AddSeconds(15);
             while(DateTime.UtcNow<deadline)
             {
-                try{var status=await SendAsync(new("status",Guid.NewGuid()),TimeSpan.FromMilliseconds(800));if(status.Ok)return;}
+                try{var status=await SendAsync(new("status",Guid.NewGuid()),TimeSpan.FromMilliseconds(800));if(status.Ok||!requireHealthy)return;}
                 catch(Exception e)when(e is IOException or TimeoutException or OperationCanceledException){}
                 if(process.HasExited)throw new IOException("隔离监控器提前退出："+process.StandardError.ReadToEnd().Trim());
                 await Task.Delay(100);
