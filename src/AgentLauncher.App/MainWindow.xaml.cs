@@ -366,7 +366,11 @@ public partial class MainWindow : Window
         var settings=draft.Resource??new ResourceSettings();
         var policy=ResourcePolicy.SnapshotFor(settings,memory.Total,memory.CommitLimit);
         var reserved=(entries??[]).Where(e=>!Store.IsTerminal(e)).Select(e=>ResourcePolicy.BudgetOf(e.Plan,e.PoolMemoryLimit)).ToList();
-        var requested=draft.Slots.Where(s=>s.Enabled).Select(s=>new BudgetItem(s.Id,"agent",settings.PlanningBytes,settings.JobMemoryLimit)).ToList();
+        // One prepared batch shares one pool, exactly as WorkspacePreparer builds it; charging every slot on its own would bill a
+        // shared pool once per slot and disable the launch button the monitor would allow.
+        var poolId=ResourcePolicy.PoolModeOf(settings)==ResourcePolicy.PoolShared?Guid.NewGuid():(Guid?)null;
+        var poolLimit=poolId is null?(ulong?)null:ResourcePolicy.PoolLimitOf(settings);
+        var requested=draft.Slots.Where(s=>s.Enabled).Select(s=>new BudgetItem(s.Id,"agent",settings.PlanningBytes,settings.JobMemoryLimit,poolId,poolLimit)).ToList();
         if(includeGitPreparation)
         {
             var enabled=draft.Slots.Where(s=>s.Enabled).Select(s=>PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(s.Directory)?draft.Project:s.Directory).Key).ToList();

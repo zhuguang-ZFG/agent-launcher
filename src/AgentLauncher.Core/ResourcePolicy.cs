@@ -244,6 +244,16 @@ public static class ResourcePolicy
         if (sample.CpuPercent >= CpuBusyPercent)
             return Result(AdmissionKind.Deny, "整机 CPU 正忙，稍等片刻再启动。", true);
 
+        if(includeSoftBudget)
+        {
+            var combined=reserved.Concat(requested).Where(item=>item.Kind!="git"&&item.PoolId!=null&&item.PoolLimit is >0).GroupBy(item=>item.PoolId);
+            foreach(var pool in combined)
+            {
+                if(!requested.Any(item=>item.PoolId==pool.Key))continue;
+                if(SumPlanning(policy,pool.ToArray())<=pool.Min(item=>item.PoolLimit!.Value))continue;
+                return Result(policy.Mode=="conservative"?AdmissionKind.Deny:AdmissionKind.RequireWaiver,"共享池内各项规划估算之和超过池硬上限；并发分配可能被内核拒绝。请减少并发或明确确认风险；单项及整池保护不会放宽。",true);
+            }
+        }
         if (includeSoftBudget && CombinedCapExceeds(policy, reserved, requested, soft))
         {
             if (policy.Mode == "conservative")

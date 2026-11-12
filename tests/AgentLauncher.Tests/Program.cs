@@ -4,8 +4,10 @@ using System.Text.Json;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
+if(args is ["--repair-checks"]) return RepairChecks.Run();
 if(args is ["--integration"]) return await Integration.RunAsync();
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
+if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
 if(args.Length>0&&args[0]=="--echo") { File.WriteAllText(args[1],JsonSerializer.Serialize(new { Cwd=Environment.CurrentDirectory, Args=args.Skip(2).ToArray() }));return 0; }
 if(args.Length>0&&args[0]=="--hold") {Thread.Sleep(int.Parse(args[1]));return 0;}
 if(args.Length>2&&args[0]=="--spawn-late") {var psi=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false};psi.ArgumentList.Add("--write-after");psi.ArgumentList.Add(args[1]);psi.ArgumentList.Add(args[2]);_ = Process.Start(psi);return 0;}

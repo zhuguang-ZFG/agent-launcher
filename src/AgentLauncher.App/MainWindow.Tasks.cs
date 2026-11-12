@@ -378,8 +378,14 @@ public partial class MainWindow
         foreach (var run in taskBook.Attempts.Where(candidate => !candidate.Terminal).ToArray())
         {
             var entry = status?.Entries?.FirstOrDefault(candidate => candidate.Plan.Id == run.AttemptId);
-            if (entry is null) continue;
-            if (entry.State is "FailedBeforeStart" or "Revoked")
+            if(entry is null)
+            {
+                var result=await Ipc.SendAsync(new("attempt",Guid.NewGuid(),Attempt:run.AttemptId));
+                if(!result.Ok||result.Entries is not [var retained])continue;
+                entry=retained;
+            }
+            if(!AttemptIdentity.Matches(run,entry))throw new InvalidDataException("任务尝试身份与监控结果不一致，已保留运行状态，请人工核对。");
+            if (entry!.State is "FailedBeforeStart" or "Revoked")
             {
                 await UpdateTasksAsync(book => TaskBookOps.FinishRun(book, run.AttemptId, "Failed", "未启动：" + entry.Detail), "任务状态更新失败");
                 continue;

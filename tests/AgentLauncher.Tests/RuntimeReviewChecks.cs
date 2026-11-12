@@ -36,6 +36,7 @@ internal static class RuntimeReviewChecks
         await test("ACC-S03 unchanged receipt metadata skips reads but still reconciles Job members",()=>ReceiptCacheAsync(cwd));
         await test("QQ-C01 two clients cannot reserve one queue entry with different attempt IDs",()=>TaskClaimClientsAsync(cwd));
         await test("QQ-C02 queue claim survives monitor restart before StartRun",()=>TaskClaimRestartAsync(cwd));
+        await test("QQ-C11 missing main ledger never resets a committed queue claim",()=>MissingMainClaimAsync(cwd));
         await test("QQ-C03 failed ledger publish rolls back both reservation and queue claim",()=>TaskClaimRollbackAsync(cwd));
         await test("QQ-C04 revoked and pruned attempt history never releases a durable queue claim",()=>TaskClaimPruningAsync(cwd));
         await test("QQ-C05 legacy unrecorded task reservations block fresh claims",()=>LegacyTaskClaimAsync(cwd));
@@ -105,6 +106,20 @@ internal static class RuntimeReviewChecks
         Assert(File.ReadAllBytes(Path.Combine(original.Root,"tasks.json")).SequenceEqual(taskBytes),"reservation test unexpectedly called StartRun or changed queue intent");
     }
 
+    private static async Task MissingMainClaimAsync(string cwd)
+    {
+        using var original=await OwnedMonitor.StartAsync(cwd);
+        var (entry,first,policy)=PendingTask(original.Root);
+        var reserved=await original.SendAsync(TaskReservation(entry,first,policy));Assert(reserved.Ok,reserved.Message);
+        // A second durable transition ensures .bak contains the committed claim too.
+        Assert((await original.SendAsync(new("revoke",Guid.NewGuid(),Attempt:first.Id))).Ok,"fixture revoke failed");
+        original.Crash();var path=Path.Combine(original.Root,"control.json");File.Delete(path);var backup=File.ReadAllBytes(path+".bak");
+        using var restarted=await OwnedMonitor.StartAsync(cwd,existingRoot:original.Root,requireHealthy:false);
+        var status=await restarted.SendAsync(new("status",Guid.NewGuid()));
+        var duplicate=await restarted.SendAsync(TaskReservation(entry,first with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()},policy));
+        Assert(!status.Ok&&status.AdmissionBlockedReason?.Contains("备份")==true&&!duplicate.Ok,"missing main reset the committed queue owner");
+        Assert(!File.Exists(path)&&backup.SequenceEqual(File.ReadAllBytes(path+".bak")),"blocked restart overwrote recovery evidence");
+    }
     private static async Task TaskClaimRollbackAsync(string cwd)
     {
         using var monitor=await OwnedMonitor.StartAsync(cwd);
