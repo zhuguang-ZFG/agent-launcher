@@ -2,7 +2,7 @@
 
 Windows 原生配置窗口 + Windows Terminal 分屏。默认只启用一个 Agent；同项目多项使用独立 Git worktree，或明确选用现有目录/共享目录。
 
-当前完整候选程序为 `artifacts/preview-quick-queue/AgentLauncher.App.exe`，请保留同目录所有 DLL、Worker 和 runtimeconfig 文件。其他电脑需要 .NET 8 Desktop Runtime x64、Windows Terminal、所选 CLI；自动 worktree 需要 Git。此包不是自包含安装包，也不是已经完成长时负载验证的稳定版。
+当前完整候选程序为 `artifacts/preview-task-claim/AgentLauncher.App.exe`，请保留同目录所有 DLL、Worker 和 runtimeconfig 文件。其他电脑需要 .NET 8 Desktop Runtime x64、Windows Terminal、所选 CLI；自动 worktree 需要 Git。此包不是自包含安装包，也不是已经完成长时负载验证的稳定版。
 当前机器桌面已有 **多 Agent 启动器** 快捷方式（`D:/Desktop/多 Agent 启动器.lnk`）。版本切换需先核对活动 Worker，不能覆盖正在运行的包；完整候选和回退路径见实现记录。资源不足可选择按资源依次启动并等待，启动器不会绕过保护强行运行。
 本轮另生成 `artifacts/spec-candidate/AgentLauncher.App.exe`（win-x64 自包含技术预览，内含 .NET 8.0.25）。仍须保留整个目录，外部 Git / Terminal / CLI 不内置；尚未签名或通过完整发布验收。当前验证范围与限制见实现记录第 8 节。
 
@@ -16,6 +16,7 @@ Windows 原生配置窗口 + Windows Terminal 分屏。默认只启用一个 Age
 8. 保存失败时使用「重试保存」；成功落盘前不会启动。启动中「停止后续步骤」会撤销尚未领取的请求，已运行任务保留；运行记录始终显示活动项，历史仅显示最近部分。
 
 「按资源依次启动」会明确提示已有队列也将继续；只把新任务副本设为独立额度，原快启配置、单项限制和活动池不变。同仓库的独立目录项仍各自使用 worktree。可暂停队列或移除尚未执行项；关闭配置窗口暂停后续派发，已运行任务继续，重新打开不自动恢复。队列为空且无运行项时停止轮询。任务文件写入 schema 2 后，旧版启动器会拒绝读取执行，不能用旧 Worker 接管新队列。
+队列预约领取已持久化到 `control.json` schema 3：同一队列项不会因双客户端或 monitor 重启获得第二个预约；相同计划重试只返回原记录。领取证据不随历史裁剪消失，最多保留 1200 条，达到上限会停止新队列预约。旧版 Worker 拒绝 schema 3；不要通过删除 ledger、领取记录或 `.bak` 强行回退或放行。
 
 没有任意 shell 命令拼接入口，没有自动合并、清理 worktree 或结束用户其他程序。关闭配置窗口不主动结束已运行 Agent；关闭 Terminal 窗格仍可能结束其中任务。
 

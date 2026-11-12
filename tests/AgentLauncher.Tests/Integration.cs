@@ -397,7 +397,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId);
             var items=new[]{Shared("pool-a",1),Shared("pool-b",2)};
             var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserved.Ok,reserved.Message);
-            var ledger=Store.Read<Ledger>(Store.FilePath("control.json"))!;Assert(ledger.SchemaVersion==2&&ledger.Pools.Count==1&&ledger.Pools[0].MemoryLimit==4*ResourcePolicy.GiB,"shared pool record missing");
+            var ledger=LedgerMigration.Accept(Store.Read<Ledger>(Store.FilePath("control.json"))!);Assert(ledger.Pools.Count==1&&ledger.Pools[0].MemoryLimit==4*ResourcePolicy.GiB,"shared pool record missing");
             using var root=new Job(Store.RootJob,openOnly:true);
             using var attempt=new Mutex(false,Store.AttemptLock(items[0].Id));attempt.WaitOne();
             try

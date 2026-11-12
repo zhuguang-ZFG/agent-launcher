@@ -372,11 +372,12 @@ internal sealed class Monitor : IDisposable
         {
             if(request.WaiverId!=null)Refresh(forceSample:true);
             var items=request.Items??[];
+            if(request.Operation=="reserve-task"&&ReplayTaskClaim(request,items) is {} replay)return replay;
             var binding=request.Operation=="reserve-task"?BindTaskAuthority(request,items):BindAuthority(request,items,consumeToken:request.WaiverId!=null);
             if(AdmissionBlockedReason() is {} reason)throw new IOException(reason);
             if(items.Length is <1 or >ResourcePolicy.MaxSlots||items.Select(i=>i.Id).Distinct().Count()!=items.Length)throw new IOException("启动项数量或 ID 无效。");
             var previous=ledger.Entries.Where(e=>items.Any(i=>i.Id==e.Plan.Id)).ToArray();
-            if(previous.Length>0){if(previous.Length==items.Length&&previous.All(e=>e.Digest==Store.Digest(items.Single(i=>i.Id==e.Plan.Id))))return new(true,"请求已记录",previous,sample,epoch);throw new IOException("启动 ID 已使用。");}
+            if(previous.Length>0){if(request.Operation!="reserve-task"&&previous.Length==items.Length&&previous.All(e=>e.Digest==Store.Digest(items.Single(i=>i.Id==e.Plan.Id))))return new(true,"请求已记录",previous,sample,epoch);throw new IOException("启动 ID 已使用。");}
             var active=ledger.Entries.Where(e=>!Store.IsTerminal(e)).ToList();
             foreach(var p in items)
             {
@@ -422,7 +423,19 @@ internal sealed class Monitor : IDisposable
             // Reject an unrepresentable plan before it can be persisted or granted; active records are never truncated later.
             foreach(var candidate in entries)Ipc.EnsureEntryRepresentable(candidate);
             ledger.Entries.AddRange(entries);
-            try{Save();}catch{ledger.Entries.RemoveAll(e=>entries.Contains(e));ledger.Pools.RemoveAll(p=>addedPools.Contains(p));throw;}
+            TaskReservationClaim? claim=null;
+            if(request.Operation=="reserve-task")
+            {
+                claim=new(request.TaskEntryId!.Value,items[0].Id);
+                ledger.TaskClaims.Add(claim);
+            }
+            try{Save();}
+            catch
+            {
+                ledger.Entries.RemoveAll(e=>entries.Contains(e));ledger.Pools.RemoveAll(p=>addedPools.Contains(p));
+                if(claim!=null)ledger.TaskClaims.Remove(claim);
+                throw;
+            }
             return new(true,"已预约预算与工作目录",entries,sample,epoch);
         }
         if(request.Operation=="reconcile")return ReconcileRequests();
@@ -629,13 +642,34 @@ internal sealed class Monitor : IDisposable
         ResourcePolicy.ValidateSettings(settings,sample.Total,sample.CommitLimit);
         return ResourcePolicy.SnapshotFor(settings,sample.Total,sample.CommitLimit);
     }
+    private Response? ReplayTaskClaim(Request request,LaunchItem[] items)
+    {
+        if(request.TaskEntryId is not {} entryId||entryId==Guid.Empty||items.Length!=1||items[0] is null||request.WaiverId!=null)
+            throw new IOException("队列预约缺少单项授权身份，或包含不支持的确认令牌。");
+        var claim=ledger.TaskClaims.SingleOrDefault(candidate=>candidate.EntryId==entryId);
+        if(claim is null)return null;
+        if(claim.AttemptId!=items[0].Id)throw new IOException($"该队列项已由尝试 {claim.AttemptId:N} 领取，不能另行预约；请核对原记录。");
+        var prior=ledger.Entries.SingleOrDefault(entry=>entry.Plan.Id==claim.AttemptId);
+        if(prior is null)throw new IOException($"该队列项已领取，尝试 {claim.AttemptId:N} 的历史已裁剪；不会重新执行。");
+        var policy=PolicyFromEntry(prior);
+        if(prior.Digest!=Store.Digest(items[0])||request.Policy!=policy||request.PolicyHash!=ResourcePolicy.PolicyHash(policy)
+            ||request.PlanDigest!=ResourcePolicy.PlanDigest(items))throw new IOException("重试与已领取队列项的原计划或策略不一致。");
+        return new(true,"请求已记录",[prior],sample,epoch);
+    }
+
     private AuthorityBinding BindTaskAuthority(Request request,LaunchItem[] items)
     {
         if(sample==null||request.TaskEntryId is not {} entryId||items.Length!=1||request.WaiverId!=null)
             throw new IOException("队列预约缺少单项授权身份，或包含不支持的确认令牌。");
+        if(ledger.TaskClaims.Count>=LedgerMigration.MaxTaskClaims)throw new IOException("队列领取记录已达保留上限，已停止新增预约；不会删除领取证据以重放任务。");
         var book=new TaskStore(Store.FilePath("tasks.json")).Load();
         var queued=book.Queue.SingleOrDefault(entry=>entry.Id==entryId)??throw new IOException("队列项已移除或执行，拒绝重复预约。");
         var task=book.Tasks.Single(entry=>entry.Id==queued.TaskId);
+        // A pre-claim ledger cannot prove which queue entry owns a still-unrecorded task reservation. Never infer a new authorization.
+        if(ledger.Entries.Any(entry=>entry.Plan.SourceSlotId==task.Id
+            &&!ledger.TaskClaims.Any(claim=>claim.AttemptId==entry.Plan.Id)
+            &&!book.Attempts.Any(run=>run.AttemptId==entry.Plan.Id)))
+            throw new IOException("该任务存在旧版未登记的预约，无法证明队列领取身份；请核对原记录，禁止自动重放。");
         var plan=items[0];
         if(task.Revision!=queued.TaskRevision||plan.SourceSlotId!=task.Id||plan.Kind!="agent"||plan.AgentId!=queued.AgentId||plan.RetryOf!=null
             ||plan.Shared!=(queued.DirectoryMode=="shared")||plan.Command.Executable!=queued.Command.Executable||plan.Command.Adapter!=queued.Command.Adapter

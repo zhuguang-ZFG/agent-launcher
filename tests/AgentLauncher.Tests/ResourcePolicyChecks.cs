@@ -417,8 +417,8 @@ internal static class ResourcePolicyChecks
             var legacy = new Ledger { SchemaVersion = 1 };
             legacy.Entries.Add(new() { Plan = plan });
             var migrated = LedgerMigration.Accept(legacy);
-            if (migrated.SchemaVersion != 2 || migrated.Pools.Count != 0) throw new Exception("version 1 was not read as independent");
-            var future = new Ledger { SchemaVersion = 3 };
+            if (migrated.SchemaVersion != LedgerMigration.CurrentSchemaVersion || migrated.Pools.Count != 0 || migrated.TaskClaims.Count != 0) throw new Exception("version 1 was not read as independent without invented claims");
+            var future = new Ledger { SchemaVersion = int.MaxValue };
             var rejected = false;
             try { LedgerMigration.Accept(future); } catch (InvalidDataException) { rejected = true; }
             if (!rejected) throw new Exception("unknown ledger version accepted");
@@ -436,6 +436,28 @@ internal static class ResourcePolicyChecks
             rejected = false;
             try { LedgerMigration.Accept(duplicate); } catch (InvalidDataException) { rejected = true; }
             if (!rejected) throw new Exception("duplicate pool records accepted");
+        });
+
+        Test("QQ-C06 ledger claims reject ambiguous ownership and survive migration and boot rollover", () =>
+        {
+            var claim = new TaskReservationClaim(Guid.NewGuid(), Guid.NewGuid());
+            var current = new Ledger { BootId = "old", TaskClaims = [claim] };
+            LedgerMigration.Accept(current);
+            LedgerMigration.Rollover(current, "new");
+            if (current.TaskClaims.Single() != claim) throw new Exception("boot rollover erased a queue claim");
+            foreach (var claims in new List<TaskReservationClaim>[]
+            {
+                [claim, new(claim.EntryId, Guid.NewGuid())],
+                [claim, new(Guid.NewGuid(), claim.AttemptId)],
+                [new(Guid.Empty, Guid.NewGuid())],
+                [new(Guid.NewGuid(), Guid.Empty)],
+                Enumerable.Range(0, LedgerMigration.MaxTaskClaims + 1).Select(_ => new TaskReservationClaim(Guid.NewGuid(), Guid.NewGuid())).ToList()
+            })
+            {
+                var rejected = false;
+                try { LedgerMigration.Accept(new Ledger { TaskClaims = claims }); } catch (InvalidDataException) { rejected = true; }
+                if (!rejected) throw new Exception("ambiguous or over-budget task claims were accepted");
+            }
         });
 
         Test("ACC-S3A07 boot rollover settles entries and retires pool records", () =>

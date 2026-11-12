@@ -98,7 +98,8 @@ public static class ConfigurationCompatibility
 
 public static class LedgerMigration
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
+    public const int MaxTaskClaims = TaskSchema.MaxAttempts + TaskSchema.MaxQueueEntries;
 
     // Version 1 had no pool records: every entry was independently launched, which is still a valid reading.
     public static Ledger Accept(Ledger ledger)
@@ -110,6 +111,13 @@ public static class LedgerMigration
         if (ledger.Entries.Any(e => e is null || e.Plan is null)) throw new InvalidDataException("控制账本损坏或版本不支持。");
         if (ledger.Pools.Any(p => p is null || p.PolicyHash is null)) throw new InvalidDataException("控制账本损坏或版本不支持。");
         if (ledger.Pools.Select(p => p.Id).Distinct().Count() != ledger.Pools.Count) throw new InvalidDataException("控制账本损坏或版本不支持。");
+        // Claims are execution authority, not display history; retain them across pruning and boot rollover.
+        // Versions 1/2 deserialize missing claims as an empty list. Version 3 must never be written by an older worker.
+        if (ledger.TaskClaims is null || ledger.TaskClaims.Count > MaxTaskClaims
+            || ledger.TaskClaims.Any(claim => claim is null || claim.EntryId == Guid.Empty || claim.AttemptId == Guid.Empty)
+            || ledger.TaskClaims.Select(claim => claim.EntryId).Distinct().Count() != ledger.TaskClaims.Count
+            || ledger.TaskClaims.Select(claim => claim.AttemptId).Distinct().Count() != ledger.TaskClaims.Count)
+            throw new InvalidDataException("队列领取记录损坏或超出边界，已停止启动与回收。");
         foreach (var entry in ledger.Entries)
         {
             // Finished history keeps the pool id for display; only an entry that can still launch needs frozen pool metadata.

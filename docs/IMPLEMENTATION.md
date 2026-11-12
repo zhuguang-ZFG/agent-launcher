@@ -731,3 +731,15 @@ powershell -NoProfile -File scripts/test.ps1
 - `task_verify run` 为 **unverified / project-or-git-baseline-unavailable，checks=[]**；没有 operator-configured passed/failed 项。待评审输入清单 `review-inputs.json`、差异 `test-changes.patch`、临时源归档 `verification-inputs.zip`；临时 probe 源码已从工作目录移除。固定 runner/CI 与资源策略哈希不变。
 - 补执行未到达的 `node --test tests/prototype.test.cjs` **5/5** 与 `node scripts/test-browser.mjs` **5/5**，均 exit 0。顺序生产构建 `scripts/build.ps1 -Output ./artifacts/preview-quick-queue` 成功，完整 App/Worker 同目录；测试标记检查与程序集哈希落在该目录 `verification.json`。没有把本地分段绿色写成首次完整脚本通过。
 
+## 29. monitor 队列领取原子化（2026-11-12）
+
+- 用户指出 `reserve-task` 仅检查 `TaskBook.Attempts`、ledger 只按计划 ID 去重。已对 `82057eb` 运行两个独立 named-pipe 客户端，使用同一 TaskEntryId、不同计划 ID、共享目录、充足的隔离采样，并故意停在 StartRun 前。预期仅一次预约，实际两次都成功；另一个场景第一次预约后强制退出己方 monitor，再从同根重启，第二计划仍成功。两条回归均 RED，未启动 Agent；`artifacts/task-claim-20261112-095806/red.log` 与各隔离根保存请求响应证据。RED 回归独立提交 `cd01df3`。
+- 根因是跨文件状态的提交次序假设：monitor 已持久化预约，App 尚未写任务尝试；串行处理请求不等于按逻辑队列项去重。第一处分歧在 `BindTaskAuthority` 到 ledger 插入之间缺少队列领取记录，不在 UI。修复没有添加客户端等待/重试，也没有降低共享目录、预算或其他资源保护。
+- 新 `TaskReservationClaim` 与预约 Entries 在同一 ledger Save 原子发布；写失败同时移除内存中的新预约与领取。`ReplayTaskClaim` 先核对持久领取，相同计划/策略返回原尝试，其他计划 ID 拒绝。`StartRun` 已消费队列后同一预约的查询式重试仍幂等，不重新执行。
+- 账本 schema 升为 3，旧 Worker 拒绝，schema 1/2 继续按旧内容读取。领取证据单独保留，不随 Revoked、终态展示裁剪或 boot rollover 删除；历史被裁剪时仍拒绝旧 EntryId。验证空 ID、重复 EntryId、复用 AttemptId 与保留数量边界；最多 1200 条，满时 fail-closed，不能删除旧领取来自动放行。无法从旧版未登记预约证明归属时阻止新领取，不伪造历史 claim。
+- 修复后真实 monitor 窄检查 **5/5**：双客户端竞争、StartRun 前重启与同计划幂等、实际 File.Replace 失败后的双回滚、撤销+历史裁剪+boot 变化保留领取、旧版未登记预约拒绝。`green.log` 保存原断言通过结果；没有修改原 RED 断言来获得通过。保存故障使用仅限隔离 control.json 的文件共享锁，不修改生产权限或账本。
+- 新增 `RuntimeReviewChecks` 五项行为回归及 `ResourcePolicyChecks` 领取有效性回归；既有迁移/池检查改为当前支持的 schema 合同，而不是把版本字面量 2 当永久不变。`ResourcePolicy.cs` 仅变更 LedgerMigration 的 schema/领取校验，ResourcePolicy 资源阈值与准入算法不变；scripts/test.ps1、CI policy 和原 UI timeout 不变。测试与临时 runner 输入仍需操作员审查。
+- `task_verify run`：**unverified / project-or-git-baseline-unavailable，checks=[]**；手动红绿与完整 gate 结果不能替代 operator-configured 基线。未声称任务执行最终必定成功；本修复证明的是同一队列意图至多归属一个预约，不是跨崩溃的任务业务 exactly-once。
+- 完整本地脚本原生/模型 **115/115**、集成 **115/115**（含上述五条）通过，随后 runner 报 WPF 30 秒 timeout。与上轮不同，本轮新报告明确失败在第 209 条 `ACC-S3A08 an unknown ledger version still fails closed`：夹具把已支持的 schema 3 当未来版本。否定“只是累计慢”的假设，仅将该输入改为 `int.MaxValue`，原拒绝断言与超时不变；随后同套 WPF **213/213、Dpi 120、exit 0、20.67 秒**。首轮报告 `full-gate-ui-failure.json`，修正报告 `ui-final/ui-checks.json`；不把原完整脚本失败隐去。
+- 未执行到的原型与浏览器原检查补跑，均 **5/5、exit 0**。顺序生产发布 `artifacts/preview-task-claim/` 成功，App/Worker 与依赖同目录；四程序集双编码测试标记扫描 CLEAN，哈希与完整验证分类见该目录 `verification.json`。未覆盖旧生产包，未启动或终止真实 Agent；临时 probe 源码已归档 `runner-inputs.zip` 后删除。
+

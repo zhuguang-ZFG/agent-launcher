@@ -413,3 +413,24 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
 - 暂停/关闭停止后续派发并等待本次准备/预约收尾；已运行任务继续。只在确认 Revoked 时才把未启动尝试标为取消；预约/提交/撤销结果不明则暂停并保留记录，禁止自动重放。
 - 队列为空且没有非终态尝试时，不请求 status、不启动 monitor，并停止队列计时器。有运行项或 Unknown 证据时继续核对，不能为节省轮询丢失回收责任。重新打开窗口仍是暂停状态。
 
+### 队列领取权：预约先于 TaskRun
+
+1. **范围 / 触发**：`reserve-task` 在 App 调用 `StartRun` 前已经产生预约；两个客户端或 monitor 重启都不能为同一队列意图再生成一个尝试。客户端互斥与 `TaskBook.Attempts` 不是这个窗口的领取权威。
+2. **签名**：`TaskReservationClaim(Guid EntryId, Guid AttemptId)`；`Ledger.TaskClaims` 是 `control.json` schema 3 中的列表；`ReplayTaskClaim(Request, LaunchItem[])` 读取原领取，`Save()` 同时发布领取与预约 Entries。旧 Worker 拒绝 schema 3，schema 1/2 仍可迁移。
+3. **数据合同**：EntryId / AttemptId 均非空且各自唯一。完整计划与资源策略决定同一尝试重试是否相同。领取不是展示历史：Revoked、终态剪裁、boot rollover 都不清除；保留最多 `MaxAttempts + MaxQueueEntries`（1200）条。达到边界停止新预约，不删除证据以放行。新执行意图必须由明确重新入队产生新 EntryId。
+4. **校验 / 错误矩阵**：
+
+   | 条件 | 结果 |
+   | --- | --- |
+   | 已领取 EntryId + 新 AttemptId | 拒绝，指出原尝试；不修改账本 |
+   | 原 AttemptId + 相同计划/策略，原记录仍在 | 返回原记录，不创建预约，StartRun 是否已消费队列不影响幂等 |
+   | 原 AttemptId + 不同计划/策略 | 拒绝陈旧或篡改重试 |
+   | 原尝试历史已裁剪 | 明确拒绝重执行，保留领取 |
+   | ledger 原子替换失败 | 预约与领取的内存增量一起回滚，无成功响应 |
+   | 旧版同任务预约尚未记入任务历史 | 无法证明领取身份，阻止新领取而非猜测 |
+   | 空 / 重复身份、超量领取、未来 schema | fail-closed，禁止覆盖或执行 |
+
+5. **正常 / 基准 / 异常例**：正常为两个客户端竞争仅一个计划获准；基准为原计划查询式重试取回同一 Pending/Revoked 记录；异常为持久化后响应丢失、monitor 重启仍不得另建计划补发。
+6. **回归断言**：QQ-C01/C02 用两个独立 pipe 客户端，故意不写 TaskRun，验证唯一预约与重启；QQ-C03 实际阻止 File.Replace，验证无幽灵领取；QQ-C04 验证撤销、历史剪裁与 boot 变化；QQ-C05/C06 覆盖旧记录不确定性与身份/数量校验。均不启动真实 Agent。
+7. **错误与正确做法**：错误是“TaskBook 暂无运行项，所以换新 plan.Id 再 reserve”；正确是先查询 monitor 的持久 EntryId 领取，再按原 AttemptId 取回结果或明确拒绝。这里保证至多一次预约归属，不承诺业务任务跨崩溃必定成功。
+

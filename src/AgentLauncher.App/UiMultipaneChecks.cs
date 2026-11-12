@@ -117,7 +117,7 @@ public partial class MainWindow
             check("ACC-S3A08 a version 1 terminal ledger needs no monitor recovery",!LedgerNeedsRecovery(v1Ledger));
             var poolLedger=new Ledger{SchemaVersion=2,BootId="ui-check",Pools=[new(){Id=Guid.NewGuid(),MemoryLimit=4*ResourcePolicy.GiB,PolicyHash="HASH",BatchId=Guid.NewGuid()}]};
             check("ACC-S3A08 retained pools force recovery even without active entries",LedgerNeedsRecovery(poolLedger));
-            var futureLedger=new Ledger{SchemaVersion=3,BootId="ui-check"};var futureRejected=false;
+            var futureLedger=new Ledger{SchemaVersion=int.MaxValue,BootId="ui-check"};var futureRejected=false;
             try{LedgerNeedsRecovery(futureLedger);}catch(InvalidDataException){futureRejected=true;}
             check("ACC-S3A08 an unknown ledger version still fails closed",futureRejected);
             var brokenLedger=new Ledger{SchemaVersion=2,BootId="ui-check"};brokenLedger.Entries.Add(new(){Plan=null!});var brokenRejected=false;

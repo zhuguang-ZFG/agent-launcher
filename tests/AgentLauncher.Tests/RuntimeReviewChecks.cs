@@ -35,6 +35,9 @@ internal static class RuntimeReviewChecks
         await test("ACC-S03 unchanged receipt metadata skips reads but still reconciles Job members",()=>ReceiptCacheAsync(cwd));
         await test("QQ-C01 two clients cannot reserve one queue entry with different attempt IDs",()=>TaskClaimClientsAsync(cwd));
         await test("QQ-C02 queue claim survives monitor restart before StartRun",()=>TaskClaimRestartAsync(cwd));
+        await test("QQ-C03 failed ledger publish rolls back both reservation and queue claim",()=>TaskClaimRollbackAsync(cwd));
+        await test("QQ-C04 revoked and pruned attempt history never releases a durable queue claim",()=>TaskClaimPruningAsync(cwd));
+        await test("QQ-C05 legacy unrecorded task reservations block fresh claims",()=>LegacyTaskClaimAsync(cwd));
     }
 
     private static void Assert(bool value,string message){if(!value)throw new Exception(message);}
@@ -72,6 +75,10 @@ internal static class RuntimeReviewChecks
         var replay=await monitor.SendAsync(TaskReservation(entry,accepted,policy));
         Assert(replay.Ok&&replay.Entries is {Length:1}&&replay.Entries[0].Plan.Id==accepted.Id,"exact reservation replay lost its original attempt identity");
         Assert((await monitor.SendAsync(new("status",Guid.NewGuid()))).Entries is {Length:1},"exact replay duplicated the ledger entry");
+        var stored=new TaskStore(Path.Combine(monitor.Root,"tasks.json"));
+        stored.Update(book.Revision,current=>TaskBookOps.StartRun(current,entry,accepted.Id,accepted.BatchId,accepted.Workspace.Key));
+        var consumedReplay=await monitor.SendAsync(TaskReservation(entry,accepted,policy));
+        Assert(consumedReplay.Ok&&consumedReplay.Entries?.Single().Plan.Id==accepted.Id,"recording StartRun broke exact reservation replay");
     }
 
     private static async Task TaskClaimRestartAsync(string cwd)
@@ -91,6 +98,67 @@ internal static class RuntimeReviewChecks
         Assert(!duplicate.Ok,"restarted monitor admitted a second attempt for an already claimed queue entry");
         Assert(replay.Ok&&status.Entries is {Length:1}&&status.Entries[0].Plan.Id==first.Id,"restart changed the durable claim or duplicated the exact replay");
         Assert(File.ReadAllBytes(Path.Combine(original.Root,"tasks.json")).SequenceEqual(taskBytes),"reservation test unexpectedly called StartRun or changed queue intent");
+    }
+
+    private static async Task TaskClaimRollbackAsync(string cwd)
+    {
+        using var monitor=await OwnedMonitor.StartAsync(cwd);
+        var (entry,failedPlan,policy)=PendingTask(monitor.Root);
+        var ledgerPath=Path.Combine(monitor.Root,"control.json");
+        var before=File.ReadAllBytes(ledgerPath);
+        using(var reader=new FileStream(ledgerPath,FileMode.Open,FileAccess.Read,FileShare.Read))
+        {
+            var refused=await monitor.SendAsync(TaskReservation(entry,failedPlan,policy));
+            Assert(!refused.Ok,"reservation succeeded while atomic ledger replacement was denied");
+        }
+        Assert(File.ReadAllBytes(ledgerPath).SequenceEqual(before),"failed publication changed the durable ledger");
+        var disk=Store.Read<Ledger>(ledgerPath)!;
+        Assert(disk.TaskClaims.Count==0&&disk.Entries.Count==0,"failed publication persisted a claim without its reservation");
+        var accepted=failedPlan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()};
+        var retry=await monitor.SendAsync(TaskReservation(entry,accepted,policy));
+        Assert(retry.Ok,"failed save left an in-memory ghost claim: "+retry.Message);
+        disk=Store.Read<Ledger>(ledgerPath)!;
+        Assert(disk.Entries.Single().Plan.Id==accepted.Id&&disk.TaskClaims.Single()==new TaskReservationClaim(entry.Id,accepted.Id),"claim and reservation were not published together");
+        var late=await monitor.SendAsync(TaskReservation(entry,failedPlan,policy));
+        Assert(!late.Ok,"late rejected plan displaced the newly persisted owner");
+    }
+
+    private static async Task TaskClaimPruningAsync(string cwd)
+    {
+        using var original=await OwnedMonitor.StartAsync(cwd);
+        var (entry,first,policy)=PendingTask(original.Root);
+        var reserved=await original.SendAsync(TaskReservation(entry,first,policy));Assert(reserved.Ok,reserved.Message);
+        var revoked=await original.SendAsync(new("revoke",Guid.NewGuid(),Attempt:first.Id));Assert(revoked.Ok,revoked.Message);
+        var second=first with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()};
+        Assert(!(await original.SendAsync(TaskReservation(entry,second,policy))).Ok,"revocation silently made the same queue entry executable again");
+        original.Crash();
+        var ledgerPath=Path.Combine(original.Root,"control.json");
+        var ledger=Store.Read<Ledger>(ledgerPath)!;
+        var large=new string('q',60000);
+        for(var i=0;i<120;i++)ledger.Entries.Add(new ControlEntry{Plan=Item("claim-history-"+i,[large],Path.Combine(original.Root,"history")),State="Settled"});
+        ledger.BootId="previous-boot";
+        using(var probe=new MonitorProbe(ledger,FreshSample(),ledgerPath))probe.Invoke("Save");
+        var pruned=Store.Read<Ledger>(ledgerPath)!;
+        Assert(pruned.Entries.All(item=>item.Plan.Id!=first.Id)&&new FileInfo(ledgerPath).Length<LedgerReadCap,"fixture did not prune the claimed terminal history safely");
+        Assert(pruned.TaskClaims.Single()==new TaskReservationClaim(entry.Id,first.Id),"history pruning erased execution authority");
+        using var restarted=await OwnedMonitor.StartAsync(cwd,existingRoot:original.Root);
+        var duplicate=await restarted.SendAsync(TaskReservation(entry,second,policy));
+        var old=await restarted.SendAsync(TaskReservation(entry,first,policy));
+        Assert(!duplicate.Ok&&!old.Ok,"pruned claim was reauthorized after restart/boot rollover");
+        Assert(Store.Read<Ledger>(ledgerPath)!.TaskClaims.Single()==new TaskReservationClaim(entry.Id,first.Id),"boot rollover dropped a queue claim");
+    }
+
+    private static async Task LegacyTaskClaimAsync(string cwd)
+    {
+        var root=OwnedRoot(cwd);
+        var (entry,prior,policy)=PendingTask(root);
+        var ledger=new Ledger{SchemaVersion=2,BootId=Store.BootId(),Entries=[new ControlEntry{Plan=prior,Digest=Store.Digest(prior)}]};
+        Store.Save(Path.Combine(root,"control.json"),ledger);
+        using var monitor=await OwnedMonitor.StartAsync(cwd,existingRoot:root);
+        var fresh=prior with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()};
+        var refused=await monitor.SendAsync(TaskReservation(entry,fresh,policy));
+        Assert(!refused.Ok&&(await monitor.SendAsync(new("status",Guid.NewGuid()))).Entries?.Single().Plan.Id==prior.Id,
+            "upgrade guessed a new authorization for a legacy reservation without StartRun");
     }
 
     private static async Task FutureMemoryAsync(string cwd)

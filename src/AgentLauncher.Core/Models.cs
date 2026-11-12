@@ -132,7 +132,15 @@ public sealed class PoolRecord
     public required Guid BatchId { get; set; }
     public DateTimeOffset Created { get; set; } = DateTimeOffset.UtcNow;
 }
-public sealed class Ledger { public int SchemaVersion { get; set; } = LedgerMigration.CurrentSchemaVersion; public string BootId { get; set; } = ""; public List<ControlEntry> Entries { get; set; } = []; public List<PoolRecord> Pools { get; set; } = []; }
+public sealed record TaskReservationClaim(Guid EntryId, Guid AttemptId);
+public sealed class Ledger
+{
+    public int SchemaVersion { get; set; } = LedgerMigration.CurrentSchemaVersion;
+    public string BootId { get; set; } = "";
+    public List<ControlEntry> Entries { get; set; } = [];
+    public List<PoolRecord> Pools { get; set; } = [];
+    public List<TaskReservationClaim> TaskClaims { get; set; } = [];
+}
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? JobMemory = null);
 public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, Guid? WaiverId = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null);
 public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, Guid? WaiverId = null, DateTimeOffset? WaiverExpiresAt = null, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null, bool? ReconcileOffered = null, PoolRecord[]? Pools = null);
