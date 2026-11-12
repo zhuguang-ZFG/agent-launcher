@@ -112,8 +112,12 @@ public static class LedgerMigration
         if (ledger.Pools.Any(p => p is null || p.PolicyHash is null)) throw new InvalidDataException("控制账本损坏或版本不支持。");
         if (ledger.Pools.Select(p => p.Id).Distinct().Count() != ledger.Pools.Count) throw new InvalidDataException("控制账本损坏或版本不支持。");
         // Claims are execution authority, not display history; retain them across pruning and boot rollover.
-        // Versions 1/2 deserialize missing claims as an empty list. Version 3 must never be written by an older worker.
-        if (ledger.TaskClaims is null || ledger.TaskClaims.Count > MaxTaskClaims
+        // Versions 1/2 deserialize missing claims as an empty list. Version 3 introduced the field and must never be written by an older worker.
+        if (ledger.TaskClaims is null) throw new InvalidDataException("队列领取记录损坏或超出边界，已停止启动与回收。");
+        // Bind presence to the version that introduced claims, not the current version, so a later schema bump cannot excuse a missing field.
+        if (ledger.SchemaVersion >= 3 && ledger.TaskClaimsAbsentFromJson)
+            throw new InvalidDataException("控制账本缺少队列领取记录，已停止启动与回收。");
+        if (ledger.TaskClaims.Count > MaxTaskClaims
             || ledger.TaskClaims.Any(claim => claim is null || claim.EntryId == Guid.Empty || claim.AttemptId == Guid.Empty)
             || ledger.TaskClaims.Select(claim => claim.EntryId).Distinct().Count() != ledger.TaskClaims.Count
             || ledger.TaskClaims.Select(claim => claim.AttemptId).Distinct().Count() != ledger.TaskClaims.Count)
@@ -128,6 +132,7 @@ public static class LedgerMigration
             }
         }
         ledger.SchemaVersion = CurrentSchemaVersion;
+        ledger.ConfirmTaskClaimsMigrated();
         return ledger;
     }
 

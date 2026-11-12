@@ -743,3 +743,13 @@ powershell -NoProfile -File scripts/test.ps1
 - 完整本地脚本原生/模型 **115/115**、集成 **115/115**（含上述五条）通过，随后 runner 报 WPF 30 秒 timeout。与上轮不同，本轮新报告明确失败在第 209 条 `ACC-S3A08 an unknown ledger version still fails closed`：夹具把已支持的 schema 3 当未来版本。否定“只是累计慢”的假设，仅将该输入改为 `int.MaxValue`，原拒绝断言与超时不变；随后同套 WPF **213/213、Dpi 120、exit 0、20.67 秒**。首轮报告 `full-gate-ui-failure.json`，修正报告 `ui-final/ui-checks.json`；不把原完整脚本失败隐去。
 - 未执行到的原型与浏览器原检查补跑，均 **5/5、exit 0**。顺序生产发布 `artifacts/preview-task-claim/` 成功，App/Worker 与依赖同目录；四程序集双编码测试标记扫描 CLEAN，哈希与完整验证分类见该目录 `verification.json`。未覆盖旧生产包，未启动或终止真实 Agent；临时 probe 源码已归档 `runner-inputs.zip` 后删除。
 
+## 30. 领取边界与队列恢复完整修复（2026-11-12）
+
+- 预期：空 / 已保留的 AttemptId 在预约写入前拒绝；schema 3 缺失执行权威字段时停止而非当作空历史；预约先于 TaskRun 的中断不让旧队首持续重试。旧行为由 `artifacts/claim-review-20261112-112647/` 的真实 monitor 与 WPF 证据确认，本轮没有把历史 checkpoint 当成测试结果。
+- 新增永久回归并先执行旧实现：真实 monitor 四项 **0/4**，分别命中空 AttemptId、裁剪后 AttemptId 被另一队列项复用、schema 3 缺字段仍健康、普通 reserve 复活旧身份；原始 JSON 检查 **1 通过 / 1 失败**，缺字段失败而既有身份校验仍通过；WPF **12 通过后失败于准备前暂停**。RED 提交 `0b8efb7`，原始输出 `artifacts/complete-repair-20261112-120124/red-{claims,json,wpf}.log`。
+- 第一处分歧分别是 Worker 入账前未校验保留身份、JSON 对缺省成员执行初始化器、App 未同步永久领取后的恢复语义。最小修复：新预约在修改池/Entries/TaskClaims 前拒绝无效或复用身份；Ledger 用反序列化字段存在标记区分 schema 3 缺失与 legacy 1/2 缺省，成功迁移清除标记；App 在准备前及预约拒绝后后台读取并校验持久领取，发现旧领取或账本不可读即停队列，提供原尝试与明确人工恢复步骤。成功撤销但未写 TaskRun 也停队列，不删除领取、不自动重新入队。
+- 同一测试输入与窄执行器：修复后真实 monitor **4/4**、原始 JSON **2/2**、WPF **20/20**。三个测试文件与两个执行器 DLL 的 RED/GREEN 哈希相同，记录在 `red-results.json` / `green-results.json`。WPF 同时覆盖原资源不足等待、不准备目录、空队列不拉起 monitor，以及明确移出/再入队的新身份能预约。
+- 编译故障透明保留：首次测试发布因新用例引用了 `RunPoolAccounting` 作用域外的 `temp`（CS8801）失败，仅为两用例补独立临时根；不是业务 RED。首次 Worker 发布因新增循环变量 `claim` 与稍后变量同名（CS0136）失败，仅改为 `retainedClaim`；未动测试断言。
+- 根因分类：跨层合同传播遗漏 + 覆盖只检查读取端。防复发已经落在真实请求入口、原始 JSON 与真实队列恢复回归，而非仅直接构造内存对象。未扩大资源门槛、保留上限或 UI 30 秒超时；`scripts/test.ps1` 和 CI policy 未改。
+- 新增/修改的三项测试文件与临时执行器仍需操作员审查，清单 `regression-review.json`；`task_verify run` 返回 **unverified / project-or-git-baseline-unavailable，checks=[]**。手动红绿不代替 operator-configured 验证基线。
+

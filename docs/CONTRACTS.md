@@ -417,7 +417,7 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
 
 1. **范围 / 触发**：`reserve-task` 在 App 调用 `StartRun` 前已经产生预约；两个客户端或 monitor 重启都不能为同一队列意图再生成一个尝试。客户端互斥与 `TaskBook.Attempts` 不是这个窗口的领取权威。
 2. **签名**：`TaskReservationClaim(Guid EntryId, Guid AttemptId)`；`Ledger.TaskClaims` 是 `control.json` schema 3 中的列表；`ReplayTaskClaim(Request, LaunchItem[])` 读取原领取，`Save()` 同时发布领取与预约 Entries。旧 Worker 拒绝 schema 3，schema 1/2 仍可迁移。
-3. **数据合同**：EntryId / AttemptId 均非空且各自唯一。完整计划与资源策略决定同一尝试重试是否相同。领取不是展示历史：Revoked、终态剪裁、boot rollover 都不清除；保留最多 `MaxAttempts + MaxQueueEntries`（1200）条。达到边界停止新预约，不删除证据以放行。新执行意图必须由明确重新入队产生新 EntryId。
+3. **数据合同**：EntryId / AttemptId 均非空且各自唯一；新预约必须在写入资源池、Entries 或 TaskClaims 之前校验，不能只靠重启读取时检查。保留的 AttemptId 不能经 `reserve-task` 或普通 `reserve` 复活；原记录仍在的合法同计划查询式重试保持幂等。完整计划与资源策略决定同一尝试重试是否相同。领取不是展示历史：Revoked、终态剪裁、boot rollover 都不清除；保留最多 `MaxAttempts + MaxQueueEntries`（1200）条。达到边界停止新预约，不删除证据以放行。schema 3 起的原始 JSON 必须显式包含非 null 的 `TaskClaims`；schema 1/2 缺省字段才允许迁移为空列表，迁移只发生在内存。新执行意图必须由明确重新入队产生新 EntryId。
 4. **校验 / 错误矩阵**：
 
    | 条件 | 结果 |
@@ -429,8 +429,12 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
    | ledger 原子替换失败 | 预约与领取的内存增量一起回滚，无成功响应 |
    | 旧版同任务预约尚未记入任务历史 | 无法证明领取身份，阻止新领取而非猜测 |
    | 空 / 重复身份、超量领取、未来 schema | fail-closed，禁止覆盖或执行 |
+   | schema 3 缺失 / 任意版本显式 null 的 TaskClaims | 拒绝读取，不改写主文件或备份；缺失字段不等于没有领取 |
+   | 队首已领取但尚未写入 TaskRun | 命令解析与目录准备前暂停并停 timer，保留队列和领取；显示原尝试及状态 |
+   | 已确认 Revoked，但 TaskRun 未落盘 | 暂停并提示先核对原尝试，再由用户「移出队列」及「加入队列」；不自动换 EntryId |
+   | 原尝试状态 / 历史未知或已裁剪 | 不把重新入队视为安全；先核对回执与作业树，禁止自动重放 |
 
 5. **正常 / 基准 / 异常例**：正常为两个客户端竞争仅一个计划获准；基准为原计划查询式重试取回同一 Pending/Revoked 记录；异常为持久化后响应丢失、monitor 重启仍不得另建计划补发。
-6. **回归断言**：QQ-C01/C02 用两个独立 pipe 客户端，故意不写 TaskRun，验证唯一预约与重启；QQ-C03 实际阻止 File.Replace，验证无幽灵领取；QQ-C04 验证撤销、历史剪裁与 boot 变化；QQ-C05/C06 覆盖旧记录不确定性与身份/数量校验。均不启动真实 Agent。
-7. **错误与正确做法**：错误是“TaskBook 暂无运行项，所以换新 plan.Id 再 reserve”；正确是先查询 monitor 的持久 EntryId 领取，再按原 AttemptId 取回结果或明确拒绝。这里保证至多一次预约归属，不承诺业务任务跨崩溃必定成功。
+6. **回归断言**：QQ-C01/C02 用两个独立 pipe 客户端，故意不写 TaskRun，验证唯一预约与重启；QQ-C03 实际阻止 File.Replace，验证无幽灵领取；QQ-C04 验证撤销、历史剪裁与 boot 变化；QQ-C05/C06 覆盖旧记录不确定性与身份/数量校验。QQ-C07～C12 从真实 IPC / 原始 JSON 入口验证拒绝先于写入、下一合法预约仍可用、重启可读和普通 reserve 不能复活裁剪身份。WPF `RunQueueClaimRecoveryChecksAsync` 验证暂停发生在准备之前、任务文件/领取不变、明确移出再入队产生可接受的新身份。均不调用真实模型或启动用户 Agent。
+7. **错误与正确做法**：错误是“TaskBook 暂无运行项，所以换新 plan.Id 再 reserve”，或“JSON 初始化为空，所以执行权威字段缺失也安全”；正确是先核对持久 EntryId 领取和字段存在性，再按原 AttemptId 取回结果或明确拒绝。App 读取账本只用于保守阻止准备，不代替 monitor 的预约权威；IO 在后台完成，失败暂停。这里保证至多一次预约归属，不承诺业务任务跨崩溃必定成功。
 

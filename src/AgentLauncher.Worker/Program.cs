@@ -378,6 +378,12 @@ internal sealed class Monitor : IDisposable
             if(items.Length is <1 or >ResourcePolicy.MaxSlots||items.Select(i=>i.Id).Distinct().Count()!=items.Length)throw new IOException("启动项数量或 ID 无效。");
             var previous=ledger.Entries.Where(e=>items.Any(i=>i.Id==e.Plan.Id)).ToArray();
             if(previous.Length>0){if(request.Operation!="reserve-task"&&previous.Length==items.Length&&previous.All(e=>e.Digest==Store.Digest(items.Single(i=>i.Id==e.Plan.Id))))return new(true,"请求已记录",previous,sample,epoch);throw new IOException("启动 ID 已使用。");}
+            // A retained claim owns one non-empty attempt identity. Exact replays returned above; any remaining reuse
+            // (empty id, pruned history, or an unrelated entry with the same id) must fail before pools, entries or claims change.
+            if(request.Operation=="reserve-task"&&items[0].Id==Guid.Empty)throw new IOException("队列预约缺少有效的尝试身份，未写入账本。");
+            foreach(var item in items)
+                foreach(var retainedClaim in ledger.TaskClaims)
+                    if(retainedClaim.AttemptId==item.Id)throw new IOException($"尝试 {item.Id:N} 已由队列领取，不能重新预约；请核对原记录。");
             var active=ledger.Entries.Where(e=>!Store.IsTerminal(e)).ToList();
             foreach(var p in items)
             {

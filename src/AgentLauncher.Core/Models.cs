@@ -133,13 +133,23 @@ public sealed class PoolRecord
     public DateTimeOffset Created { get; set; } = DateTimeOffset.UtcNow;
 }
 public sealed record TaskReservationClaim(Guid EntryId, Guid AttemptId);
-public sealed class Ledger
+public sealed class Ledger : IJsonOnDeserialized
 {
     public int SchemaVersion { get; set; } = LedgerMigration.CurrentSchemaVersion;
     public string BootId { get; set; } = "";
     public List<ControlEntry> Entries { get; set; } = [];
     public List<PoolRecord> Pools { get; set; } = [];
-    public List<TaskReservationClaim> TaskClaims { get; set; } = [];
+    private List<TaskReservationClaim> taskClaims = [];
+    private bool taskClaimsSpecified;
+    public List<TaskReservationClaim> TaskClaims
+    {
+        get => taskClaims;
+        set { taskClaims = value; taskClaimsSpecified = true; }
+    }
+    // Schema 3 must carry the claims field; presence (not a null/empty default) distinguishes it from a legacy file.
+    internal bool TaskClaimsAbsentFromJson { get; private set; }
+    void IJsonOnDeserialized.OnDeserialized() => TaskClaimsAbsentFromJson = !taskClaimsSpecified;
+    internal void ConfirmTaskClaimsMigrated() => TaskClaimsAbsentFromJson = false;
 }
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? JobMemory = null);
 public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, Guid? WaiverId = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null);

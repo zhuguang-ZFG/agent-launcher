@@ -20,6 +20,7 @@ public partial class MainWindow
     private string taskLoadError = "";
     private bool queueEnabled;
     private bool queuePumping;
+    private bool queuePausedByRecovery;
     private bool renderingTasks;
     private Task queuePumpTask = Task.CompletedTask;
     private CancellationTokenSource? queueCancellation;
@@ -326,6 +327,7 @@ public partial class MainWindow
         if (PauseEmptyQueue()) return Task.CompletedTask;
         queuePumping = true;
         queueCancellation = new();
+        queuePausedByRecovery = false;
         UpdateQuickQueueButton();
         return queuePumpTask = RunQueuePumpAsync(queueCancellation);
     }
@@ -353,7 +355,7 @@ public partial class MainWindow
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
-            QueueStatusText.Text = "队列已暂停；已运行任务不受影响。";
+            if (!queuePausedByRecovery && queueEnabled) QueueStatusText.Text = "队列已暂停；已运行任务不受影响。";
         }
         catch (Exception e) when (e is IOException or InvalidDataException or OperationCanceledException or UnauthorizedAccessException or TimeoutException or JsonException)
         {
@@ -424,6 +426,11 @@ public partial class MainWindow
         var entry = book.Queue.Single(candidate => candidate.Id == decision.Next.EntryId);
         var task = book.Tasks.Single(candidate => candidate.Id == entry.TaskId);
         if (task.Revision != entry.TaskRevision) { await HoldEntryAsync(entry, "任务已被修改，请重新入队。"); return; }
+
+        // A durable monitor claim is execution authority for this queue item. A claimed item with no recorded task run
+        // must never be prepared again; this is a read-only inspection of the existing ledger, not a new authorization.
+        var claim = await Task.Run(() => InspectQueueClaim(entry.Id), cancellationToken);
+        if (claim.Failure.Length > 0 || claim.Claim is not null) { PauseQueueForClaim(entry, claim); return; }
 
         var profile = task.Profile.Copy();
         var resume = entry.ResumeOf is not null || !string.IsNullOrWhiteSpace(entry.SessionRef);
@@ -545,7 +552,14 @@ public partial class MainWindow
             await HoldEntryAsync(entry, "预约结果未确认，队列已暂停；先核对运行记录，不会自动重放：" + e.Message);
             return;
         }
-        if (!reserve.Ok) { await HoldEntryAsync(entry, reserve.Message); return; }
+        if (!reserve.Ok)
+        {
+            // The claim may have appeared after the precheck. Re-inspect the durable ledger before the next tick prepares again.
+            var refused = await Task.Run(() => InspectQueueClaim(entry.Id), cancellationToken);
+            if (refused.Failure.Length > 0 || refused.Claim is not null) { PauseQueueForClaim(entry, refused); return; }
+            await HoldEntryAsync(entry, reserve.Message);
+            return;
+        }
 
         var recorded = false;
         var submitted = false;
@@ -589,9 +603,23 @@ public partial class MainWindow
         try
         {
             var reply = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: attemptId));
-            if (reply.Ok && reply.Entries?.Any(entry => entry.Plan.Id == attemptId && entry.State == "Revoked") == true)
+            var revoked = reply.Entries?.FirstOrDefault(entry => entry.Plan.Id == attemptId && entry.State == "Revoked");
+            if (reply.Ok && revoked is not null)
             {
-                if (recorded) await UpdateTasksAsync(book => TaskBookOps.FinishRun(book, attemptId, cancelled ? "Cancelled" : "Failed", "未启动预约已撤销"), "撤销记录保存失败");
+                if (recorded)
+                {
+                    await UpdateTasksAsync(book => TaskBookOps.FinishRun(book, attemptId, cancelled ? "Cancelled" : "Failed", "未启动预约已撤销"), "撤销记录保存失败");
+                    return;
+                }
+                // The reservation is gone but the durable claim for the queue item survives. Never leave the queue enabled
+                // to prepare the same claimed entry again; require the user to inspect the original attempt and re-enqueue explicitly.
+                queueEnabled = false;
+                taskTimer.Stop();
+                queuePausedByRecovery = true;
+                RenderTasks();
+                var attempt = attemptId.ToString("N")[..8];
+                ErrorText.Text = $"队列已暂停：尝试 {attempt} 的预约已撤销（{revoked.Detail}），但排队项的持久领取记录已保留，未写入启动记录。请先确认它从未启动，然后在任务卡片点「移出队列」，再点「加入队列」明确重新排队；不会自动重放。";
+                QueueStatusText.Text = $"队列已暂停：尝试 {attempt} 未写入启动记录；确认后点「移出队列」，再点「加入队列」。";
                 return;
             }
             QueueStatusText.Text = "预约已领取或撤销结果未确认，队列已暂停；请核对运行记录，不会自动重放。";
@@ -603,6 +631,57 @@ public partial class MainWindow
         queueEnabled = false;
         taskTimer.Stop();
         RenderTasks();
+    }
+
+    private sealed record QueueClaimObservation(TaskReservationClaim? Claim, ControlEntry? Original, string Failure);
+
+    private QueueClaimObservation InspectQueueClaim(Guid entryId)
+    {
+        var path = Store.FilePath("control.json");
+        try
+        {
+            var ledger = Store.Read<Ledger>(path);
+            if (ledger is null)
+                return File.Exists(path + ".bak")
+                    ? new QueueClaimObservation(null, null, "控制账本缺失但存在备份，无法核对领取记录。")
+                    : new QueueClaimObservation(null, null, "");
+            var accepted = LedgerMigration.Accept(ledger);
+            var claim = accepted.TaskClaims.FirstOrDefault(candidate => candidate.EntryId == entryId);
+            return new QueueClaimObservation(claim, claim is null ? null : accepted.Entries.FirstOrDefault(candidate => candidate.Plan.Id == claim.AttemptId), "");
+        }
+        catch (Exception e) when (e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException)
+        {
+            return new QueueClaimObservation(null, null, e.Message);
+        }
+    }
+
+    private void PauseQueueForClaim(QueueEntry entry, QueueClaimObservation observation)
+    {
+        queueEnabled = false;
+        taskTimer.Stop();
+        queuePausedByRecovery = true;
+        RenderTasks();
+        var task = taskBook?.Tasks.FirstOrDefault(candidate => candidate.Id == entry.TaskId);
+        var name = task?.Name ?? "未知任务";
+        if (observation.Failure.Length > 0 || observation.Claim is null)
+        {
+            ErrorText.Text = $"队列已暂停：无法核对任务「{name}」的持久领取记录，未准备命令或工作目录，也不会自动重放。请先核对 {Store.FilePath("control.json")}（必要时核对 .bak 备份）后再执行队列：{observation.Failure}";
+            QueueStatusText.Text = "队列已暂停：无法核对队列领取记录，未准备或启动；请核对 control.json 与备份。";
+            return;
+        }
+        var claim = observation.Claim!;
+        var run = taskBook?.Attempts.FirstOrDefault(candidate => candidate.AttemptId == claim.AttemptId);
+        var state = run?.State ?? observation.Original?.State ?? "未知或记录已裁剪";
+        var attempt = claim.AttemptId.ToString("N")[..8];
+        var evidence = observation.Original?.Detail is { Length: > 0 } detail ? $"最近记录：{detail}。" : "";
+        if (run is null && observation.Original is null)
+        {
+            ErrorText.Text = $"队列已暂停：任务「{name}」的排队项已有持久领取记录（尝试 {attempt}），但原尝试的状态与回执历史已裁剪或未知。不能仅凭「移出队列」再「加入队列」视为安全；请先找到该尝试的回执或运行记录，确认它从未启动或已经结束，再明确移出并重新入队。不会删除领取记录，也不会自动重放。";
+            QueueStatusText.Text = $"队列已暂停：尝试 {attempt} 的状态与历史已裁剪或未知；先核对原尝试回执与运行记录，确认后再移出并重新入队。";
+            return;
+        }
+        ErrorText.Text = $"队列已暂停：任务「{name}」的排队项已有持久领取记录（尝试 {attempt}，状态 {state}），但没有对应的启动记录。{evidence}请先确认该尝试从未启动或已经结束，然后在任务卡片点「移出队列」，再点「加入队列」明确重新排队。不会删除领取记录，也不会自动重放。";
+        QueueStatusText.Text = $"队列已暂停：尝试 {attempt}（{state}）已领取该排队项但没有启动记录；确认原尝试后点「移出队列」，再点「加入队列」。";
     }
 
     private Task HoldEntryAsync(QueueEntry entry, string detail)
