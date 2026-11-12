@@ -752,4 +752,9 @@ powershell -NoProfile -File scripts/test.ps1
 - 编译故障透明保留：首次测试发布因新用例引用了 `RunPoolAccounting` 作用域外的 `temp`（CS8801）失败，仅为两用例补独立临时根；不是业务 RED。首次 Worker 发布因新增循环变量 `claim` 与稍后变量同名（CS0136）失败，仅改为 `retainedClaim`；未动测试断言。
 - 根因分类：跨层合同传播遗漏 + 覆盖只检查读取端。防复发已经落在真实请求入口、原始 JSON 与真实队列恢复回归，而非仅直接构造内存对象。未扩大资源门槛、保留上限或 UI 30 秒超时；`scripts/test.ps1` 和 CI policy 未改。
 - 新增/修改的三项测试文件与临时执行器仍需操作员审查，清单 `regression-review.json`；`task_verify run` 返回 **unverified / project-or-git-baseline-unavailable，checks=[]**。手动红绿不代替 operator-configured 验证基线。
+- 本次原样完整 `scripts/test.ps1` **exit 0**：原生/模型 **117/117**、集成 **119/119**、WPF **225/225，Dpi 120**、原型 **5/5**、浏览器 **5/5**，总耗时 **434.68 秒**。这次不是分段拼接绿色；原 30 秒 UI runner 和各断言保持。完整日志 `full-gate.log`，当前报告已归档到本轮证据目录。
+- 真实 WPF 使用审查时相同的隔离持久边界复核：两项保留、队列自动暂停，按钮回到「执行队列」，提示原尝试 `Revoked` 及明确移出/再入队步骤；`actual-ui.json` / `actual-queue-recovery.png`，exit 0。未执行 Agent，未访问生产数据。
+- S1–S4 已实现功能通过本次完整 gate；S4.6 的 `ReviewChecks.cs` 已有真实 Node loopback listener + 受管 Job + `PreviewPortsAsync` 回归，并非缺失实现。S3.5 的本次 `pool-comparison.json` 从 native 根归档，仍只证明额度行为，不宣传物理内存节省或长期稳定。
+- S0.6 真实双任务准入为 **Deny**（可用 `3,624,382,464` bytes < 所需 `3,758,096,384` bytes，CPU 27.34%，提交余量 `6,818,865,152` bytes），0/3 轮。用户表单明确选择先交付已验证修复、S0.6/S5 保留受阻，不安装新运行时；长时实验草稿停止并归档 `deferred-soak-draft.zip`，未编译、未执行，不是发布交付物，活动源码已删除。
+- 工具版本不是冻结常量：本轮初始直接查询 Omp 为 18.18.9、Bun 为 1.3.14，完整 gate 的后续能力探测已观察到 Omp 18.19.0。没有替换或安装它们；历史 18.18.8 原生模块路径不再存在，不将旧 SDK/原生探针能力套用于新版本。S5 宿主仍未实现、未启用，也不宣称整个 spec 已完成。
 
