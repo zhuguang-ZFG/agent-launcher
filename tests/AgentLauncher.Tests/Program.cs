@@ -6,6 +6,8 @@ using AgentLauncher.Windows;
 
 if(args is ["--repair-checks"]) return RepairChecks.Run();
 if(args is ["--integration"]) return await Integration.RunAsync();
+if(args is ["--terminal-batch-checks"]) return await Integration.RunAsync(terminalOnly:true);
+if(args is ["--parallel-batch-checks"]) return await Integration.RunAsync(terminalOnly:true,directBatch:true);
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
 if(args.Length>0&&args[0]=="--echo") { File.WriteAllText(args[1],JsonSerializer.Serialize(new { Cwd=Environment.CurrentDirectory, Args=args.Skip(2).ToArray() }));return 0; }

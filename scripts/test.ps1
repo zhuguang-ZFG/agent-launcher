@@ -16,17 +16,20 @@ try {
   & (Join-Path $runtime 'AgentLauncher.Tests.exe') --repair-checks
   if($LASTEXITCODE -ne 0){throw 'Repair checks failed'}
   Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'repair-results.json') (Join-Path $root 'artifacts/repair-results.json')
-  $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-integration-'+[guid]::NewGuid().ToString('N'))
-  try { & (Join-Path $runtime 'AgentLauncher.Tests.exe') --integration }
-  finally {
-    $diagnostics=Join-Path $root 'artifacts/ci-diagnostics/integration'
+  foreach($suite in @('parallel-batch','terminal-batch','integration')){
+    $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-'+$suite+'-'+[guid]::NewGuid().ToString('N'))
+    $testArgument=if($suite -eq 'integration'){'--integration'}else{'--'+$suite+'-checks'}
+    try { & (Join-Path $runtime 'AgentLauncher.Tests.exe') $testArgument }
+    finally {
+    $diagnostics=Join-Path $root ('artifacts/ci-diagnostics/'+$suite)
     New-Item -ItemType Directory -Path $diagnostics -Force | Out-Null
     foreach($name in @('control.json','control.json.bak','monitor-pid.json','monitor-error.json','terminal-16-diagnostics.json','integration-results.json','attempts')){
       $source=Join-Path $env:AGENT_LAUNCHER_TEST_ROOT $name
       if(Test-Path -LiteralPath $source){Copy-Item -LiteralPath $source -Destination $diagnostics -Recurse -Force}
     }
+    }
+    if($LASTEXITCODE -ne 0){throw "$suite checks failed"}
   }
-  if($LASTEXITCODE -ne 0){throw 'Integration failed'}
   Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'integration-results.json') (Join-Path $root 'artifacts/integration-results.json')
   Remove-Item Env:AGENT_LAUNCHER_FAKE_SAMPLE
   if(-not $SkipUi){

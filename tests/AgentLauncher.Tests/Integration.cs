@@ -5,7 +5,7 @@ using AgentLauncher.Windows;
 
 internal static class Integration
 {
-    public static async Task<int> RunAsync()
+    public static async Task<int> RunAsync(bool terminalOnly=false,bool directBatch=false)
     {
         if(!(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_TEST_ROOT")??"").Contains("AgentLauncher-tests-"))throw new InvalidOperationException("Integration requires an isolated test root.");
         Directory.CreateDirectory(Store.Root);var evidence=new List<object>();var cwd=Path.Combine(Store.Root,"项目 & spaces");Directory.CreateDirectory(cwd);
@@ -29,6 +29,46 @@ internal static class Integration
         }
         async Task Test(string name,Func<Task> action){try{await action();Console.WriteLine("PASS "+name);evidence.Add(new{name,passed=true});}catch(Exception e){Console.WriteLine("FAIL "+name+": "+e.Message);evidence.Add(new{name,passed=false,error=e.ToString()});}}
         LaunchItem Item(string name,string[] args,string kind="agent")=>new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),false,new(Environment.ProcessPath!,args,"exe"),kind=="git"?ResourcePolicy.GitBudget:ResourcePolicy.AgentBudget,kind);
+        async Task TerminalBatch()
+        {
+            var terminal=directBatch?"":Commands.Terminal("");
+            await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
+            var settings=new ResourceSettings{Mode="custom",JobMemoryLimit=ResourcePolicy.AgentBudget,PlanningBytes=ResourcePolicy.MinPlanningBytes,Pool=ResourcePolicy.PoolShared,PoolMemoryLimit=4*ResourcePolicy.GiB};
+            var original=Store.Read<Configuration>(Store.FilePath("configuration.json"));
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
+            try
+            {
+                var batch=Guid.NewGuid();var pool=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-16.release");
+                var items=Enumerable.Range(1,ResourcePolicy.MaxSlots).Select(n=>Item("Terminal 16-pane fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-16-{n}.json"),release]) with{BatchId=batch,Position=n,Shared=true,PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode,PoolId=pool}).ToArray();
+                using var monitor=Process.GetProcessById(Store.Read<int>(Store.FilePath("monitor-pid.json")));_ = monitor.Handle;
+                var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
+                int[] missing=[];var runners=new List<Process>();
+                try
+                {
+                    if(directBatch)foreach(var item in items)runners.Add(Start("run",item.Id));else Commands.SubmitTerminal(terminal,items,"vertical");
+                    var deadline=Stopwatch.StartNew();
+                    while(deadline.Elapsed<TimeSpan.FromSeconds(25)&&items.Any(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))))await Task.Delay(100);
+                    missing=items.Where(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))).Select(item=>item.Position).ToArray();
+                    var snapshot=new{missing,monitorExited=monitor.HasExited,monitorExitCode=monitor.HasExited?(int?)monitor.ExitCode:null,items=items.Select(item=>new{item.Id,item.Position,claim=File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim")),receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id))}).ToArray()};
+                    Store.Save(Store.FilePath("terminal-16-diagnostics.json"),snapshot);
+                    Console.WriteLine("Terminal sixteen pane diagnostics: "+JsonSerializer.Serialize(snapshot,Store.Json));
+                }
+                finally
+                {
+                    File.WriteAllText(release,"release");
+                    var finished=Stopwatch.StartNew();
+                    while(finished.Elapsed<TimeSpan.FromSeconds(15)&&items.Any(item=>File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim"))&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase is not("Finished" or "FailedBeforeStart")))await Task.Delay(100);
+                    foreach(var item in items.Where(item=>!File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim"))))
+                        try{await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));}catch(Exception e)when(e is IOException or OperationCanceledException){Console.WriteLine("Synthetic unclaimed pane cleanup refused: "+e.Message);}
+                    await Ipc.SendAsync(new("status",Guid.NewGuid()));
+                    foreach(var runner in runners)runner.Dispose();
+                }
+                Assert(missing.Length==0,"Terminal did not start every 16-pane fixture; missing positions: "+string.Join(",",missing));
+                Assert(items.All(item=>File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim"))),"one or more pane claims are missing");
+                Assert(items.All(item=>Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0}),"not every pane completed after the shared release");
+            }
+            finally { Store.Save(Store.FilePath("configuration.json"),original??new Configuration()); }
+        }
         ProtectedProcess LaunchPooled(Job root,Guid poolId,Guid? itemId,string[] args)
         {
             using var pool=new Job(Store.PoolName(poolId),openOnly:true);
@@ -42,6 +82,12 @@ internal static class Integration
             process.Resume();return process;
         }
         var initial=await Ipc.EnsureMonitorAsync();Assert(initial.Ok,initial.Message);
+        if(terminalOnly)
+        {
+            await Test("Terminal sixteen panes all become ready before any fixture exits",TerminalBatch);
+            Store.Save(Store.FilePath("integration-results.json"),evidence);
+            return evidence.Any(e=>e.GetType().GetProperty("passed")?.GetValue(e) is false)?1:0;
+        }
         await Test("P04 begin rechecks complete resource policy without consuming grant",async()=>{
             var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
             const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
@@ -392,34 +438,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             Assert(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"),"Terminal panes did not complete");
             Assert(File.Exists(Path.Combine(Store.Root,"terminal-1.json"))&&File.Exists(Path.Combine(Store.Root,"terminal-2.json")),"terminal command did not execute");await Ipc.SendAsync(new("status",Guid.NewGuid()));
         });
-        await Test("Terminal sixteen panes all become ready before any fixture exits",async()=>{
-            var terminal=Commands.Terminal("");
-            await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
-            var settings=new ResourceSettings{Mode="custom",JobMemoryLimit=ResourcePolicy.AgentBudget,PlanningBytes=ResourcePolicy.MinPlanningBytes,Pool=ResourcePolicy.PoolShared,PoolMemoryLimit=4*ResourcePolicy.GiB};
-            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
-            try
-            {
-                var batch=Guid.NewGuid();var pool=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-16.release");
-                var items=Enumerable.Range(1,ResourcePolicy.MaxSlots).Select(n=>Item("Terminal 16-pane fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-16-{n}.json"),release]) with{BatchId=batch,Position=n,Shared=true,PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode,PoolId=pool}).ToArray();
-                using var monitor=Process.GetProcessById(Store.Read<int>(Store.FilePath("monitor-pid.json")));_ = monitor.Handle;
-                var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
-                try
-                {
-                    Commands.SubmitTerminal(terminal,items,"vertical");var deadline=Stopwatch.StartNew();
-                    while(deadline.Elapsed<TimeSpan.FromSeconds(25)&&items.Any(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))))await Task.Delay(100);
-                    var missing=items.Where(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))).Select(item=>item.Position).ToArray();
-                    Store.Save(Store.FilePath("terminal-16-diagnostics.json"),new{missing,monitorExited=monitor.HasExited,monitorExitCode=monitor.HasExited?(int?)monitor.ExitCode:null,items=items.Select(item=>new{item.Id,item.Position,claim=File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim")),receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id))}).ToArray()});
-                    Assert(missing.Length==0,"Terminal did not start every 16-pane fixture; missing positions: "+string.Join(",",missing));
-                    Assert(items.All(item=>File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim"))),"one or more pane claims are missing");
-                }
-                finally { File.WriteAllText(release,"release"); }
-                var finished=Stopwatch.StartNew();
-                while(finished.Elapsed<TimeSpan.FromSeconds(15)&&items.Any(item=>Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is not{Phase:"Finished",ExitCode:0}))await Task.Delay(100);
-                Assert(items.All(item=>Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0}),"not every pane completed after the shared release");
-                await Ipc.SendAsync(new("status",Guid.NewGuid()));
-            }
-            finally { Store.Save(Store.FilePath("configuration.json"),new Configuration()); }
-        });
+        await Test("Terminal sixteen panes all become ready before any fixture exits",TerminalBatch);
         await Test("ACC-S3B01 shared pool bills once, keeps kernel caps and launches on a root-pool-item chain",async()=>{
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
