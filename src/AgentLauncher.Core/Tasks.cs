@@ -4,13 +4,14 @@ namespace AgentLauncher.Core;
 
 public static class TaskSchema
 {
-    // Version 2 adds optional quick-launch metadata. Version 1 had no isolated-worktree intent to honor.
-    public const int Current = 2;
+    // Version 3 adds archived cards and deferred queue intents; older dispatchers must reject these semantics.
+    public const int Current = 3;
     public const int MaxNameLength = 120;
     public const int MaxDescriptionLength = 20000;
     public const int MaxAcceptanceItems = 32;
     public const int MaxAcceptanceTextLength = 500;
     public const int MaxTasks = 200;
+    public const int MaxStoredTasks = 1200;
     public const int MaxQueueEntries = 200;
     public const int MaxAttempts = 1000;
     public const int MaxDependencies = 16;
@@ -43,6 +44,7 @@ public sealed class TaskCard
     [JsonRequired] public List<Guid> DependsOn { get; set; } = [];
     [JsonRequired] public int Priority { get; set; }
     [JsonRequired] public DateTimeOffset UpdatedAt { get; set; }
+    public bool Archived { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public QuickLaunchSource? QuickLaunch { get; set; }
 
     public TaskCard Copy() => new()
@@ -50,7 +52,7 @@ public sealed class TaskCard
         Id = Id, Revision = Revision, Name = Name, Project = Project, AgentId = AgentId, Profile = Profile.Copy(),
         Description = Description, Acceptance = Acceptance.Select(item => item.Copy()).ToList(), DirectoryMode = DirectoryMode,
         Resource = Resource?.Copy(), BaseCommit = BaseCommit, Branch = Branch, DependsOn = [.. DependsOn], Priority = Priority, UpdatedAt = UpdatedAt,
-        QuickLaunch = QuickLaunch
+        QuickLaunch = QuickLaunch, Archived = Archived
     };
 
     public void Validate()
@@ -91,6 +93,7 @@ public sealed class QueueEntry
     [JsonRequired] public string ProgramFingerprint { get; set; } = "";
     [JsonRequired] public string DirectoryMode { get; set; } = "isolated";
     public string Detail { get; set; } = "";
+    public bool Deferred { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public Guid? ResumeOf { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? SessionRef { get; set; }
     [JsonRequired] public ResourceSettings Resource { get; set; } = new();
@@ -101,7 +104,7 @@ public sealed class QueueEntry
         Id = Id, TaskId = TaskId, TaskRevision = TaskRevision, Priority = Priority, Sequence = Sequence, EnqueuedAt = EnqueuedAt,
         Project = Project, AgentId = AgentId, Command = Command with { Arguments = [.. Command.Arguments] }, ProgramFingerprint = ProgramFingerprint,
         DirectoryMode = DirectoryMode, Resource = Resource.Copy(), DependsOn = [.. DependsOn],
-        Detail = Detail, ResumeOf = ResumeOf, SessionRef = SessionRef, QuickLaunch = QuickLaunch
+        Detail = Detail, Deferred = Deferred, ResumeOf = ResumeOf, SessionRef = SessionRef, QuickLaunch = QuickLaunch
     };
 }
 
@@ -138,19 +141,20 @@ public sealed class TaskBook
     [JsonRequired] public List<TaskRun> Attempts { get; set; } = [];
     [JsonRequired] public int MaxRunning { get; set; } = 1;
     [JsonRequired] public long NextSequence { get; set; }
+    public List<Guid>? LastDispatchTaskIds { get; set; }
 
     public TaskBook Copy() => new()
     {
         SchemaVersion = SchemaVersion, Revision = Revision, Tasks = Tasks.Select(task => task.Copy()).ToList(),
         Queue = Queue.Select(entry => entry.Copy()).ToList(), Attempts = Attempts.Select(run => run.Copy()).ToList(),
-        MaxRunning = MaxRunning, NextSequence = NextSequence
+        MaxRunning = MaxRunning, NextSequence = NextSequence, LastDispatchTaskIds = LastDispatchTaskIds is null ? null : [.. LastDispatchTaskIds]
     };
 
     public void Validate()
     {
         if (SchemaVersion != TaskSchema.Current) throw new InvalidDataException("任务文件版本不支持，禁止覆盖。");
-        if (Tasks is null || Queue is null || Attempts is null) throw new InvalidDataException("任务文件结构损坏。");
-        if (Tasks.Count > TaskSchema.MaxTasks || Queue.Count > TaskSchema.MaxQueueEntries || Attempts.Count > TaskSchema.MaxAttempts) throw new InvalidDataException("任务文件超出大小边界。");
+        if (Tasks is null || Queue is null || Attempts is null || Tasks.Any(task => task is null) || Queue.Any(entry => entry is null) || Attempts.Any(run => run is null)) throw new InvalidDataException("任务文件结构损坏。");
+        if (Tasks.Count > TaskSchema.MaxStoredTasks || Tasks.Count(task => task is not null && !task.Archived) > TaskSchema.MaxTasks || Queue.Count > TaskSchema.MaxQueueEntries || Attempts.Count > TaskSchema.MaxAttempts) throw new InvalidDataException("任务文件超出大小边界。");
         if (MaxRunning is < 1 or > ResourcePolicy.MaxSlots) throw new InvalidDataException("并发上限无效。");
         if (Queue.Count > 0 && NextSequence <= 0) throw new InvalidDataException("队列序号无效。");
         if (Tasks.Select(task => task.Id).Distinct().Count() != Tasks.Count) throw new InvalidDataException("任务身份重复。");
@@ -163,16 +167,18 @@ public sealed class TaskBook
         {
             if (entry is null) throw new InvalidDataException("任务文件结构损坏。");
             entry.QuickLaunch?.Validate();
-            if (entry.Id == Guid.Empty || entry.Sequence <= 0 || !Tasks.Any(task => task.Id == entry.TaskId && task.Revision == entry.TaskRevision)) throw new InvalidDataException("队列项与任务修订不一致。");
+            if (entry.Id == Guid.Empty || entry.Sequence <= 0 || !Tasks.Any(task => task.Id == entry.TaskId && task.Revision == entry.TaskRevision && !task.Archived)) throw new InvalidDataException("队列项与任务修订不一致或任务已归档。");
             if (Queue.Count(existing => existing.TaskId == entry.TaskId) > 1) throw new InvalidDataException("同一任务重复入队。");
             if (entry.Command.Executable.Length == 0 || entry.Command.Arguments.Any(argument => argument.Contains('\0'))) throw new InvalidDataException("队列项命令无效。");
         }
         if (Attempts.Any(run => run is null) || Attempts.Select(run => run.AttemptId).Distinct().Count() != Attempts.Count) throw new InvalidDataException("尝试身份重复。");
+        if (Tasks.Any(task => task.Archived && Attempts.Any(run => run.TaskId == task.Id && !run.Terminal))) throw new InvalidDataException("结果未确认的任务不能归档。");
+        if (LastDispatchTaskIds is { } selection && (selection.Count > TaskSchema.MaxTasks || selection.Distinct().Count() != selection.Count || selection.Any(id => !Tasks.Any(task => task.Id == id)))) throw new InvalidDataException("上次批次范围无效。");
     }
 }
 
 /// <summary>Pure queue ordering and admission-free scheduling. Resource admission stays with the monitor.</summary>
-public sealed record QueueCandidate(Guid EntryId, Guid TaskId, long TaskRevision, int Priority, long Sequence, DateTimeOffset EnqueuedAt, Guid[] DependsOn);
+public sealed record QueueCandidate(Guid EntryId, Guid TaskId, long TaskRevision, int Priority, long Sequence, DateTimeOffset EnqueuedAt, Guid[] DependsOn, bool Deferred = false);
 public sealed record QueueWait(Guid EntryId, string Reason);
 public sealed record QueueDecision(QueueCandidate? Next, IReadOnlyList<QueueWait> Waiting);
 
@@ -194,6 +200,7 @@ public static class QueuePolicy
         QueueCandidate? next = null;
         foreach (var candidate in order)
         {
+            if (candidate.Deferred) { waiting.Add(new(candidate.EntryId, "已暂缓；恢复排队后才会执行")); continue; }
             if (next is not null) { waiting.Add(new(candidate.EntryId, "等待前序队列项")); continue; }
             if (running >= maxRunning) { waiting.Add(new(candidate.EntryId, "并发上限")); continue; }
             var missing = candidate.DependsOn.Where(id => !taskCompleted(id)).ToArray();
@@ -236,7 +243,7 @@ public static class TaskBookOps
 {
     public static TaskCard Create(TaskBook book, string name, string project, string agentId, AgentProfile profile, string description, IEnumerable<string> acceptance, string directoryMode, ResourceSettings? resource, int priority)
     {
-        if (book.Tasks.Count >= TaskSchema.MaxTasks) throw new InvalidDataException("任务数量已达上限。");
+        EnsureTaskCapacity(book, 1);
         var task = new TaskCard
         {
             Id = Guid.NewGuid(), Revision = 1, Name = (name ?? "").Trim(), Project = (project ?? "").Trim(), AgentId = agentId, Profile = profile.Copy(),
@@ -253,8 +260,33 @@ public static class TaskBookOps
     /// Creates one queued task per enabled draft slot from frozen resolved inputs. The whole import is validated and staged
     /// before the book changes, so a bad later item, capacity limit, or duplicate active import leaves the book untouched.
     /// </summary>
-    public static IReadOnlyList<Guid> EnqueueQuickLaunch(TaskBook book, Draft draft, IReadOnlyList<QuickLaunchItem> items, string worktreeRoot) =>
-        QuickLaunchQueue.Enqueue(book, draft, items, worktreeRoot);
+    public static IReadOnlyList<Guid> EnqueueQuickLaunch(TaskBook book, Draft draft, IReadOnlyList<QuickLaunchItem> items, string worktreeRoot, bool resetConcurrency = true) =>
+        QuickLaunchQueue.Enqueue(book, draft, items, worktreeRoot, resetConcurrency);
+
+    public static void EnsureTaskCapacity(TaskBook book, int additional)
+    {
+        if (book.Tasks.Count + additional > TaskSchema.MaxStoredTasks) throw new InvalidDataException("任务历史已达保留上限，请导出历史并联系维护者迁移；不会删除身份记录以放行。");
+        if (book.Tasks.Count(task => !task.Archived) + additional > TaskSchema.MaxTasks) throw new InvalidDataException("活动任务已达 200 张，请先归档已结束或尚未执行的任务。");
+    }
+
+    public static void SetArchived(TaskBook book, Guid taskId, bool archived)
+    {
+        var task = book.Tasks.SingleOrDefault(candidate => candidate.Id == taskId) ?? throw new InvalidDataException("任务不存在。");
+        if (task.Archived == archived) return;
+        if (book.Queue.Any(entry => entry.TaskId == taskId) || book.Attempts.Any(run => run.TaskId == taskId && !run.Terminal))
+            throw new InvalidDataException("任务仍在排队、运行或结果未确认，核对结束后才能归档。");
+        if (!archived) EnsureTaskCapacity(book, 0);
+        if (!archived && book.Tasks.Count(candidate => !candidate.Archived) >= TaskSchema.MaxTasks) throw new InvalidDataException("活动任务已满，请先归档其他任务。");
+        task.Archived = archived;
+        task.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    public static void SetDeferred(TaskBook book, Guid entryId, bool deferred)
+    {
+        var entry = book.Queue.SingleOrDefault(candidate => candidate.Id == entryId) ?? throw new InvalidDataException("排队项已变化，请刷新后重试。");
+        if (book.Attempts.Any(run => run.TaskId == entry.TaskId && !run.Terminal)) throw new InvalidDataException("任务已经执行或结果未确认，请先核对运行记录。");
+        entry.Deferred = deferred;
+    }
 
     /// <summary>Edits bump the revision. Launch-relevant edits drop the queued entry because its frozen command no longer matches the task.</summary>
     public static TaskCard Edit(TaskBook book, Guid taskId, Action<TaskCard> change)
@@ -262,6 +294,7 @@ public static class TaskBookOps
         var index = book.Tasks.FindIndex(task => task.Id == taskId);
         if (index < 0) throw new InvalidDataException("任务不存在。");
         var current = book.Tasks[index];
+        if (current.Archived) throw new InvalidDataException("请先从归档恢复任务，再编辑。");
         var draft = current.Copy();
         change(draft);
         var launchRelevant = draft.Project != current.Project || draft.AgentId != current.AgentId || draft.DirectoryMode != current.DirectoryMode
@@ -284,6 +317,7 @@ public static class TaskBookOps
     public static QueueEntry Enqueue(TaskBook book, Guid taskId, CommandSpec command, string programFingerprint, Guid? resumeOf = null, string? sessionRef = null)
     {
         var task = book.Tasks.SingleOrDefault(candidate => candidate.Id == taskId) ?? throw new InvalidDataException("任务不存在。");
+        if (task.Archived) throw new InvalidDataException("请先从归档恢复任务，再加入队列。");
         if (!QueuePolicy.CanEnqueue(book.Queue, taskId)) throw new InvalidDataException("该任务已在队列中。");
         if (book.Queue.Count >= TaskSchema.MaxQueueEntries) throw new InvalidDataException("队列已满。");
         if (programFingerprint.Length != 64) throw new InvalidDataException("程序指纹无效，请重新检查 Agent。");
@@ -319,6 +353,7 @@ public static class TaskBookOps
         if (book.Attempts.Count(run => !run.Terminal) >= book.MaxRunning) throw new InvalidDataException("并发上限已满，稍后再试。");
         if (book.Attempts.Any(run => run.AttemptId == attemptId)) throw new InvalidDataException("尝试身份重复。");
         var queued = book.Queue.SingleOrDefault(candidate => candidate.Id == entry.Id) ?? throw new InvalidDataException("队列项已被移除，不能再次派发。");
+        if (queued.Deferred) throw new InvalidDataException("该排队项已暂缓，不能派发。");
         if (!SameIntent(queued, entry)) throw new InvalidDataException("队列项已变化，请重新确认。");
         var task = book.Tasks.SingleOrDefault(candidate => candidate.Id == entry.TaskId) ?? throw new InvalidDataException("任务不存在。");
         if (task.Revision != entry.TaskRevision) throw new InvalidDataException("任务已被修改，请重新入队。");

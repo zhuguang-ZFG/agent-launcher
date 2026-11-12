@@ -205,6 +205,139 @@ internal static class RepairChecks
             Assert(Get<bool>(monitor,"ledgerBroken")&&before.SequenceEqual(File.ReadAllBytes(path)),"failed Refresh published authority or forgot the disk error");
             Call(monitor,"Refresh",false);Assert(Get<bool>(monitor,"ledgerBroken")&&((string?)Call(monitor,"AdmissionBlockedReason"))?.Contains("未写入")==true,"next tick silently cleared the persistence block");
         });
+        Test("CR-N01 actual Refresh write failure denies begin and resume across later ticks",()=>
+        {
+            var plan=Item();var ended=Item();var pending=Item();
+            var creator=new ControlEntry{Plan=plan,Digest=Store.Digest(plan),State="Creating"};
+            var book=new Ledger{BootId=Store.BootId(),Entries=[creator,new(){Plan=ended,Digest=Store.Digest(ended),State="Started"},new(){Plan=pending,Digest=Store.Digest(pending)}]};
+            using var monitor=Monitor(book);creator.Epoch=Get<string>(monitor,"epoch");
+            var jobs=Get<Dictionary<Guid,Job>>(monitor,"jobs");
+            jobs[plan.Id]=new Job(Store.JobName(plan.Id),ResourcePolicy.AgentBudget);
+            jobs[ended.Id]=new Job(Store.JobName(ended.Id),ResourcePolicy.AgentBudget);
+            Store.Save(Store.ReceiptPath(ended.Id),new Receipt("Finished",0,0,0,"fixture finished",DateTimeOffset.UtcNow));
+            var path=Get<string>(monitor,"ledgerPath");Store.Save(path,book);var before=File.ReadAllBytes(path);
+            using var gate=new Mutex(false,Store.AttemptLock(plan.Id));gate.WaitOne();
+            try
+            {
+                using(var reader=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read))Task.Run(()=>Call(monitor,"Refresh",false)).GetAwaiter().GetResult();
+                for(var tick=0;tick<2;tick++)
+                {
+                    Assert(Get<bool>(monitor,"ledgerBroken"),"fixture did not retain actual persistence failure");
+                    foreach(var op in new[]{"resume","begin"})
+                    {
+                        var refused=false;
+                        try{Call(monitor,"Handle",new Request(op,Guid.NewGuid(),Attempt:op=="resume"?plan.Id:pending.Id,Epoch:creator.Epoch,Digest:creator.Digest));}
+                        catch(IOException e){refused=e.Message.Contains("未写入");}
+                        Assert(refused,op+" ignored the broken-ledger latch");
+                    }
+                    Assert(creator.State=="Creating"&&book.Entries.Single(e=>e.Plan.Id==pending.Id).State=="Pending"&&before.SequenceEqual(File.ReadAllBytes(path)),"rejection changed grant or ledger bytes");
+                    Task.Run(()=>Call(monitor,"Refresh",false)).GetAwaiter().GetResult();
+                }
+            }
+            finally{gate.ReleaseMutex();}
+        });
+        Test("CR-N01 healthy frozen resume does not reconsume soft admission consent",()=>
+        {
+            var plan=Item();var entry=new ControlEntry{Plan=plan,Digest=Store.Digest(plan),State="Creating"};
+            using var monitor=Monitor(new(){Entries=[entry]});entry.Epoch=Get<string>(monitor,"epoch");
+            var tracker=Get<PressureTracker>(monitor,"pressureTracker");
+            for(var i=0;i<3;i++)tracker.Observe(Get<MemorySnapshot>(monitor,"sample") with{CpuPercent=95},ResourcePolicy.GiB);
+            Assert(tracker.Pressure,"pressure fixture did not enter recovery");Set(monitor,"rootCpuReason","new configuration awaits old jobs");
+            var response=(Response)Call(monitor,"Handle",new Request("resume",Guid.NewGuid(),Attempt:plan.Id,Epoch:entry.Epoch,Digest:entry.Digest))!;
+            Assert(response.Ok&&entry.State=="Creating","resume reapplied soft admission policy to an existing grant");
+        });
+        foreach(var evidence in new[]{"claim","run","task","ancestor","unreadable","missing-ancestor","cycle"})
+        Test("CR-N03 generic retry refuses task provenance from "+evidence+" without changing authority",()=>
+        {
+            var taskPath=Store.FilePath("tasks.json");
+            var original=Item();var book=new TaskBook();
+            if(evidence=="missing-ancestor")original=original with{RetryOf=Guid.NewGuid()};
+            if(evidence=="cycle")original=original with{RetryOf=original.Id};
+            if(evidence=="task")original=original with{SourceSlotId=TaskBookOps.Create(book,"queued",cwd,"custom",new AgentProfile(),"",[],"shared",null,0).Id};
+            if(evidence=="run")book.Attempts.Add(new(){TaskId=Guid.NewGuid(),TaskRevision=1,AttemptId=original.Id,BatchId=original.BatchId,State="Failed",WorkspaceKey=original.Workspace.Key,ProgramFingerprint=new string('A',64)});
+            var ledger=new Ledger{BootId=Store.BootId(),Entries=[new(){Plan=original,Digest=Store.Digest(original),State="Revoked"}]};
+            if(evidence is "claim" or "ancestor")ledger.TaskClaims.Add(new(Guid.NewGuid(),original.Id));
+            if(evidence=="ancestor")
+            {
+                original=original with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=original.Id};
+                ledger.Entries.Add(new(){Plan=original,Digest=Store.Digest(original),State="Revoked"});
+            }
+            Store.Save(taskPath,book);if(evidence=="unreadable")File.WriteAllText(taskPath,"{broken");
+            try
+            {
+                using var monitor=Monitor(ledger);var path=Get<string>(monitor,"ledgerPath");Store.Save(path,ledger);
+                var bytes=File.ReadAllBytes(path);var taskBytes=File.ReadAllBytes(taskPath);var before=JsonSerializer.Serialize(ledger,Store.Json);
+                var retry=original with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=original.Id};var refused=false;
+                try{Call(monitor,"Handle",new Request("reserve",Guid.NewGuid(),[retry]));}catch(Exception e)when(e is IOException or InvalidDataException or JsonException){refused=true;}
+                Assert(refused,"task retry escaped queue bookkeeping");
+                Assert(before==JsonSerializer.Serialize(ledger,Store.Json)&&bytes.SequenceEqual(File.ReadAllBytes(path))&&taskBytes.SequenceEqual(File.ReadAllBytes(taskPath)),"rejected retry changed retained authority");
+                Assert(Get<Dictionary<Guid,Job>>(monitor,"jobs").Count==0,"rejected retry created a job");
+            }
+            finally{Store.Save(taskPath,new TaskBook());}
+        });
+        Test("CR-N04 Worker refuses frozen runtime-only Node identity before claiming queue",()=>
+        {
+            var script=Path.Combine(cwd,"legacy-agent.js");File.WriteAllText(script,"legacy identity");
+            var command=new CommandSpec(Environment.ProcessPath!,[script],"node-shim");
+            var book=new TaskBook();var task=TaskBookOps.Create(book,"legacy Node",cwd,"custom",new AgentProfile(),"",[],"shared",null,0);
+            var queued=TaskBookOps.Enqueue(book,task.Id,command,AgentProbe.Fingerprint(command.Executable));
+            var taskPath=Store.FilePath("tasks.json");Store.Save(taskPath,book);var taskBytes=File.ReadAllBytes(taskPath);
+            try
+            {
+                using var monitor=Monitor();var plan=Item() with{SourceSlotId=task.Id,AgentId="custom",Command=command};var sample=Get<MemorySnapshot>(monitor,"sample");
+                var policy=ResourcePolicy.SnapshotFor(queued.Resource,sample.Total,sample.CommitLimit);var refused=false;
+                try{Call(monitor,"Handle",new Request("reserve-task",Guid.NewGuid(),[plan],Policy:policy,PolicyHash:ResourcePolicy.PolicyHash(policy),PlanDigest:ResourcePolicy.PlanDigest([plan]),TaskEntryId:queued.Id));}catch(IOException){refused=true;}
+                Assert(refused,"legacy runtime-only identity still authorized Node task");
+                Assert(Get<Ledger>(monitor,"ledger").TaskClaims.Count==0&&Get<Ledger>(monitor,"ledger").Entries.Count==0&&taskBytes.SequenceEqual(File.ReadAllBytes(taskPath)),"identity rejection consumed queue authority");
+            }
+            finally{Store.Save(taskPath,new TaskBook());}
+        });
+        foreach(var phase in new[]{"begin","resume"})
+        Test("CR-N04 Node upgrade after reservation refuses "+phase+" without changing grants",()=>
+        {
+            var script=Path.Combine(cwd,"upgrade-"+phase+".js");File.WriteAllText(script,"before");
+            var command=new CommandSpec(Environment.ProcessPath!,[script],"node-shim");var book=new TaskBook();
+            var task=TaskBookOps.Create(book,"Node activation",cwd,"custom",new AgentProfile(),"",[],"shared",null,0);
+            var queued=TaskBookOps.Enqueue(book,task.Id,command,AgentProbe.Fingerprint(command));
+            var plan=Item() with{Command=command,SourceSlotId=task.Id};
+            var entry=new ControlEntry{Plan=plan,Digest=Store.Digest(plan),State=phase=="begin"?"Pending":"Creating"};
+            var ledger=new Ledger{BootId=Store.BootId(),Entries=[entry],TaskClaims=[new(queued.Id,plan.Id)]};
+            if(phase=="resume")TaskBookOps.StartRun(book,queued,plan.Id,plan.BatchId,plan.Workspace.Key);
+            var taskPath=Store.FilePath("tasks.json");Store.Save(taskPath,book);var taskBytes=File.ReadAllBytes(taskPath);
+            try
+            {
+                using var monitor=Monitor(ledger);entry.Epoch=Get<string>(monitor,"epoch");
+                var path=Get<string>(monitor,"ledgerPath");Store.Save(path,ledger);var bytes=File.ReadAllBytes(path);var before=JsonSerializer.Serialize(ledger,Store.Json);
+                File.WriteAllText(script,"after");var refused=false;
+                try{Call(monitor,"Handle",new Request(phase,Guid.NewGuid(),Attempt:plan.Id,Epoch:entry.Epoch,Digest:entry.Digest));}catch(IOException e){refused=e.Message.Contains("程序");}
+                Assert(refused,"activation accepted an upgrade after reservation");
+                Assert(before==JsonSerializer.Serialize(ledger,Store.Json)&&bytes.SequenceEqual(File.ReadAllBytes(path))&&taskBytes.SequenceEqual(File.ReadAllBytes(taskPath)),"activation rejection altered authority");
+                Assert(Get<Dictionary<Guid,Job>>(monitor,"jobs").Count==0,"identity rejection created a job");
+            }
+            finally{Store.Save(taskPath,new TaskBook());}
+        });
+        Test("UX06 Worker rejects deferred reservation and frozen begin before creating authority",()=>
+        {
+            var taskPath=Store.FilePath("tasks.json");
+            foreach(var phase in new[]{"reserve-task","begin"})
+            {
+                var book=new TaskBook();var task=TaskBookOps.Create(book,"deferred",cwd,"custom",new AgentProfile(),"",[],"shared",null,0);
+                var plan=Item() with{SourceSlotId=task.Id,AgentId="custom"};
+                var queued=TaskBookOps.Enqueue(book,task.Id,plan.Command,AgentProbe.Fingerprint(plan.Command));
+                TaskBookOps.SetDeferred(book,queued.Id,true);Store.Save(taskPath,book);var taskBytes=File.ReadAllBytes(taskPath);
+                var entry=new ControlEntry{Plan=plan,Digest=Store.Digest(plan),State="Pending"};
+                var ledger=phase=="begin"?new Ledger{BootId=Store.BootId(),Entries=[entry],TaskClaims=[new(queued.Id,plan.Id)]}:new Ledger{BootId=Store.BootId()};
+                using var monitor=Monitor(ledger);entry.Epoch=Get<string>(monitor,"epoch");
+                var sample=Get<MemorySnapshot>(monitor,"sample");var policy=ResourcePolicy.SnapshotFor(queued.Resource,sample.Total,sample.CommitLimit);
+                var before=JsonSerializer.Serialize(ledger,Store.Json);var refused=false;
+                try{Call(monitor,"Handle",phase=="begin"?new Request("begin",Guid.NewGuid(),Attempt:plan.Id,Epoch:entry.Epoch,Digest:entry.Digest)
+                    :new Request("reserve-task",Guid.NewGuid(),[plan],Policy:policy,PolicyHash:ResourcePolicy.PolicyHash(policy),PlanDigest:ResourcePolicy.PlanDigest([plan]),TaskEntryId:queued.Id));}
+                catch(IOException e){refused=e.Message.Contains("暂缓");}
+                Assert(refused&&before==JsonSerializer.Serialize(ledger,Store.Json)&&taskBytes.SequenceEqual(File.ReadAllBytes(taskPath)),phase+" ignored deferral or consumed authority");
+                Assert(Get<Dictionary<Guid,Job>>(monitor,"jobs").Count==0,"deferred entry created a job");
+            }
+            Store.Save(taskPath,new TaskBook());
+        });
         Store.Save(Store.FilePath("repair-results.json"),results);Console.WriteLine($"Repair checks: {results.Count-failures} passed, {failures} failed; {Store.Root}");return failures==0?0:1;
     }
 }

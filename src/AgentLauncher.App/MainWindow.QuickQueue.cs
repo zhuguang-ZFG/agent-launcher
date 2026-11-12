@@ -22,6 +22,7 @@ public partial class MainWindow
     {
         QueueQuickButton.IsEnabled = CanQueueQuickLaunch();
         QueueQuickButton.Content = quickQueueImporting ? "正在加入队列…" : "按资源依次启动";
+        QueueQuickButton.ToolTip = QueueQuickButton.IsEnabled ? "将勾选项保存为任务；默认只执行本批次，按并发 1 等待资源。" : taskBook is null ? "任务文件无法读取，请打开「恢复与诊断」。" : LaunchHint.Text;
     }
 
     private async void QueueQuickClick(object sender, RoutedEventArgs e)
@@ -39,6 +40,8 @@ public partial class MainWindow
         SetBusy(true);
         ErrorText.Text = "";
         var startQueue = false;
+        var includeExisting = false;
+        IReadOnlyList<Guid> imported = [];
         try
         {
             await saveTask;
@@ -51,15 +54,21 @@ public partial class MainWindow
                 var slot = snapshot.Slots.Single(candidate => candidate.Id == item.SlotId);
                 return $"{snapshot.Slots.IndexOf(slot) + 1:00} · {slot.DisplayName} · {item.Project}";
             }));
-            var confirmation = new FormWindow(this, "按资源依次启动", [],
-                $"将勾选的 {items.Count} 项保存为独立任务，并启动任务队列。\n\n{names}\n\n"
-                + $"整个任务队列并发上限设为 1；已有的 {pending} 个等待项也会按原优先级继续。已运行任务不会被终止。\n\n"
-                + "每项的程序、独立参数、目录和资源配置固定为当前快照。资源不足时等待，不提前创建 Agent 或工作目录。\n\n"
-                + "这些队列任务改用独立内存额度，单项上限、规划与系统保护不变；原快启配置和活动池不变。"
-                + "同仓库的独立目录项仍各自创建 worktree，届时若原仓库有未提交修改将等待人工处理，不自动确认。\n\n"
-                + "确认后可暂停队列或移除等待项；关闭窗口会暂停后续派发，重新打开不会自动恢复。应用即授权上述队列执行。");
+            var confirmation = new FormWindow(this, "按资源依次启动", [("scope", "本次执行范围", "batch", false)],
+                $"本次勾选 {items.Count} 项：\n{names}\n\n"
+                + $"默认仅执行这 {items.Count} 项，本批次并发为 1；已有 {pending} 个等待项不会由本窗口派发，原并发设置保留。\n\n"
+                + "选择「整个队列」才会同时执行已有等待项，并把全局并发改成 1。\n"
+                + "资源不足会等待。关闭窗口会暂停后续派发，重开后需点「继续执行」。\n"
+                + "任务说明需复制到对应终端；程序、参数、目录与资源按当前设置保存。同仓库独立目录仍会创建 worktree。",
+                choices: new() { ["scope"] = [("batch", $"仅本批次 · {items.Count} 项（推荐）"), ("all", $"整个队列 · 新增 {items.Count} 项 + 已有 {pending} 项；全局并发改为 1")] },
+                applyLabel: "确认范围并启动");
             if (confirmation.ShowDialog() != true || closeRequested) return;
-            if (!await UpdateTasksAsync(book => TaskBookOps.EnqueueQuickLaunch(book, snapshot, items, destination), "快速启动入队失败")) return;
+            includeExisting = confirmation.Values["scope"] == "all";
+            if (!await UpdateTasksAsync(book =>
+            {
+                imported = TaskBookOps.EnqueueQuickLaunch(book, snapshot, items, destination, resetConcurrency: includeExisting);
+                book.LastDispatchTaskIds = includeExisting ? null : imported.ToList();
+            }, "快速启动入队失败")) return;
             TaskExpander.IsExpanded = true;
             startQueue = !closeRequested;
         }
@@ -69,10 +78,11 @@ public partial class MainWindow
             SetBusy(false);
         }
         if (!startQueue) return;
+        queueScopeTaskIds = includeExisting ? null : imported.ToHashSet();
         queueEnabled = true;
         taskTimer.Start();
         RenderTasks();
-        QueueStatusText.Text = "已按并发 1 加入队列；资源不足时保留等待，不预先占用 Agent 进程。";
+        QueueStatusText.Text = includeExisting ? "已启动整个队列，全局并发为 1。" : $"仅执行本批次 {imported.Count} 项，并发 1；其他等待项与原并发设置保留。";
         await PumpQueueAsync();
     }
 
@@ -80,7 +90,7 @@ public partial class MainWindow
     {
         snapshot.Validate();
         var items = new List<QuickLaunchItem>();
-        var fingerprints = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var fingerprints = new Dictionary<(string Runtime, string Adapter, string Entry), string>();
         foreach (var slot in snapshot.Slots.Where(slot => slot.Enabled))
         {
             if (slot.RequiresDirectory && string.IsNullOrWhiteSpace(slot.Directory))
@@ -90,8 +100,10 @@ public partial class MainWindow
             var project = PhysicalDirectory.Resolve(path).Path;
             var workspace = PhysicalDirectory.Workspace(project);
             var command = Commands.Resolve(slot.AgentId, slot.Current);
-            if (!fingerprints.TryGetValue(command.Executable, out var fingerprint))
-                fingerprints[command.Executable] = fingerprint = AgentProbe.Fingerprint(command.Executable);
+            var identity = (command.Executable.ToUpperInvariant(), command.Adapter,
+                command.Adapter == "node-shim" ? command.Arguments[0].ToUpperInvariant() : "");
+            if (!fingerprints.TryGetValue(identity, out var fingerprint))
+                fingerprints[identity] = fingerprint = AgentProbe.Fingerprint(command);
             items.Add(new(slot.Id, project, workspace, command, fingerprint));
         }
         var destination = string.IsNullOrWhiteSpace(worktreeRoot) ? "" : PhysicalDirectory.Resolve(worktreeRoot).Path;

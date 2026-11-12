@@ -17,7 +17,7 @@ public sealed class FormWindow : Window
         if(!argumentEditors.TryGetValue(key,out var editor))throw new ArgumentException("没有该参数编辑器："+key,nameof(key));
         editor.Replace(arguments);ArgumentValues[key]=[..arguments];
     }
-    public FormWindow(Window owner,string title,(string Key,string Label,string Value,bool Multiline)[] fields,string note,Dictionary<string,(string Value,string Label)[]>? choices=null,string[]? bools=null,Dictionary<string,string[]>? suggestions=null,Dictionary<string,string[]>? argumentLists=null,Dictionary<string,Action<Window>>? actions=null)
+    public FormWindow(Window owner,string title,(string Key,string Label,string Value,bool Multiline)[] fields,string note,Dictionary<string,(string Value,string Label)[]>? choices=null,string[]? bools=null,Dictionary<string,string[]>? suggestions=null,Dictionary<string,string[]>? argumentLists=null,Dictionary<string,Action<Window>>? actions=null,string applyLabel="应用")
     {
         Owner=owner;Title=title;Width=Math.Min(660,SystemParameters.WorkArea.Width-32);Height=Math.Min(620,SystemParameters.WorkArea.Height-32);WindowStartupLocation=WindowStartupLocation.CenterOwner;
         // Implicit styles do not apply to derived Window classes; opt in explicitly or the dialog renders unthemed (white in dark mode).
@@ -25,7 +25,7 @@ public sealed class FormWindow : Window
         var root=new DockPanel{Margin=new(24)};
         // Actions are docked outside the scrolling form so Enter/Esc keep the same reachable buttons at large text scales.
         var footer=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new(0,16,0,0)};DockPanel.SetDock(footer,Dock.Bottom);
-        var cancel=new Button{Content="取消",IsCancel=true,Margin=new(0,0,8,0),MinWidth=88};var apply=new Button{Content="应用",IsDefault=true,MinWidth=88};footer.Children.Add(cancel);footer.Children.Add(apply);root.Children.Add(footer);
+        var cancel=new Button{Content="取消",IsCancel=true,Margin=new(0,0,8,0),MinWidth=88};var apply=new Button{Content=applyLabel,IsDefault=true,MinWidth=88};footer.Children.Add(cancel);footer.Children.Add(apply);root.Children.Add(footer);
         var panel=new StackPanel();
         if(!string.IsNullOrEmpty(note))panel.Children.Add(new TextBlock{Text=note,TextWrapping=TextWrapping.Wrap,Margin=new(0,0,0,16),Foreground=(Brush)FindResource("Muted")});
         if(actions!=null){var actionRow=new WrapPanel{Margin=new(0,0,0,12)};foreach(var action in actions){var button=new Button{Content=action.Key,Margin=new(0,0,8,4)};button.Click+=(_,_)=>action.Value(this);actionRow.Children.Add(button);}panel.Children.Add(actionRow);}

@@ -46,7 +46,7 @@ public partial class MainWindow
             var before = File.ReadAllText(taskStore.FilePath);
             var preparations = Directory.Exists(Store.FilePath("preparations")) ? Directory.GetFiles(Store.FilePath("preparations")).Order().ToArray() : [];
 
-            async Task AnswerAsync(bool apply, bool duplicateClick = false)
+            async Task AnswerAsync(bool apply, bool duplicateClick = false, bool wholeQueue = false)
             {
                 QueueQuickButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 if (duplicateClick) QueueQuickButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
@@ -57,7 +57,8 @@ public partial class MainWindow
                     if (dialog is null) await Task.Delay(25);
                 }
                 if (dialog is null) throw new IOException("Quick queue confirmation did not open: " + ErrorText.Text);
-                ReviewFind<Button>(dialog).Single(button => button.Content as string == (apply ? "应用" : "取消")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                if (wholeQueue) ReviewFind<ComboBox>(dialog).Single().SelectedIndex = 1;
+                ReviewFind<Button>(dialog).Single(button => apply ? button.IsDefault : button.IsCancel).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 if (!apply && dialog.IsVisible) dialog.Close();
                 await quickQueueTask;
                 await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
@@ -78,7 +79,7 @@ public partial class MainWindow
             var accepted = File.ReadAllText(taskStore.FilePath);
             await AnswerAsync(true);
             check("QQ repeated confirmed import rejects an already waiting snapshot without mutation", File.ReadAllText(taskStore.FilePath) == accepted);
-            QueueToggleClick(this, new RoutedEventArgs());
+            await ToggleQueueAsync();
             await queuePumpTask;
             var first = queued.Queue[0].TaskId;
             await UpdateTasksAsync(book => TaskBookOps.Dequeue(book, first), "测试移出失败");
@@ -91,6 +92,19 @@ public partial class MainWindow
             taskTimer.Start();
             await PumpQueueAsync();
             check("QQ an empty queue stops polling without recreating an idle monitor", !queueEnabled && !taskTimer.IsEnabled && !Ipc.MonitorRunning());
+            await UpdateTasksAsync(book => book.MaxRunning = 3, "批次并发夹具保存失败");
+            await AnswerAsync(true);
+            var scoped = taskStore.Load();
+            check("UX05 default confirmation persists this batch without changing global concurrency", scoped.MaxRunning == 3
+                && scoped.LastDispatchTaskIds is { Count: 2 } scope && scoped.Queue.All(entry => scope.Contains(entry.TaskId))
+                && queueScopeTaskIds?.SetEquals(scope) == true);
+            await ToggleQueueAsync();
+            await UpdateTasksAsync(book => { foreach (var taskId in book.Queue.Select(entry => entry.TaskId).ToArray()) TaskBookOps.Dequeue(book, taskId); }, "批次夹具清理失败");
+            await AnswerAsync(true, wholeQueue: true);
+            var whole = taskStore.Load();
+            check("UX05 whole queue requires an explicit choice and resets global concurrency", whole.MaxRunning == 1 && whole.LastDispatchTaskIds is null && queueScopeTaskIds is null && whole.Queue.Count == 2);
+            await ToggleQueueAsync();
+            await UpdateTasksAsync(book => { foreach (var taskId in book.Queue.Select(entry => entry.TaskId).ToArray()) TaskBookOps.Dequeue(book, taskId); }, "整个队列夹具清理失败");
             await RunQueueClaimRecoveryChecksAsync(check);
         }
         finally
@@ -137,7 +151,7 @@ public partial class MainWindow
             var first = TaskBookOps.Create(book, "领取恢复甲", project, "custom", new AgentProfile { Executable = node, Arguments = arguments }, "", [], "isolated", null, 5);
             var second = TaskBookOps.Create(book, "领取恢复乙", project, "custom", new AgentProfile { Executable = node, Arguments = arguments }, "", [], "isolated", null, 1);
             var command = Commands.Resolve("custom", first.Profile);
-            var fingerprint = AgentProbe.Fingerprint(command.Executable);
+            var fingerprint = AgentProbe.Fingerprint(command);
             var firstEntry = TaskBookOps.Enqueue(book, first.Id, command, fingerprint);
             var secondEntry = TaskBookOps.Enqueue(book, second.Id, command, fingerprint);
             Store.Save(taskStore.FilePath, book);
@@ -177,13 +191,13 @@ public partial class MainWindow
                 && paused.Queue.Any(entry => entry.Id == secondEntry.Id && entry.Detail.Length == 0)
                 && pausedLedger.TaskClaims.Count == ledger.TaskClaims.Count);
             check("QQ-C11 the pause shows the original attempt and the explicit dequeue and re-enqueue recovery",
-                QueueStatusText.Text.Contains(claimed.Id.ToString("N")[..8]) && QueueStatusText.Text.Contains("移出队列") && QueueStatusText.Text.Contains("加入队列"));
+                QueueStatusText.Text.Contains(claimed.Id.ToString("N")[..8]) && QueueStatusText.Text.Contains("原因与恢复") && QueueStatusText.Text.Contains("重新入队"));
 
             queueEnabled = true;
             taskTimer.Start();
             await RevokeQueueReservationAsync(claimed.Id, false, false);
             check("QQ-C12 a revoke without a recorded run pauses with the same recovery instead of a silent enabled queue",
-                !queueEnabled && !taskTimer.IsEnabled && QueueStatusText.Text.Contains("移出队列") && QueueStatusText.Text.Contains("加入队列"));
+                !queueEnabled && !taskTimer.IsEnabled && QueueStatusText.Text.Contains("原因与恢复") && QueueStatusText.Text.Contains("重新入队"));
 
             await UpdateTasksAsync(editor => TaskBookOps.Dequeue(editor, first.Id), "恢复移出失败");
             var enqueue = ReviewFind<Button>(TaskList).FirstOrDefault(button => button.Content as string == "加入队列");

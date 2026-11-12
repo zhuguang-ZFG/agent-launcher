@@ -16,7 +16,9 @@ public static class AgentProbe
     public static async Task<AgentCapability> ProbeCapabilityAsync(string agentId, AgentProfile profile, string cwd, TimeSpan timeout, CancellationToken ct = default)
     {
         var spec = Commands.Resolve(agentId, new AgentProfile { Executable = profile.Executable, Arguments = [] });
+        var fingerprint = Fingerprint(spec);
         var result = await RunAsync(spec with { Arguments = [.. spec.Arguments, "--version"] }, cwd, timeout, ct: ct);
+        if (fingerprint != Fingerprint(spec)) throw new InvalidDataException("版本核对期间程序已变化，请重试核对。");
         var version = result is { ExitCode: 0 } ? AgentVersion.Parse(result.Output + "\n" + result.Error) : null;
         var note = result.TimedOut ? "版本探测超时；预设不可用，仍可手动填写参数。"
             : result.Truncated ? "版本输出超出上限（可能不是带 --version 的 CLI）；预设不可用。"
@@ -28,11 +30,46 @@ public static class AgentProbe
         {
             AgentId = agentId,
             ProgramPath = spec.Executable,
-            Fingerprint = Fingerprint(spec.Executable),
+            Fingerprint = fingerprint,
             Version = version,
             ProbedAt = DateTimeOffset.UtcNow,
             Note = note
         };
+    }
+
+    /// <summary>Node packages share a runtime; bind their entry and nearest package manifest as well. User arguments are not program identity.</summary>
+    public static string Fingerprint(CommandSpec command)
+    {
+        if (command.Adapter == "exe") return Fingerprint(command.Executable);
+        if (command.Adapter != "node-shim" || command.Arguments.Length == 0 || !Path.IsPathFullyQualified(command.Arguments[0]))
+            throw new InvalidDataException("程序适配器或 Node 入口身份无法核对，请重新选择程序。");
+        var script = Path.GetFullPath(command.Arguments[0]);
+        var entryHash = BoundedContentHash(script, 64L * 1024 * 1024);
+        string? manifest = null, manifestHash = null;
+        var directory = new DirectoryInfo(Path.GetDirectoryName(script)!);
+        for (var depth = 0; directory is not null && depth < 8; depth++, directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, "package.json");
+            try { manifestHash = BoundedContentHash(candidate, 1024 * 1024); }
+            catch (FileNotFoundException) { continue; }
+            catch (DirectoryNotFoundException) { continue; }
+            manifest = candidate.ToUpperInvariant();
+            break;
+        }
+        var identity = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Adapter = "node-shim-v2", Runtime = Path.GetFullPath(command.Executable).ToUpperInvariant(),
+            RuntimeHash = Fingerprint(command.Executable), Entry = script.ToUpperInvariant(), EntryHash = entryHash,
+            Manifest = manifest, ManifestHash = manifestHash
+        });
+        return Convert.ToHexString(SHA256.HashData(identity));
+    }
+
+    private static string BoundedContentHash(string path, long maxBytes)
+    {
+        using var stream = File.OpenRead(path);
+        if (stream.Length > maxBytes) throw new InvalidDataException("程序身份文件超出核对上限，请人工核对后重新选择程序。");
+        return Convert.ToHexString(SHA256.HashData(stream));
     }
 
     /// <summary>Content hash for runs; oversized binaries fall back to size and timestamp so the probe stays bounded.</summary>

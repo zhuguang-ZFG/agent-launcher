@@ -92,7 +92,20 @@ public partial class MainWindow : Window
             var percent=(process.TotalProcessorTime-cpu).TotalSeconds/(DateTime.UtcNow-started).TotalSeconds/Environment.ProcessorCount*100;
             Store.Save(reportPath,new{Samples=samples,CpuPercent=percent,LogicalProcessors=Environment.ProcessorCount});Close();return;
         }
-        if(arguments is ["--ui-check",var folder]&&!uiChecksStarted){uiChecksStarted=true;await RunUiChecksAsync(folder);return;}
+        if(arguments is ["--usability-check",var usabilityFolder]&&!uiChecksStarted)
+        {
+            uiChecksStarted=true;
+            try{await RunTaskUsabilityOnlyAsync(usabilityFolder);}
+            catch(Exception e)when(e is not OutOfMemoryException){Store.Save(Path.Combine(usabilityFolder,"ui-exception.json"),new{Error=e.ToString()});Application.Current.Shutdown(1);}
+            return;
+        }
+        if(arguments is ["--ui-check",var folder]&&!uiChecksStarted)
+        {
+            uiChecksStarted=true;
+            try{await RunUiChecksAsync(folder);}
+            catch(Exception e)when(e is not OutOfMemoryException){Store.Save(Path.Combine(folder,"ui-exception.json"),new{Error=e.ToString()});Application.Current.Shutdown(1);}
+            return;
+        }
         if(arguments is ["--screenshot",var path])
         {
             await Task.Delay(500);UpdateLayout();var dpi=VisualTreeHelper.GetDpi(this);var bitmap=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);bitmap.Render(this);
@@ -389,6 +402,9 @@ public partial class MainWindow : Window
     private void RenderSessions()
     {
         var entries=status?.Entries??[];var signature=string.Join("|",entries.Select(e=>$"{e.Plan.Id}:{e.State}:{e.Detail}:{(e.State=="Pending"&&DateTimeOffset.UtcNow-e.Created>TimeSpan.FromSeconds(10))}"));
+        var retryable=taskBook is null?[]:entries.Where(e=>e.State is "FailedBeforeStart" or "Revoked")
+            .Where(e=>AttemptIdentity.CanRetryOutsideQueue(e.Plan,entries.Select(entry=>entry.Plan),taskBook)).Select(e=>e.Plan.Id).ToHashSet();
+        signature+="|retry:"+string.Join(",",retryable);
         if(signature==sessionSignature&&Sessions.Children.Count>0)return;sessionSignature=signature;Sessions.Children.Clear();
         var agents=entries.Where(e=>e.Plan.Kind=="agent").OrderByDescending(e=>e.Created).ToArray();
         var history=agents.Where(Store.IsTerminal).Take(12).ToHashSet();
@@ -401,7 +417,14 @@ public partial class MainWindow : Window
             row.Children.Add(new TextBlock{Text=$"{e.Plan.Position} {e.Plan.Name} · {detail}",FontWeight=FontWeights.SemiBold});
             var path=new TextBox{Text=e.Plan.Cwd,IsReadOnly=true,FontSize=12,MinHeight=28};row.Children.Add(path);
             if(e.State=="Pending"){var revoke=new Button{Content="撤销未启动项",HorizontalAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(revoke,$"撤销未启动项 {e.Plan.Name}");revoke.Click+=async(_,_)=>await GuardAsync(async()=>{var result=await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:e.Plan.Id));ProgressText.Text=result.Message;await RefreshAsync();});row.Children.Add(revoke);}
-            if(e.State is "FailedBeforeStart" or "Revoked"&&!entries.Any(next=>next.Plan.RetryOf==e.Plan.Id)){var retry=new Button{Content="仅重试此项",HorizontalAlignment=HorizontalAlignment.Left};retry.Click+=async(_,_)=>await GuardAsync(()=>RetrySessionAsync(e.Plan.Id));row.Children.Add(retry);}
+            if(e.State is "FailedBeforeStart" or "Revoked"&&!entries.Any(next=>next.Plan.RetryOf==e.Plan.Id))
+            {
+                if(retryable.Contains(e.Plan.Id))
+                {
+                    var retry=new Button{Content="仅重试此项",HorizontalAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(retry,$"仅重试此项 {e.Plan.Name}");retry.Click+=async(_,_)=>await GuardAsync(()=>RetrySessionAsync(e.Plan.Id));row.Children.Add(retry);
+                }
+                else row.Children.Add(new TextBlock{Text="请从任务卡重新入队；来源无法核对时先检查任务记录。",TextWrapping=TextWrapping.Wrap});
+            }
             Sessions.Children.Add(row);
         }
         var clipped=agents.Count(Store.IsTerminal)-history.Count;if(clipped>0)Sessions.Children.Add(new TextBlock{Text=$"仅显示最近 12 条历史记录；另有 {clipped} 条较旧记录未展示。活动项始终显示。",Foreground=(Brush)FindResource("Muted")});
@@ -513,6 +536,9 @@ public partial class MainWindow : Window
             var current=await Ipc.SendAsync(new("status",Guid.NewGuid()));if(!current.Ok)throw new IOException(current.Message);
             var previous=current.Entries?.SingleOrDefault(e=>e.Plan.Id==id)??throw new IOException("记录已变化，请重新核对。");
             if(previous.State is not ("FailedBeforeStart" or "Revoked"))throw new IOException("不能证明此项未运行，已阻止重复提交。");
+            var retryBook=await Task.Run(taskStore.Load);
+            if(!AttemptIdentity.CanRetryOutsideQueue(previous.Plan,current.Entries!.Select(entry=>entry.Plan),retryBook))
+                throw new IOException("该记录来自任务队列或来源尚待核对，请从任务卡重新入队，保留并发限制与尝试记录。");
             var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));
             var retry=previous.Plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=previous.Plan.Id};
             var waiverId=await AuthorizePlansAsync([retry]);
@@ -718,7 +744,16 @@ public partial class MainWindow : Window
     {
         if(closing)return;e.Cancel=true;
         if(closeRequested)return;
-        if(busy&&MessageBox.Show(this,"当前正在处理启动。关闭只停止后续准备，不结束已运行任务。关闭窗口？","关闭配置窗口",MessageBoxButton.YesNo)!=MessageBoxResult.Yes)return;
+        var closeNote=TaskUsability.CloseQueueNotice(queueEnabled?taskBook?.Queue.Count??0:0,busy);
+        if(closeNote.Length>0)
+        {
+#if INTEGRATION_TESTS
+            var answer=TestConfirm?.Invoke(closeNote,"关闭并暂停队列",MessageBoxButton.YesNo)??MessageBox.Show(this,closeNote,"关闭并暂停队列",MessageBoxButton.YesNo,MessageBoxImage.Question);
+#else
+            var answer=MessageBox.Show(this,closeNote,"关闭并暂停队列",MessageBoxButton.YesNo,MessageBoxImage.Question);
+#endif
+            if(answer!=MessageBoxResult.Yes)return;
+        }
         closeRequested=true;var restartTimer=timer.IsEnabled;timer.Stop();IsEnabled=false;UpdateLaunch();
         try
         {
@@ -733,7 +768,7 @@ public partial class MainWindow : Window
         }
         finally
         {
-            if(!closing){closeRequested=false;IsEnabled=true;if(restartTimer)timer.Start();UpdateLaunch();}
+            if(!closing){closeRequested=false;IsEnabled=true;if(restartTimer)timer.Start();RenderTasks();UpdateLaunch();}
         }
     }
 }

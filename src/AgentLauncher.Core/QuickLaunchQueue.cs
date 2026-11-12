@@ -38,7 +38,7 @@ internal static class QuickLaunchQueue
 {
     private readonly record struct SlotImport(Slot Slot, int Position, QuickLaunchItem Item, bool Isolate);
 
-    public static IReadOnlyList<Guid> Enqueue(TaskBook book, Draft draft, IReadOnlyList<QuickLaunchItem> items, string worktreeRoot)
+    public static IReadOnlyList<Guid> Enqueue(TaskBook book, Draft draft, IReadOnlyList<QuickLaunchItem> items, string worktreeRoot, bool resetConcurrency)
     {
         if (items is null) throw new InvalidDataException("快捷启动项缺失。");
         if (worktreeRoot is null || worktreeRoot.Contains('\0')) throw new InvalidDataException("快捷启动工作目录根无效。");
@@ -66,7 +66,7 @@ internal static class QuickLaunchQueue
             draft.DirectoryMode == "isolated" && active.Count(other => string.Equals(bySlot[other.Id].Workspace.Key, bySlot[slot.Id].Workspace.Key, StringComparison.Ordinal)) > 1)).ToArray();
         var key = ComputeKey(draft, imports, root);
         if (HasActiveKey(book, key)) throw new InvalidDataException("相同的快捷启动仍在队列中或正在运行，未重复加入。");
-        if (book.Tasks.Count + imports.Length > TaskSchema.MaxTasks) throw new InvalidDataException("任务数量已达上限。");
+        TaskBookOps.EnsureTaskCapacity(book, imports.Length);
         if (book.Queue.Count + imports.Length > TaskSchema.MaxQueueEntries) throw new InvalidDataException("队列已满。");
 
         // New quick tasks are billed independently: a shared draft pool only describes the pre-freeze configuration.
@@ -108,7 +108,7 @@ internal static class QuickLaunchQueue
             ids.Add(task.Id);
         }
         book.NextSequence = sequence;
-        book.MaxRunning = 1;
+        if (resetConcurrency) book.MaxRunning = 1;
         return ids;
     }
 

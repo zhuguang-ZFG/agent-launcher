@@ -22,6 +22,8 @@ public partial class MainWindow
     private bool queuePumping;
     private bool queuePausedByRecovery;
     private bool renderingTasks;
+    private bool queueEditing;
+    private HashSet<Guid>? queueScopeTaskIds;
     private Task queuePumpTask = Task.CompletedTask;
     private CancellationTokenSource? queueCancellation;
 
@@ -30,6 +32,7 @@ public partial class MainWindow
         try
         {
             taskBook = await Task.Run(taskStore.Load);
+            if (!queueEnabled) queueScopeTaskIds = taskBook.LastDispatchTaskIds?.ToHashSet();
             taskLoadError = "";
         }
         catch (Exception e) when (e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException)
@@ -55,7 +58,7 @@ public partial class MainWindow
         catch (Exception e) when (e is IOException or InvalidDataException or JsonException)
         {
             ErrorText.Text = failure + "：" + e.Message;
-            try { taskBook = await Task.Run(taskStore.Load); } catch (Exception reload) when (reload is IOException or JsonException or InvalidDataException) { taskLoadError = reload.Message; }
+            try { taskBook = await Task.Run(taskStore.Load); taskLoadError = ""; } catch (Exception reload) when (reload is IOException or JsonException or InvalidDataException) { taskBook = null; taskLoadError = reload.Message; }
             RenderTasks();
             return false;
         }
@@ -64,12 +67,14 @@ public partial class MainWindow
     private void RenderTasks()
     {
         renderingTasks = true;
-        try { RenderTaskCards(); } finally { renderingTasks = false; UpdateQuickQueueButton(); }
+        try { RenderTaskCards(); } finally { renderingTasks = false; UpdateQuickQueueButton(); RenderSessions(); }
     }
 
     private void RenderTaskCards()
     {
         TaskList.Children.Clear();
+        QueueList.Children.Clear();
+        QueueResumeBanner.Visibility = Visibility.Collapsed;
         if (taskBook is null)
         {
             TaskHeading.Text = "任务队列";
@@ -82,16 +87,31 @@ public partial class MainWindow
             return;
         }
         var book = taskBook;
-        TaskHeading.Text = $"任务队列 · {book.Tasks.Count} 张 · 待执行 {book.Queue.Count}";
+        TaskHeading.Text = $"任务队列 · {book.Tasks.Count(task => !task.Archived)} 张 · 待执行 {book.Queue.Count} · 归档 {book.Tasks.Count(task => task.Archived)}";
         TaskEmptyText.Text = "还没有任务。新建任务后加入队列，启动器会按优先级依次交给 Terminal。";
         TaskEmptyText.Visibility = book.Tasks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        var hold = book.Queue.OrderByDescending(entry => entry.Priority).ThenBy(entry => entry.Sequence).FirstOrDefault(entry => entry.Detail.Length > 0);
+        var hold = TaskUsability.OrderedQueue(book).FirstOrDefault(entry => InQueueScope(entry.TaskId) && !entry.Deferred && entry.Detail.Length > 0);
         QueueStatusText.Text = queueEnabled ? hold is null ? $"队列运行中 · 每 {TaskPollSeconds} 秒检查一次" : $"队列等待：{hold.Detail}" : "队列已暂停";
         QueueToggleButton.Content = queueEnabled ? "暂停队列" : "执行队列";
-        QueueToggleButton.IsEnabled = !closeRequested && !quickQueueImporting;
+        QueueToggleButton.IsEnabled = !closeRequested && !quickQueueImporting && !queueEditing;
         TaskConcurrency.SelectedIndex = Math.Clamp(book.MaxRunning - 1, 0, 3);
         TaskConcurrency.IsEnabled = !closeRequested && !quickQueueImporting;
-        foreach (var task in book.Tasks.OrderByDescending(task => task.Priority).ThenBy(task => task.UpdatedAt))
+        RenderQueueEntries(book);
+        if (!queueEnabled && book.Queue.Count > 0)
+        {
+            QueueResumeBanner.Visibility = Visibility.Visible;
+            var selected = book.Queue.Count(entry => InQueueScope(entry.TaskId));
+            QueueResumeText.Text = queueScopeTaskIds is null ? $"有 {book.Queue.Count} 项等待，队列当前暂停。点「继续执行」执行全部；已暂缓项需单独恢复。"
+                : $"上次批次还有 {selected} 项等待，其他 {book.Queue.Count - selected} 项保持暂停。点「继续执行」仅继续上次批次；也可明确执行整个队列。";
+            QueueResumeButton.IsEnabled = selected > 0;
+            TaskExpander.IsExpanded = true;
+        }
+        if (queueEnabled && queueScopeTaskIds is not null) QueueStatusText.Text = "仅执行本批次 · 并发 1；其他等待项保持原状。" + (hold is null ? "" : " " + hold.Detail);
+        var search = TaskSearch.Text.Trim();
+        var visible = book.Tasks.Where(task => (TaskFilter.SelectedIndex == 2 || task.Archived == (TaskFilter.SelectedIndex == 1))
+            && (search.Length == 0 || task.Name.Contains(search, StringComparison.OrdinalIgnoreCase) || task.Project.Contains(search, StringComparison.OrdinalIgnoreCase) || Agents.Get(task.AgentId).Name.Contains(search, StringComparison.OrdinalIgnoreCase))).ToArray();
+        if (visible.Length == 0 && book.Tasks.Count > 0) { TaskEmptyText.Text = "当前范围没有匹配任务，可更换范围或清空搜索。"; TaskEmptyText.Visibility = Visibility.Visible; }
+        foreach (var task in visible.OrderByDescending(task => task.Priority).ThenBy(task => task.UpdatedAt))
             TaskList.Children.Add(TaskCardView(book, task));
     }
 
@@ -99,7 +119,7 @@ public partial class MainWindow
     {
         var last = TaskBookOps.LastRun(book, task.Id);
         var queued = book.Queue.FirstOrDefault(entry => entry.TaskId == task.Id);
-        var state = queued is not null ? "排队中" : last is null ? "未开始" : last.State switch
+        var state = task.Archived ? "已归档" : queued is not null ? queued.Deferred ? "已暂缓" : "排队中" : last is null ? "未开始" : last.State switch
         {
             "Running" => "运行中",
             "Review" => "等待验收",
@@ -119,10 +139,11 @@ public partial class MainWindow
         var header = new DockPanel { LastChildFill = false };
         var title = new TextBlock { Text = $"{task.Name} · {Agents.Get(task.AgentId).Name} · {state}", FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
         DockPanel.SetDock(title, Dock.Left); header.Children.Add(title);
-        var priority = new TextBlock { Text = $"优先级 {task.Priority} · 修订 {task.Revision}", Foreground = (System.Windows.Media.Brush)FindResource("Muted"), Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+        var priority = new TextBlock { Text = $"优先级 {task.Priority}", ToolTip = $"配置修订 {task.Revision}", Foreground = (System.Windows.Media.Brush)FindResource("Muted"), Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
         DockPanel.SetDock(priority, Dock.Right); header.Children.Add(priority);
         stack.Children.Add(header);
-        stack.Children.Add(new TextBlock { Text = task.Project, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = (System.Windows.Media.Brush)FindResource("Muted"), Margin = new Thickness(0, 4, 0, 0) });
+        stack.Children.Add(new TextBlock { Text = task.Project, ToolTip = task.Project, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = (System.Windows.Media.Brush)FindResource("Muted"), Margin = new Thickness(0, 4, 0, 0) });
+        if (task.Archived) { AddTaskUtilityActions(stack, task); card.Child = stack; return card; }
         if (queued is not null)
             stack.Children.Add(new TextBlock { Text = queued.Detail.Length > 0 ? $"队列：{queued.Detail}" : "队列：等待执行", FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0), Foreground = (System.Windows.Media.Brush)FindResource("Muted") });
         if (last is not null)
@@ -178,6 +199,7 @@ public partial class MainWindow
             actions.Children.Add(review);
         }
         stack.Children.Add(actions);
+        AddTaskUtilityActions(stack, task);
         card.Child = stack;
         return card;
     }
@@ -209,24 +231,37 @@ public partial class MainWindow
             QueueStatusText.Text = $"并发上限已设为 {value}。";
         else RenderTasks();
     });
-    private async void QueueToggleClick(object sender, RoutedEventArgs e) => await GuardAsync(async () =>
+    private async void QueueToggleClick(object sender, RoutedEventArgs e) => await GuardAsync(ToggleQueueAsync);
+
+    private async Task ToggleQueueAsync()
     {
-        if (closeRequested || quickQueueImporting) return;
-        queueEnabled = !queueEnabled;
+        if (closeRequested || quickQueueImporting || queueEditing || readOnly || taskBook is null) return;
+        if (!queueEnabled)
+        {
+            queueEditing = true;
+            try
+            {
+                if (!await UpdateTasksAsync(book => book.LastDispatchTaskIds = null, "执行范围保存失败")) return;
+                queueScopeTaskIds = null;
+                queueEnabled = true;
+            }
+            finally { queueEditing = false; }
+        }
+        else queueEnabled = false;
         if (queueEnabled) taskTimer.Start(); else { taskTimer.Stop(); queueCancellation?.Cancel(); }
         RenderTasks();
         if (queueEnabled) await PumpQueueAsync();
-    });
+    }
 
     private async Task NewTaskAsync()
     {
         if (taskBook is null) { ErrorText.Text = taskLoadError; return; }
-        if (taskBook.Tasks.Count >= TaskSchema.MaxTasks) { ErrorText.Text = "任务数量已达上限，请先完成或删除旧任务。"; return; }
+        if (taskBook.Tasks.Count(task => !task.Archived) >= TaskSchema.MaxTasks) { ErrorText.Text = "活动任务已达 200 张，请用任务卡片的「归档」释放名额；历史会保留。"; return; }
         var dialog = new FormWindow(this, "新建任务",
             [("name", "任务名称", "", false), ("project", "项目目录", config.Draft.Project, false), ("agent", "Agent", "omp", false),
              ("priority", "优先级 0–100", "0", false), ("mode", "目录策略", "isolated", false),
-             ("description", "任务说明", "", true), ("acceptance", "验收项（每行一项）", "", true)],
-            "任务把项目、Agent、参数与验收项固定到独立修订。加入队列后按优先级执行；完成需要人工验收，不自动判定。",
+             ("description", "任务说明（保存后需复制到 Agent）", "", true), ("acceptance", "验收项（每行一项）", "", true)],
+            "启动会打开 Agent，不会自动发送任务说明。保存后点「复制任务说明」交给对应终端；完成需要人工验收。",
             choices: new()
             {
                 ["agent"] = [.. AgentChoices().Select(choice => (choice.Id, choice.Label))],
@@ -256,7 +291,7 @@ public partial class MainWindow
         var dialog = new FormWindow(this, "任务 · " + task.Name,
             [("name", "任务名称", task.Name, false), ("project", "项目目录", task.Project, false), ("agent", "Agent", task.AgentId, false),
              ("priority", "优先级 0–100", task.Priority.ToString(CultureInfo.InvariantCulture), false), ("mode", "目录策略", task.DirectoryMode, false),
-             ("description", "任务说明", task.Description, true), ("acceptance", "验收项（每行一项）", string.Join(Environment.NewLine, task.Acceptance.Select(item => item.Text)), true),
+             ("description", "任务说明（需复制到 Agent）", task.Description, true), ("acceptance", "验收项（每行一项）", string.Join(Environment.NewLine, task.Acceptance.Select(item => item.Text)), true),
              ("args", "Agent 参数", "", false)],
             "修改项目、Agent、目录策略、优先级或参数会移除该任务的排队项；验收勾选不会。切换 Agent 会重置为该 Agent 的默认参数。",
             choices: new()
@@ -307,7 +342,7 @@ public partial class MainWindow
             (command, fingerprint) = await Task.Run(() =>
             {
                 var spec = Commands.Resolve(task.AgentId, task.Profile);
-                return (spec, AgentProbe.Fingerprint(spec.Executable));
+                return (spec, AgentProbe.Fingerprint(spec));
             });
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or FileNotFoundException)
@@ -322,7 +357,7 @@ public partial class MainWindow
 
     private Task PumpQueueAsync()
     {
-        if (!queueEnabled || closeRequested || taskBook is null || taskLoadError.Length > 0 || queuePumping || readOnly) return Task.CompletedTask;
+        if (!queueEnabled || closeRequested || taskBook is null || taskLoadError.Length > 0 || queuePumping || queueEditing || readOnly) return Task.CompletedTask;
         if (busy || launchFinalizing || launchCancellation is not null || !cancelTask.IsCompleted || submittedAttempts.Length > 0) return Task.CompletedTask;
         if (PauseEmptyQueue()) return Task.CompletedTask;
         queuePumping = true;
@@ -334,11 +369,11 @@ public partial class MainWindow
 
     private bool PauseEmptyQueue()
     {
-        if (taskBook is null || taskBook.Queue.Count != 0 || taskBook.Attempts.Any(run => !run.Terminal)) return false;
+        if (taskBook is null || taskBook.Queue.Any(entry => InQueueScope(entry.TaskId)) || taskBook.Attempts.Any(run => !run.Terminal && InQueueScope(run.TaskId))) return false;
         queueEnabled = false;
         taskTimer.Stop();
         RenderTasks();
-        QueueStatusText.Text = "队列已空，已停止轮询；新增任务后需明确执行。";
+        QueueStatusText.Text = queueScopeTaskIds is null ? "队列已空，已停止轮询；新增任务后需明确执行。" : "本批次已结束，其他等待项保持暂停；点「执行队列」可执行全部。";
         return true;
     }
 
@@ -368,6 +403,7 @@ public partial class MainWindow
             queueCancellation = null;
             cancellation.Dispose();
             UpdateQuickQueueButton();
+            if (taskBook is not null) RenderQueueEntries(taskBook);
         }
     }
 
@@ -421,7 +457,8 @@ public partial class MainWindow
             QueueStatusText.Text = "队列为空。";
             return;
         }
-        var candidates = book.Queue.Select(entry => new QueueCandidate(entry.Id, entry.TaskId, entry.TaskRevision, entry.Priority, entry.Sequence, entry.EnqueuedAt, [.. entry.DependsOn])).ToArray();
+        if (queueScopeTaskIds is not null && book.Attempts.Any(run => !run.Terminal && InQueueScope(run.TaskId))) { QueueStatusText.Text = "本批次已有一项执行中，等待结束后再启动下一项。"; return; }
+        var candidates = book.Queue.Where(entry => InQueueScope(entry.TaskId)).Select(entry => new QueueCandidate(entry.Id, entry.TaskId, entry.TaskRevision, entry.Priority, entry.Sequence, entry.EnqueuedAt, [.. entry.DependsOn], entry.Deferred)).ToArray();
         var decision = QueuePolicy.Decide(candidates, book.Attempts.Count(run => !run.Terminal), book.MaxRunning,
             id => book.Attempts.Any(run => run.TaskId == id && run.State == "Completed"));
         if (decision.Next is null)
@@ -453,7 +490,7 @@ public partial class MainWindow
         CommandSpec resolved;
         try { resolved = await Task.Run(() => Commands.Resolve(task.AgentId, profile)); }
         catch (Exception e) when (e is IOException or FileNotFoundException or UnauthorizedAccessException) { await HoldEntryAsync(entry, "命令无法解析：" + e.Message); return; }
-        var fingerprint = await Task.Run(() => AgentProbe.Fingerprint(resolved.Executable));
+        var fingerprint = await Task.Run(() => AgentProbe.Fingerprint(resolved));
         var workspace = PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(entry.Project)).Path);
         if (entry.QuickLaunch is { } source && !string.Equals(source.WorkspaceKey, workspace.Key, StringComparison.Ordinal))
         {
@@ -473,7 +510,7 @@ public partial class MainWindow
             {
                 profile.Arguments = [.. profile.Arguments, .. preset.Fill(entry.SessionRef).Arguments];
                 resolved = await Task.Run(() => Commands.Resolve(task.AgentId, profile));
-                fingerprint = await Task.Run(() => AgentProbe.Fingerprint(resolved.Executable));
+                fingerprint = await Task.Run(() => AgentProbe.Fingerprint(resolved));
             }
             catch (Exception e) when (e is not OutOfMemoryException) { await HoldEntryAsync(entry, "无法准备续接命令：" + e.Message); return; }
         }
@@ -505,6 +542,18 @@ public partial class MainWindow
         var admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, requested);
         if (admission.Kind == AdmissionKind.Deny) { await HoldEntryAsync(entry, "资源不足：" + admission.Reason); return; }
         if (admission.Kind == AdmissionKind.RequireWaiver) { await HoldEntryAsync(entry, "需要一次性资源确认；队列不会自动确认，请暂停并人工核对。"); return; }
+
+        string terminal;
+        try
+        {
+            var terminalPath = config.TerminalPath;
+            terminal = await Task.Run(() => Commands.Terminal(terminalPath), cancellationToken);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            await HoldEntryAsync(entry, "尚未找到可用的 Windows Terminal，请在「设置」选择已安装的 WindowsTerminal.exe / wt.exe。排队项已保留：" + e.Message);
+            return;
+        }
 
         var draft = new Draft
         {
@@ -586,8 +635,6 @@ public partial class MainWindow
             if (!recorded) return;
             cancellationToken.ThrowIfCancellationRequested();
             QueueStatusText.Text = $"正在提交任务：{task.Name}";
-            var terminalPath = config.TerminalPath;
-            var terminal = await Task.Run(() => Commands.Terminal(terminalPath));
             cancellationToken.ThrowIfCancellationRequested();
             await Task.Run(() => Commands.SubmitTerminal(terminal, [plan], "vertical"));
             submitted = true;
@@ -624,8 +671,8 @@ public partial class MainWindow
                 queuePausedByRecovery = true;
                 RenderTasks();
                 var attempt = attemptId.ToString("N")[..8];
-                ErrorText.Text = $"队列已暂停：尝试 {attempt} 的预约已撤销（{revoked.Detail}），但排队项的持久领取记录已保留，未写入启动记录。请先确认它从未启动，然后在任务卡片点「移出队列」，再点「加入队列」明确重新排队；不会自动重放。";
-                QueueStatusText.Text = $"队列已暂停：尝试 {attempt} 未写入启动记录；确认后点「移出队列」，再点「加入队列」。";
+                ErrorText.Text = $"队列已暂停：尝试 {attempt} 的预约已撤销（{revoked.Detail}），但排队项的持久领取记录已保留，未写入启动记录。请点「原因与恢复」核对身份，再明确重新入队；不会自动重放。";
+                QueueStatusText.Text = $"队列已暂停：尝试 {attempt} 未写入启动记录；请打开「原因与恢复」核对并重新入队。";
                 return;
             }
             QueueStatusText.Text = "预约已领取或撤销结果未确认，队列已暂停；请核对运行记录，不会自动重放。";
@@ -634,9 +681,11 @@ public partial class MainWindow
         {
             QueueStatusText.Text = "撤销结果未确认，队列已暂停；请核对运行记录：" + e.Message;
         }
+        var recoveryReason = QueueStatusText.Text;
         queueEnabled = false;
         taskTimer.Stop();
         RenderTasks();
+        QueueStatusText.Text = recoveryReason;
     }
 
     private sealed record QueueClaimObservation(TaskReservationClaim? Claim, ControlEntry? Original, string Failure);
@@ -671,8 +720,8 @@ public partial class MainWindow
         var name = task?.Name ?? "未知任务";
         if (observation.Failure.Length > 0 || observation.Claim is null)
         {
-            ErrorText.Text = $"队列已暂停：无法核对任务「{name}」的持久领取记录，未准备命令或工作目录，也不会自动重放。请先核对 {Store.FilePath("control.json")}（必要时核对 .bak 备份）后再执行队列：{observation.Failure}";
-            QueueStatusText.Text = "队列已暂停：无法核对队列领取记录，未准备或启动；请核对 control.json 与备份。";
+            ErrorText.Text = $"任务「{name}」的旧启动记录暂不能核对，队列已暂停。请点该项「原因与恢复」查看证据和可用操作。{observation.Failure}";
+            QueueStatusText.Text = "队列已暂停；请打开「原因与恢复」核对旧启动记录。";
             return;
         }
         var claim = observation.Claim!;
@@ -682,12 +731,12 @@ public partial class MainWindow
         var evidence = observation.Original?.Detail is { Length: > 0 } detail ? $"最近记录：{detail}。" : "";
         if (run is null && observation.Original is null)
         {
-            ErrorText.Text = $"队列已暂停：任务「{name}」的排队项已有持久领取记录（尝试 {attempt}），但原尝试的状态与回执历史已裁剪或未知。不能仅凭「移出队列」再「加入队列」视为安全；请先找到该尝试的回执或运行记录，确认它从未启动或已经结束，再明确移出并重新入队。不会删除领取记录，也不会自动重放。";
-            QueueStatusText.Text = $"队列已暂停：尝试 {attempt} 的状态与历史已裁剪或未知；先核对原尝试回执与运行记录，确认后再移出并重新入队。";
+            ErrorText.Text = $"任务「{name}」的原尝试 {attempt} 状态未知，队列已暂停。请打开「原因与恢复」查阅保留的身份归档和回执；证明原尝试结束后才能重新入队。";
+            QueueStatusText.Text = $"队列已暂停：尝试 {attempt} 结果未知，请打开「原因与恢复」。";
             return;
         }
-        ErrorText.Text = $"队列已暂停：任务「{name}」的排队项已有持久领取记录（尝试 {attempt}，状态 {state}），但没有对应的启动记录。{evidence}请先确认该尝试从未启动或已经结束，然后在任务卡片点「移出队列」，再点「加入队列」明确重新排队。不会删除领取记录，也不会自动重放。";
-        QueueStatusText.Text = $"队列已暂停：尝试 {attempt}（{state}）已领取该排队项但没有启动记录；确认原尝试后点「移出队列」，再点「加入队列」。";
+        ErrorText.Text = $"任务「{name}」有一次旧启动记录（{attempt}，{state}），尚未对应到任务历史，队列已暂停。{evidence}请点「原因与恢复」核对，符合条件时可直接重新入队。";
+        QueueStatusText.Text = $"队列已暂停：尝试 {attempt}（{state}），请打开「原因与恢复」核对并重新入队。";
     }
 
     private Task HoldEntryAsync(QueueEntry entry, string detail)
@@ -718,7 +767,7 @@ public partial class MainWindow
             (_, fingerprint, workspace) = await Task.Run(() =>
             {
                 var spec = Commands.Resolve(task.AgentId, profile);
-                return (spec, AgentProbe.Fingerprint(spec.Executable), PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(task.Project)).Path));
+                return (spec, AgentProbe.Fingerprint(spec), PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(task.Project)).Path));
             });
         }
         catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法核对任务命令：" + e.Message; return; }
@@ -730,7 +779,8 @@ public partial class MainWindow
         var preset = ResumePreset(capability, task.AgentId);
         if (preset is null) { ErrorText.Text = $"当前 {Agents.Get(task.AgentId).Name} 版本（{capability.Version ?? "未知"}）没有已验证的续接参数。"; return; }
         var ask = new FormWindow(this, "登记会话", [("session", preset.ValueLabel ?? "会话标识", run.SessionRef ?? "", false)],
-            $"会话登记到第 {run.AttemptId.ToString("N")[..8]} 次尝试；工作目录、程序指纹与已验证版本 {capability.Version} 会在续接派发时再次核对。取消不改变任何任务。");
+            TaskUsability.SessionGuide(task.AgentId) + $"\n\n对应尝试：{run.AttemptId.ToString("N")[..8]}；已验证版本 {capability.Version}。登记前请确认原会话已经结束。",
+            applyLabel: "核对并登记");
         if (ask.ShowDialog() != true) return;
         var session = ask.Values["session"].Trim();
         if (SessionProblem(session) is { Length: > 0 } problem) { ErrorText.Text = problem; return; }
@@ -750,7 +800,7 @@ public partial class MainWindow
         if (profile.Arguments.Any(IsResumeArgument)) { ErrorText.Text = "任务参数已包含续接/继续参数，请先在任务编辑中移除后再续接。"; return; }
         string fingerprint;
         WorkspaceIdentity workspace;
-        try { (_, fingerprint, workspace) = await Task.Run(() => { var spec = Commands.Resolve(task.AgentId, profile); return (spec, AgentProbe.Fingerprint(spec.Executable), PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(task.Project)).Path)); }); }
+        try { (_, fingerprint, workspace) = await Task.Run(() => { var spec = Commands.Resolve(task.AgentId, profile); return (spec, AgentProbe.Fingerprint(spec), PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(task.Project)).Path)); }); }
         catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法准备续接命令：" + e.Message; return; }
         var (allowed, reason) = QueuePolicy.CanResume(previous, workspace.Key, fingerprint, taskBook.Attempts);
         if (!allowed) { ErrorText.Text = reason; return; }
@@ -759,23 +809,27 @@ public partial class MainWindow
         catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法核对 Agent 版本，不能续接：" + e.Message; return; }
         var preset = ResumePreset(capability, task.AgentId);
         if (preset is null) { ErrorText.Text = $"当前 {Agents.Get(task.AgentId).Name} 版本（{capability.Version ?? "未知"}）没有已验证的续接参数。"; return; }
-        var ask = new FormWindow(this, "续接会话", [("session", preset.ValueLabel ?? "会话标识", registered, false)],
-            $"只续接同一次尝试的工作目录与程序指纹；已验证版本 {capability.Version}。修改标识会先把该尝试重新登记，再与入队在同一事务保存；取消不改变任何任务。");
+        var ask = new FormWindow(this, "续接会话", [("session", preset.ValueLabel ?? "会话标识", registered, false), ("scope", "执行范围", "batch", false)],
+            TaskUsability.SessionGuide(task.AgentId) + $"\n\n续接会核对原工作目录和程序；已验证版本 {capability.Version}。默认只执行这次续接，其他等待项暂停。修改会话标识后，将与本次入队一起保存。",
+            choices: new() { ["scope"] = [("batch", "只续接此任务"), ("all", "续接并执行整个队列")] }, applyLabel: "续接并入队");
         if (ask.ShowDialog() != true) return;
         var session = ask.Values["session"].Trim();
+        var resumeWholeQueue = ask.Values["scope"] == "all";
         if (SessionProblem(session) is { Length: > 0 } problem) { ErrorText.Text = problem; return; }
         try { profile.Arguments = [.. profile.Arguments, .. preset.Fill(session).Arguments]; }
         catch (InvalidDataException e) { ErrorText.Text = e.Message; return; }
         CommandSpec resumeCommand;
         try { resumeCommand = await Task.Run(() => Commands.Resolve(task.AgentId, profile)); }
         catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法准备续接命令：" + e.Message; return; }
-        var resumeFingerprint = await Task.Run(() => AgentProbe.Fingerprint(resumeCommand.Executable));
+        var resumeFingerprint = await Task.Run(() => AgentProbe.Fingerprint(resumeCommand));
         if (!string.Equals(resumeFingerprint, fingerprint, StringComparison.Ordinal)) { ErrorText.Text = "准备续接命令期间 Agent 程序已变化，请稍后重试。"; return; }
         if (!await UpdateTasksAsync(book =>
         {
             TaskBookOps.RegisterSession(book, previous.AttemptId, session, workspace.Key, resumeFingerprint);
             TaskBookOps.Enqueue(book, id, resumeCommand, resumeFingerprint, previous.AttemptId, session);
+            book.LastDispatchTaskIds = resumeWholeQueue ? null : [id];
         }, "续接入队失败")) return;
+        queueScopeTaskIds = taskBook!.LastDispatchTaskIds?.ToHashSet();
         if (!queueEnabled) { queueEnabled = true; taskTimer.Start(); RenderTasks(); }
         QueueStatusText.Text = "续接已入队；执行队列会重新核对登记会话、工作目录与程序指纹。";
         await PumpQueueAsync();

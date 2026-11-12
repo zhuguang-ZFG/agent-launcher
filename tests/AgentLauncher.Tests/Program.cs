@@ -259,6 +259,8 @@ ResourcePolicyChecks.RunAuthorityFixes(Test);
 ConfigurationReviewChecks.Run(Test,temp);
 AgentLauncher.Tests.PaneLayoutChecks.Run(Test);
 AgentLauncher.Tests.TaskChecks.Run(Test,temp);
+AgentLauncher.Tests.TaskUsabilityChecks.Run(Test,temp);
+AgentLauncher.Tests.AgentIdentityChecks.Run(Test,temp);
 AgentLauncher.Tests.ReviewPolicyChecks.Run(Test,temp);
 ReviewChecks.Run(Test,temp);
 AgentLauncher.Tests.PoolPrototypeChecks.Run(Test,temp);

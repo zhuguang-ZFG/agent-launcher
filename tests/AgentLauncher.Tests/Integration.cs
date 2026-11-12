@@ -374,18 +374,20 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             foreach(var mode in new[]{"shared","isolated"}){draft.DirectoryMode=mode;if(mode=="isolated")draft.Slots.ForEach(s=>s.Enabled=s==draft.Slots[0]);var plans=await new WorkspacePreparer(missing).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None);Assert(plans.All(p=>p.Cwd==PhysicalDirectory.Resolve(cwd).Path),"unused destination changed direct launch");}
         });
         await Test("F05 custom title semicolons remain literal Terminal data",async()=>{
+            var terminal=Commands.Terminal("");
             await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
             var output=Path.Combine(Store.Root,"literal-title.json");var item=Item("review;literal-title-tail\\;中文",["--echo",output,"title-is-data"]) with{Shared=true};
             var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserved.Ok,reserved.Message);
-            Commands.SubmitTerminal(Commands.Terminal(""),[item],"vertical");
+            Commands.SubmitTerminal(terminal,[item],"vertical");
             for(var i=0;i<100&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase!="Finished";i++)await Task.Delay(100);
             Assert(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0}&&File.Exists(output),"literal title changed Terminal command parsing");await Ipc.SendAsync(new("status",Guid.NewGuid()));
         });
         await Test("Terminal two panes exact child cwd and arguments",async()=>{
+            var terminal=Commands.Terminal("");
             await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
             var batch=Guid.NewGuid();var items=Enumerable.Range(1,2).Select(n=>Item("Terminal fixture "+n,["--echo",Path.Combine(Store.Root,$"terminal-{n}.json"),"中文 & ; spaces"]) with{BatchId=batch,Position=n,Shared=true}).ToArray();
             var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
-            Commands.SubmitTerminal(Commands.Terminal(""),items,"vertical");
+            Commands.SubmitTerminal(terminal,items,"vertical");
             for(var i=0;i<100;i++){if(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"))break;await Task.Delay(100);}
             Assert(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"),"Terminal panes did not complete");
             Assert(File.Exists(Path.Combine(Store.Root,"terminal-1.json"))&&File.Exists(Path.Combine(Store.Root,"terminal-2.json")),"terminal command did not execute");await Ipc.SendAsync(new("status",Guid.NewGuid()));

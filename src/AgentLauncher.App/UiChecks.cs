@@ -15,11 +15,20 @@ public partial class MainWindow
 {
     private async Task RunUiChecksAsync(string folder)
     {
-        System.IO.Directory.CreateDirectory(folder);var checks=new List<string>();
+        System.IO.Directory.CreateDirectory(folder);var checks=new List<string>();var progressAt=DateTime.UtcNow;
         // The harness owns an isolated, possibly non-existent test root. The app's preview-first startup no longer writes
         // monitor state there, so create it before the first configuration write (a missing root surfaces as a silent UI-only error).
         System.IO.Directory.CreateDirectory(Store.Root);
-        void Check(string name,bool value){if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}checks.Add(name);}
+        void Check(string name,bool value)
+        {
+            if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}
+            checks.Add(name);
+            if(DateTime.UtcNow-progressAt>=TimeSpan.FromMilliseconds(500)||name=="UI checks do not launch agents")
+            {
+                progressAt=DateTime.UtcNow;
+                System.IO.File.WriteAllText(System.IO.Path.Combine(folder,"ui-progress.json"),System.Text.Json.JsonSerializer.Serialize(new{LastPassed=name,Count=checks.Count,At=DateTimeOffset.UtcNow}));
+            }
+        }
         IEnumerable<T> Find<T>(DependencyObject root) where T:DependencyObject
         {
             for(var i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);if(child is T target)yield return target;foreach(var nested in Find<T>(child))yield return nested;}
@@ -123,9 +132,18 @@ public partial class MainWindow
         config.Theme="dark";ApplyTheme();Render();var darkInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var darkPage=((SolidColorBrush)Background).Color;
         Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1F3B66")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#313438")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
         Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#C5C5C5"));
-        var agentCombo=Find<ComboBox>(SlotList).First();agentCombo.IsDropDownOpen=true;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
-        var selectedItem=(ComboBoxItem)agentCombo.ItemContainerGenerator.ContainerFromIndex(agentCombo.SelectedIndex);
-        var selectionBrush=Find<Border>(selectedItem).Select(b=>b.Background).OfType<SolidColorBrush>().FirstOrDefault();
+        var agentCombo=Find<ComboBox>(SlotList).First();ComboBoxItem? selectedItem=null;
+        for(var i=0;i<20;i++)
+        {
+            // Discovery may replace the row during a render turn. Inspect the attached combo after its real popup generated containers.
+            agentCombo=Find<ComboBox>(SlotList).First();agentCombo.IsDropDownOpen=true;
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(25);
+            if(!Find<ComboBox>(SlotList).Contains(agentCombo))continue;
+            selectedItem=agentCombo.ItemContainerGenerator.ContainerFromIndex(agentCombo.SelectedIndex) as ComboBoxItem;
+            if(selectedItem is not null)break;
+        }
+        Check("dropdown selection container is generated on the current row",selectedItem is not null);
+        var selectionBrush=Find<Border>(selectedItem!).Select(b=>b.Background).OfType<SolidColorBrush>().FirstOrDefault();
         Check("dropdown selection readable in dark",SystemParameters.HighContrast||(selectionBrush!=null&&selectionBrush.Color==(Color)ColorConverter.ConvertFromString("#1F3B66")));
         agentCombo.IsDropDownOpen=false;
         config.Theme="light";ApplyTheme();Render();var lightInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var lightPage=((SolidColorBrush)Background).Color;
@@ -220,6 +238,7 @@ public partial class MainWindow
             Templates.SelectedItem=Templates.Items.OfType<ComboBoxItem>().Single(item=>item.Content as string==name);
             Check($"F12 named template {name} restores its own snapshot",config.Draft.DirectoryMode=="prepared"&&config.Draft.Slots[3].Enabled&&!config.Draft.Slots[0].Enabled);
         }
+        await RunTaskUsabilityChecksAsync(Check);
         await RunTaskChecksAsync(Check);
         await RunQuickQueueChecksAsync(Check);
         ReviewUiChecks.Run(Check);

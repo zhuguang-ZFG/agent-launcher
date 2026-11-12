@@ -8,6 +8,25 @@ internal static class TaskChecks
 {
     public static void Run(Action<string, Action> test, string temp)
     {
+        test("CR-N02 missing task primary preserves backup and refuses both load and update", () =>
+        {
+            var path = Path.Combine(temp, "lost-tasks.json");
+            var store = new TaskStore(path);
+            var created = store.Update(0, book => TaskBookOps.Create(book, "保留任务", temp, "custom", new AgentProfile(), "", [], "shared", null, 0));
+            store.Update(created.Revision, _ => { });
+            var backup = File.ReadAllBytes(path + ".bak");
+            File.Delete(path);
+            var loaded = false;
+            try { store.Load(); loaded = true; } catch (InvalidDataException e) { Assert(e.Message.Contains("备份"), "missing recovery guidance"); }
+            var changed = false;
+            var updated = false;
+            try { store.Update(0, _ => changed = true); updated = true; } catch (InvalidDataException) { }
+            Assert(!loaded && !updated && !changed, "lost primary was treated as an empty task book");
+            Assert(!File.Exists(path) && backup.SequenceEqual(File.ReadAllBytes(path + ".bak")), "recovery changed retained task evidence");
+            File.WriteAllBytes(path, backup);
+            Assert(store.Load().Tasks.Single().Name == "保留任务", "explicit primary restoration did not recover tasks");
+        });
+
         test("ACC-B01 queue orders by priority then FIFO and gates dependencies and concurrency", () =>
         {
             var dependency = Guid.NewGuid();
@@ -395,8 +414,8 @@ internal static class TaskChecks
             Assert(loaded.SchemaVersion == TaskSchema.Current && loaded.Tasks.Count == 1 && loaded.Tasks[0].Profile.Arguments.SequenceEqual(new[] { "--old", "a b" }) && loaded.Tasks[0].QuickLaunch is null, "schema1 book did not load with its old content");
             Assert(File.ReadAllText(path) == legacy, "loading a schema1 book rewrote the file");
             var updated = store.Update(3, book => book.MaxRunning = 2);
-            Assert(updated.SchemaVersion == TaskSchema.Current && store.Load().MaxRunning == 2 && File.ReadAllText(path).Contains("\"SchemaVersion\":2", StringComparison.Ordinal), "update path did not persist the migrated schema");
-            var future = legacy.Replace("\"SchemaVersion\":1", "\"SchemaVersion\":3", StringComparison.Ordinal);
+            Assert(updated.SchemaVersion == TaskSchema.Current && store.Load().MaxRunning == 2 && File.ReadAllText(path).Contains($"\"SchemaVersion\":{TaskSchema.Current}", StringComparison.Ordinal), "update path did not persist the migrated schema");
+            var future = legacy.Replace("\"SchemaVersion\":1", $"\"SchemaVersion\":{TaskSchema.Current + 1}", StringComparison.Ordinal);
             File.WriteAllText(path, future);
             AssertThrows(() => store.Load(), "a future schema was accepted");
             AssertThrows(() => store.Update(4, book => book.MaxRunning = 1), "a future schema was overwritten");

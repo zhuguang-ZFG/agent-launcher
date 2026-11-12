@@ -10,6 +10,7 @@
     <WrapPanel x:Name="HeaderActions" DockPanel.Dock="Right">
      <Button x:Name="RestoreBackupButton" Content="恢复备份" Click="RestoreBackupClick" Visibility="Collapsed" Margin="0,0,8,0"/>
      <Button Content="工作目录" Style="{StaticResource QuietButton}" Click="WorkspacesClick" Margin="0,0,8,0"/>
+      <Button Content="恢复与诊断" Style="{StaticResource QuietButton}" Click="TaskRecoveryClick" Margin="0,0,8,0"/>
      <Button Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="Settings"/>
     </WrapPanel>
     <StackPanel x:Name="Brand" Orientation="Horizontal" VerticalAlignment="Center">
@@ -63,11 +64,12 @@
       </Border>
       <Expander x:Name="SessionExpander" Margin="0,16,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" ToolTip="展开查看本次与本机运行记录">
        <Expander.Header><TextBlock x:Name="SessionHeading" Text="运行记录" FontWeight="SemiBold" Margin="4,0" MinHeight="36" VerticalAlignment="Center"/></Expander.Header>
-       <StackPanel Margin="0,12,0,0"><StackPanel x:Name="Sessions"/><TextBlock x:Name="ProgressText" Margin="0,8" AutomationProperties.LiveSetting="Polite"/></StackPanel>
+       <StackPanel Margin="0,12,0,0"><Button Content="查看全部历史与导出…" Click="TaskHistoryClick" HorizontalAlignment="Left" Margin="0,0,0,8"/><StackPanel x:Name="Sessions"/><TextBlock x:Name="ProgressText" Margin="0,8" AutomationProperties.LiveSetting="Polite"/></StackPanel>
       </Expander>
       <Expander x:Name="TaskExpander" Margin="0,8,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" AutomationProperties.Name="任务队列" ToolTip="任务卡片、队列与人工验收">
        <Expander.Header><TextBlock x:Name="TaskHeading" Text="任务队列" FontWeight="SemiBold" Margin="4,0" MinHeight="36" VerticalAlignment="Center"/></Expander.Header>
        <StackPanel Margin="0,12,0,0">
+        <Border x:Name="QueueResumeBanner" Background="{DynamicResource WarningSurface}" Padding="10" Margin="0,0,0,8" Visibility="Collapsed"><DockPanel><Button x:Name="QueueResumeButton" DockPanel.Dock="Right" Content="继续执行" Click="QueueContinueClick" Margin="8,0,0,0"/><TextBlock x:Name="QueueResumeText" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/></DockPanel></Border>
         <DockPanel Margin="0,0,0,8">
          <Button DockPanel.Dock="Right" x:Name="NewTaskButton" Content="＋ 新建任务" Style="{StaticResource QuietButton}" Click="NewTaskClick" AutomationProperties.AutomationId="NewTask" Margin="8,0,0,0"/>
          <ComboBox DockPanel.Dock="Right" x:Name="TaskConcurrency" Width="110" Margin="8,0,0,0" VerticalAlignment="Top" SelectionChanged="TaskConcurrencyChanged" AutomationProperties.Name="任务队列并发上限" ToolTip="同时执行的队列任务数；仍受资源与工作目录保护">
@@ -79,6 +81,9 @@
          <Button x:Name="QueueToggleButton" Content="执行队列" Click="QueueToggleClick" AutomationProperties.AutomationId="QueueToggle" Margin="0,0,8,0" VerticalAlignment="Top"/>
          <TextBlock x:Name="QueueStatusText" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"/>
         </DockPanel>
+        <TextBlock Text="实际等待顺序（优先级高的先执行，同优先级按入队顺序）" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+        <StackPanel x:Name="QueueList" Margin="0,0,0,12"/>
+        <DockPanel Margin="0,0,0,8"><ComboBox DockPanel.Dock="Right" x:Name="TaskFilter" SelectedIndex="0" Width="110" Margin="8,0,0,0" SelectionChanged="TaskFilterChanged" AutomationProperties.Name="任务范围"><ComboBoxItem Content="活动任务"/><ComboBoxItem Content="已归档"/><ComboBoxItem Content="全部任务"/></ComboBox><TextBox x:Name="TaskSearch" TextChanged="TaskSearchChanged" AutomationProperties.Name="搜索任务名称或项目" ToolTip="按任务名称、Agent 或项目路径搜索"/></DockPanel>
         <TextBlock x:Name="TaskEmptyText" Style="{StaticResource Caption}" TextWrapping="Wrap" Visibility="Collapsed"/>
         <StackPanel x:Name="TaskList"/>
        </StackPanel>
@@ -155,7 +160,7 @@
    <StackPanel>
     <Border x:Name="ErrorBanner" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12,8" Margin="0,0,0,12">
      <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Visible"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ErrorText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>
-     <ScrollViewer MaxHeight="72" VerticalScrollBarVisibility="Auto"><TextBlock x:Name="ErrorText" Foreground="{DynamicResource WarningInk}" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
+      <ScrollViewer MaxHeight="96" VerticalScrollBarVisibility="Auto"><TextBox x:Name="ErrorText" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource WarningInk}" AutomationProperties.Name="错误详情，可选择复制" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
     </Border>
     <Grid x:Name="FooterGrid"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <StackPanel x:Name="FooterMessage" VerticalAlignment="Center" Margin="0,0,16,0"><TextBlock x:Name="LaunchHint" Text="先选择项目文件夹"/><DockPanel Margin="0,4,0,0"><Button x:Name="RetrySaveButton" DockPanel.Dock="Left" Content="重试保存" Style="{StaticResource QuietButton}" Padding="8,2" Margin="0,0,8,0" Visibility="Collapsed" Click="RetrySaveClick" AutomationProperties.Name="重试保存"/><TextBlock x:Name="SaveStatus" Text="配置自动保存" Style="{StaticResource Caption}" VerticalAlignment="Center"/></DockPanel></StackPanel>

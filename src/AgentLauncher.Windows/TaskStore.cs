@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using AgentLauncher.Core;
 
 namespace AgentLauncher.Windows;
@@ -10,12 +11,68 @@ public sealed class TaskStore
     private readonly string path;
     public TaskStore(string path) => this.path = System.IO.Path.GetFullPath(path);
     public string FilePath => path;
+    public string BackupFingerprint() => Convert.ToHexString(SHA256.HashData(ReadBoundedBytes(path + ".bak")));
+
+    public TaskBook ReadBackup()
+    {
+        var book = Store.Read<TaskBook>(path + ".bak") ?? throw new IOException("没有可读取的任务备份。");
+        if (book.SchemaVersion is 1 or 2) book.SchemaVersion = TaskSchema.Current;
+        book.Validate();
+        return book;
+    }
+
+    /// <summary>Explicit recovery of an unreadable primary. Preserve the original and the verified backup; dispatch remains paused.</summary>
+    public TaskBook RestoreBackup(string expectedFingerprint)
+    {
+        var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant())))[..16];
+        using var mutex = new Mutex(false, @"Local\AgentLauncher-tasks-" + Store.Scope + "-" + key);
+        bool owned;
+        try { owned = mutex.WaitOne(5000); } catch (AbandonedMutexException) { owned = true; }
+        if (!owned) throw new IOException("任务正在被其他窗口修改，请稍后重试。");
+        try
+        {
+            try { Load(); throw new InvalidOperationException("任务主文件可正常读取，无需恢复备份。"); }
+            catch (Exception e) when (e is IOException or JsonException or InvalidDataException) { }
+            var backupBytes = ReadBoundedBytes(path + ".bak");
+            if (!string.Equals(Convert.ToHexString(SHA256.HashData(backupBytes)), expectedFingerprint, StringComparison.Ordinal)) throw new IOException("任务备份已变化，请刷新并重新核对。");
+            var book = JsonSerializer.Deserialize<TaskBook>(backupBytes, Store.Json) ?? throw new InvalidDataException("任务备份为空。");
+            if (book.SchemaVersion is 1 or 2) book.SchemaVersion = TaskSchema.Current;
+            book.Validate();
+            book.Revision = Math.Max(checked(book.Revision + 1), DateTimeOffset.UtcNow.UtcTicks);
+            if (File.Exists(path))
+            {
+                var original = ReadBoundedBytes(path);
+                var saved = path + ".unreadable-" + Guid.NewGuid().ToString("N") + ".json";
+                using var stream = new FileStream(saved, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough);
+                stream.Write(original); stream.Flush(true);
+            }
+            var staged = path + ".restore-" + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                Store.Save(staged, book);
+                if (File.Exists(path)) File.Replace(staged, path, null); else File.Move(staged, path);
+            }
+            finally { if (File.Exists(staged)) File.Delete(staged); }
+            return book;
+        }
+        finally { mutex.ReleaseMutex(); }
+    }
+
+    private static byte[] ReadBoundedBytes(string file)
+    {
+        using var stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        if (stream.Length > 8 * 1024 * 1024) throw new InvalidDataException("记录超出大小边界。");
+        using var bytes = new MemoryStream(); stream.CopyTo(bytes);
+        return bytes.ToArray();
+    }
     public TaskBook Load()
     {
-        var book = Store.Read<TaskBook>(path) ?? new TaskBook();
-        // Version 1 predates quick-launch metadata; an absent field means "not a quick launch", so upgrade in memory only.
-        // The file is rewritten as version 2 exclusively by the normal Update path after the caller's expected revision matches.
-        if (book.SchemaVersion == 1) book.SchemaVersion = TaskSchema.Current;
+        var book = Store.Read<TaskBook>(path);
+        if (book is null && File.Exists(path + ".bak"))
+            throw new InvalidDataException("任务主文件缺失，但仍有 .bak 备份；队列已停用。请先人工核对并恢复主文件，不会自动覆盖备份。");
+        book ??= new TaskBook();
+        // Old books have neither archived cards nor deferred intents. Upgrade only in memory until a successful edit.
+        if (book.SchemaVersion is 1 or 2) book.SchemaVersion = TaskSchema.Current;
         book.Validate();
         return book;
     }

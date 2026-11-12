@@ -521,6 +521,8 @@ internal sealed class Monitor : IDisposable
                 {
                     var source=ledger.Entries.SingleOrDefault(e=>e.Plan.Id==sourceId);
                     if(items.Length!=1||p.Kind!="agent"||source?.State is not ("FailedBeforeStart" or "Revoked"))throw new IOException("只有确认未运行的单项才能重试。");
+                    if(!AttemptIdentity.CanRetryOutsideQueue(source.Plan,ledger.Entries.Select(e=>e.Plan),new TaskStore(Store.FilePath("tasks.json")).Load(),ledger.TaskClaims))
+                        throw new IOException("该记录来自任务队列或来源尚待核对，请从任务卡重新入队，保留并发限制与尝试记录。");
                     if(ledger.Entries.Any(e=>e.Plan.RetryOf==sourceId))throw new IOException("该记录已经重试，请查看新尝试；不会重复提交。");
                     if(Store.Digest(p with{Id=source.Plan.Id,BatchId=source.Plan.BatchId,RetryOf=source.Plan.RetryOf})!=source.Digest)throw new IOException("重试计划与原项不同，请重新配置启动。");
                 }
@@ -576,7 +578,9 @@ internal sealed class Monitor : IDisposable
             if(entry.State=="Pending"){var previousState=entry.State;var previousDetail=entry.Detail;entry.State="Revoked";entry.Detail="已撤销，迟到请求不会执行";try{Save();}catch{entry.State=previousState;entry.Detail=previousDetail;throw;}}
             return new(entry.State=="Revoked",entry.State=="Revoked"?entry.Detail:"已领取或可能运行，需继续核对",[entry],sample,epoch);
         }
-        if(request.Operation is "begin" or "resume"&&AuthorityBlockedReason() is {} authorityReason)throw new IOException(authorityReason);
+        if(request.Operation is "begin" or "resume"
+            &&(AuthorityBlockedReason()??(ledgerBroken?ledgerBrokenDetail:null)??blocked) is {} authorityReason)throw new IOException(authorityReason);
+        if(request.Operation is "begin" or "resume")ValidateTaskProgram(entry);
         if(request.Operation=="begin")
         {
             if(entry.State!="Pending")throw new IOException("授权已撤销或被领取，不能重复启动。");
@@ -812,6 +816,30 @@ internal sealed class Monitor : IDisposable
         return new(true,"请求已记录",[prior],sample,epoch);
     }
 
+    private void ValidateTaskProgram(ControlEntry entry)
+    {
+        var claim=ledger.TaskClaims.SingleOrDefault(candidate=>candidate.AttemptId==entry.Plan.Id);
+        if(claim is null)return;
+        var book=new TaskStore(Store.FilePath("tasks.json")).Load();
+        var run=book.Attempts.SingleOrDefault(candidate=>candidate.AttemptId==entry.Plan.Id);
+        string fingerprint;
+        if(run is not null)
+        {
+            if(run.Terminal||!AttemptIdentity.Matches(run,entry))throw new IOException("任务尝试身份或状态已变化，已保留预约，请核对原记录。");
+            fingerprint=run.ProgramFingerprint;
+        }
+        else
+        {
+            var queued=book.Queue.SingleOrDefault(candidate=>candidate.Id==claim.EntryId);
+            if(queued?.Deferred==true)throw new IOException("排队项已暂缓，不能使用旧预约启动；请核对原记录。");
+            if(queued is null||queued.TaskId!=entry.Plan.SourceSlotId||queued.Command.Executable!=entry.Plan.Command.Executable
+                ||queued.Command.Adapter!=entry.Plan.Command.Adapter||!queued.Command.Arguments.SequenceEqual(entry.Plan.Command.Arguments))
+                throw new IOException("任务程序的冻结记录缺失或已变化，已保留预约，请核对后重新入队。");
+            fingerprint=queued.ProgramFingerprint;
+        }
+        if(AgentProbe.Fingerprint(entry.Plan.Command)!=fingerprint)throw new IOException("任务程序已升级或更换，不能使用旧预约启动；请核对后重新入队。");
+    }
+
     private AuthorityBinding BindTaskAuthority(Request request,LaunchItem[] items)
     {
         if(sample==null||request.TaskEntryId is not {} entryId||items.Length!=1||request.WaiverId!=null)
@@ -819,6 +847,7 @@ internal sealed class Monitor : IDisposable
         if(ledger.TaskClaims.Count>=LedgerMigration.MaxTaskClaims)throw new IOException("队列领取记录已达保留上限，已停止新增预约；不会删除领取证据以重放任务。");
         var book=new TaskStore(Store.FilePath("tasks.json")).Load();
         var queued=book.Queue.SingleOrDefault(entry=>entry.Id==entryId)??throw new IOException("队列项已移除或执行，拒绝重复预约。");
+        if(queued.Deferred)throw new IOException("排队项已暂缓，请先明确恢复排队。");
         var task=book.Tasks.Single(entry=>entry.Id==queued.TaskId);
         // A pre-claim ledger cannot prove which queue entry owns a still-unrecorded task reservation. Never infer a new authorization.
         if(ledger.Entries.Any(entry=>entry.Plan.SourceSlotId==task.Id
@@ -828,7 +857,7 @@ internal sealed class Monitor : IDisposable
         var plan=items[0];
         if(task.Revision!=queued.TaskRevision||plan.SourceSlotId!=task.Id||plan.Kind!="agent"||plan.AgentId!=queued.AgentId||plan.RetryOf!=null
             ||plan.Shared!=(queued.DirectoryMode=="shared")||plan.Command.Executable!=queued.Command.Executable||plan.Command.Adapter!=queued.Command.Adapter
-            ||!plan.Command.Arguments.SequenceEqual(queued.Command.Arguments)||AgentProbe.Fingerprint(plan.Command.Executable)!=queued.ProgramFingerprint)
+            ||!plan.Command.Arguments.SequenceEqual(queued.Command.Arguments)||AgentProbe.Fingerprint(plan.Command)!=queued.ProgramFingerprint)
             throw new IOException("队列预约与冻结的任务或程序不一致。");
         if(book.Attempts.Count(run=>!run.Terminal)>=book.MaxRunning)throw new IOException("队列并发上限已满。");
         var source=PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(queued.Project).Path);

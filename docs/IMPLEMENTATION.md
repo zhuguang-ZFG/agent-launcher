@@ -795,3 +795,70 @@ powershell -NoProfile -File scripts/test.ps1
 - 最终证据为 `gate-final-pass.log`、`focused-final16.json`、`integration-final120.json`、`ui-final.json`、`admission-current16.json`；早期失败及红灯继续保留。新增激活权威红灯单独为 `activation-red.log/.json`。
 - 自审覆盖失主文件/权威配置、容量拒绝与完整回滚、裁剪与 Job/observer/cache 所有权、持久结果身份、重复 runner 的 receipt 所有权与写失败后的持续阻止。未发现这些修复路径有新的 fail-open；未独立运行第二个代码审查代理。
 - **未验证/仍保留**：浏览器阶段明确 SkipBrowser；没有 16 个真实 Agent 压测、OOM 实验、用户本次原始退出复现、生产 Windows Terminal 中 F12 人工交互或 S0.6 长时观察。通知为 best-effort，不能把无通知当作没有内存压力；共享池通知无法确认成员归属时明确保留未确认。历史 15/16 偶发部分启动仍未归因；旧版已裁剪且没有身份归档的结果仍需人工核对。没有改全局 Terminal、CPU 默认或内存封顶，没有切换快捷方式或 push。
+
+## 32. 当前 main 代码审查与隔离复现（2026-11-12，Asia/Shanghai）
+
+本节保留修复前审查结果；CR-N01～N04 的后续实现与验证见第 33 节。
+
+- 审查源码为 `8746cdee47386e8a82def09bffb33ce526d5a3c8`，本轮没有修改产品实现或永久测试。审查探针单独放在 `artifacts/code-review-20261112-153855/probe/`，引用本轮测试构建的程序集；实际进程仅为有 Job 保护、3 秒自退出的 Tests 夹具，不执行真实 Agent，不读写生产配置。
+- **P1 / CR-N01，尚未修复**：`PersistRefresh` 实际写入失败后已锁定 `ledgerBroken`、status 返回 `Ok=false`，但 `resume` 只核对 Creating、epoch、digest 及配置可读性，仍返回允许恢复线程。探针用另一条已完成记录触发真实 File.Replace 共享冲突，同时保留创建者 attempt gate，得到 `ledgerBroken=true/statusOk=false/resumeOk=true`。恢复线程入口须遵守持久化故障阻止态。
+- **P1 / CR-N02，尚未修复**：任务主文件丢失且 `.bak` 存在时，`TaskStore.Load` 返回空任务簿；随后两次正常 Update 会覆盖原备份。隔离复现原任务数 1、丢失后读取 0，最终 `backupPreserved=false`。应拒绝新写入并要求核对恢复，不能把已有备份的缺失主文件当新安装。
+- **P1 / CR-N03，尚未修复**：任务来源的 FailedBeforeStart/Revoked 记录仍显示普通「仅重试此项」；该路径走普通 reserve，没有追加 TaskRun。隔离探针复用相同路径并运行受保护的 3 秒夹具，实际重试存活、任务簿非终态数 0、MaxRunning=1，下一队列任务仍预约成功，ledger 活动项变为 2。任务卡与并发核对均遗漏该重试；应保留任务尝试关联或要求明确重新入队。
+- **P2 / CR-N04，尚未修复**：Node shim 的 ProgramFingerprint 只覆盖 node.exe，不包含入口 JS。使用合法 npm shim 在原路径替换 agent.js 后，Commands.Resolve 的命令和指纹都不变，真实 Worker Handle 入口仍接受冻结队列预约。应核对适配器所代表的 CLI 身份和版本，避免把运行时未变当作 CLI 未升级。
+- 原样完整 `scripts/test.ps1`：原生/模型 **117/117**、修复检查 **16/16**、集成 **120/120**；随后 **WPF 30 秒超时，完整 gate 失败**。当时公共 `artifacts/ui/ui-checks.json` 为 14:51:33 的旧报告，不能计入本轮通过证据，另存为 `ui-preexisting-report.json`。本轮超时原因未完成归因。
+- 保持原 30 秒限制、独立新隔离根与报告目录后，WPF 单独重跑 **229/229，Dpi 120，exit 0，26.86 秒**。未到达的原型、浏览器阶段补跑，各 **5/5、exit 0**；这些分段结果不改写首轮完整脚本失败的事实。
+- 本轮四项行为证据为 `probe-results.json`，完整脚本输出 `gate.log`，单独 WPF 结果 `ui-rerun/ui-checks.json` / `runner.json`；审查报告与哈希清单同目录。四个探针均重现缺陷，尚未有对应产品修复或修复后绿色回归。
+- 用户原列六项仍开放：原始 cmd 中途退出与历史 15/16 部分启动没有复现/归因；无退出证明继续保留占用；Job 通知和共享池争用的边界不变；无身份归档的旧任务继续人工核对；未发布新包或切换快捷方式，F12 生产交互未验收；S0.6、S5 及完整发布验收未完成。自适应轮询、短帧、发现缓存已有实现；过时文档和审查订阅属于维护事项。
+
+## 33. CR-N01～N04 修复与发布候选（2026-11-12，Asia/Shanghai）
+
+- 本轮基于 `8746cdee47386e8a82def09bffb33ce526d5a3c8` 继续，修改尚未提交。先将四个隔离复现改为永久回归：原生旧行为 **118 通过 / 4 失败**，Worker 旧行为 **16 通过 / 7 失败**；`artifacts/repair-20261112-163545/native-red.log`、`worker-red.log/.json` 保留。测试入口、资源策略、CI、原 30 秒 WPF 上限没有修改。
+- **CR-N01 已修复**：begin / resume 共用持久化与恢复阻止检查；实际 File.Replace 失败后，Pending / Creating 授权与磁盘字节保持，下一 tick 仍拒绝激活。恢复健康冻结授权不重做软准入确认；新增回归实际触发共享冲突并由另一线程 Refresh，保留真实创建者 mutex 所有权。
+- **CR-N02 已修复**：任务主文件缺失而备份仍在时，Load / Update 都拒绝，修改回调不执行；不新建主文件或覆盖备份，说明需人工核对恢复。确实首次使用仍可新建，显式恢复有效主文件后正常读取。原生与 WPF 均验证备份字节与队列停用。
+- **CR-N03 已修复**：Core 的纯来源策略沿 RetryOf 祖先核对持久领取、任务尝试及 SourceSlot 对应任务；祖先缺失、循环或任务记录不可读均不能证明可普通重试。App 隐藏任务来源的普通重试并提示重新入队，执行时再次读任务元数据；Worker 直接请求同样拒绝。保留原普通快启重试兼容性与 R05 集成断言，不引入第二套任务尝试登记流程。
+- **CR-N04 已修复**：所有程序身份调用改用完整 CommandSpec；Node 摘要包含运行时、入口内容、最近包 manifest 内容及路径，原 exe 指纹兼容，原始参数与会话值保持独立。快启缓存按入口区分，版本核对前后验证身份。旧运行时专用摘要拒绝，不自动改写旧任务/会话。正文合同记明 8 层、64 MiB / 1 MiB 上限与非原子外部升级边界。
+- 自审进一步发现预约后升级仍可激活；追加 begin / resume 两项回归先得 **23 通过 / 2 失败**（`activation-red.log/.json`），再在持久任务领取的激活路径从 TaskRun 或原队列项核对冻结程序。缺证据、错身份或升级均在创建 Job / 返回恢复授权之前拒绝，原预约保留。最终定向 Worker **28/28**（`worker-final.log/.json`），原生 **122/122**（`native-green.log`）。一个新增软准入夹具曾反射不存在的 pressure 字段而失败，已改为真实 PressureTracker.Observe 进入压力态；该夹具错误不是业务红灯。
+- WPF 前几次原 30 秒超时，通过新增 test-only 阶段记录定位：真实空闲物理内存当时仅 `669256 KiB`，队列按设计因压力暂停，未到达程序身份拒绝分支。任务 UI 组改用既有隔离 FAKE_SAMPLE 钩子并 finally 恢复，保留真实资源检查与生产阈值；修复后定向 **234/234、exit 0、24.85 秒**。没有把此前超时报告计为通过。
+- 第一次本轮完整 gate **exit 1、468.47 秒**：原生 **122/122**、Worker **28/28**、集成 **120/120** 均通过，WPF 因深色下拉当前项容器未生成抛 ArgumentNullException。新的 `ui-exception.json` 揭示原先会仅显示错误并最终超时的夹具异常；公共 ui-checks 是 14:51:33 旧报告，不计本轮结果。失败证据为 `gate-final.log`、`gate-runner.json`、`gate-ui-exception.json`、`gate-ui-progress.json`。
+- 仅修正 test-only 下拉检查：等待当前附着行的容器生成，异步发现替换行时重新取得控件；增加容器生成断言，原深色背景颜色断言不变。定向 **235/235、exit 0、25.20 秒**（`ui-container/` 及 runner）。UI 异常输出具体堆栈并 exit 1，阶段进度文件让超时可诊断；这些代码全部受 INTEGRATION_TESTS 条件控制。
+- 第二次完整 gate **exit 1、590.35 秒**：原生 **122/122**、Worker **28/28**、集成 **120/120** 通过；WPF 在原 30 秒到期被结束，阶段记录已通过 234 项，但尚未完成最后检查与报告，不能计为通过。保留 `gate-rerun.log`、`gate-rerun-runner.json`、`rerun-ui-progress.json`；没有套用先前定向绿色。
+- 后续减少无关工作：test-only 进度文件最多每 500 ms 写一次并保留最终记录；运行记录只在实际重试资格变化时刷新，不再因任务 Detail/Revision 的无关更新重建全部会话控件。原有断言、采样保护与 30 秒上限保持。定向 **235/235、exit 0、25.69 秒**（`ui-render/`、`ui-render-runner.json`）。完整最终重跑与匹配生产包结果见后续补充；单段通过不替代完整 gate。
+- **最终原样完整 `scripts/test.ps1` 通过**：2026-11-12 **17:28:37～17:36:48 Asia/Shanghai**，**exit 0、490.93 秒**。原生/模型 **122/122**、修复检查 **28/28**、真实 IPC/进程/Terminal 集成 **120/120**、WPF **235/235（Dpi 120）**、原型 **5/5**、浏览器 **5/5**。保留原 30 秒 WPF runner，未跳过阶段；`gate-complete.log`、`gate-complete-runner.json`、`complete-repair-results.json`、`complete-integration-results.json`、`complete-ui.json` 为本轮新证据。集成数组中元数据不计为通过用例。
+- 匹配生产包通过原 `scripts/build.ps1 -Output ./artifacts/preview-review-20261112` 顺序发布 App / Worker，**exit 0**；生产四程序集 UTF-8 / UTF-16LE 测试钩子标记扫描 CLEAN。独立 `invalid-command` Worker 冒烟按预期 **exit 2**，不启动 monitor / Agent。包内 `verification.json` 记录基准 commit、未提交源码文件哈希、程序集哈希、SDK、依赖和完整验证分类；不把基准 commit 冒充修改后提交。
+- 分发 ZIP `artifacts/preview-review-20261112.zip` **15 个文件**，解读归档逐项核对长度及 SHA-256 全部一致；ZIP SHA-256 为 `34D70911909B3112B7F76693FA45EFC49679157BF7F16372A851B3ED5AA0681D`。构建、生产验证、交付清单为 `release-build.log`、`release-verify.log`、`delivery.json`。这是需要 .NET 8 Desktop Runtime x64 的技术预览包，未安装新运行时，也不是安装器或完整产品发布验收。
+- **未切换桌面入口或覆盖旧包**：只读核对生产根 `%LOCALAPPDATA%\\AgentLauncher` 时，旧 `preview-claim-recovery` Worker 仍在运行，账本有一条 Exited 非终态、无池。没有为版本切换强行终止进程、删除账本或释放占用。新目录和压缩包均已具备，待旧尝试核对及旧 Worker 正常退出后再切换；当前快捷方式不能视为已使用新修复。源码未 commit / push，未启用自动审查订阅或声称独立审查通过。
+- 保留的运行边界：原始 cmd 退出与历史 15/16 部分启动未复现/归因；未知退出、丢失 Job/池与无归档旧任务继续人工核对。Job 通知仍为 best-effort、共享额度竞争仍可能拒绝分配。F12 生产人工交互、S0.6 长时真实负载、S5 多会话宿主、两小时真实中文 CLI / 无障碍 / 干净环境分发仍未验收。既有记录第 30 节的 S0.6/S5 延后决定继续保留，不通过放宽资源门槛完成实验。
+
+## 34. 九项可用性改进与本轮验证（2026-11-12，Asia/Shanghai）
+
+用户同意完整处理九项使用体验问题。本轮源码未提交，基准仍为 `8746cdee47386e8a82def09bffb33ce526d5a3c8`；保留第 33 节修复。证据目录为 `artifacts/usability-20261112-181041/`，最终测试构建为其 `runtime-acceptance/`；定向结果不替代完整发布验收。
+
+- **UX01 归档**：活动最多 200 张，总保留卡片最多 1200 张；归档保留身份、依赖和尝试，释放活动名额。排队、运行或非终态启动记录拒绝归档；活动/归档/全部可筛选搜索，恢复不入队。
+- **UX02 任务交接**：新建/编辑和复制窗口明确说明内容尚未发送。预览项目、说明和验收项，再复制到对应终端；不导出启动参数，不声称 Agent 已收到。
+- **UX03 关闭/继续**：启用队列即使不在创建进程，也会提示等待项数量与关闭后果；取消关闭保持原队列。重开显示暂停横幅，继续读取持久批次范围；明确执行整个队列才清除范围。修正执行按钮新增异步保存后的状态转换，回归等待真实完成。
+- **UX04 恢复**：提供只读证据、备份预览、显式恢复、核对占用和引导重新入队。恢复同一份已核对 hash 的备份字节，保留原文件与 `.bak`，原子发布并推进修订；可验证终态后才生成新意图，保留顺序与领取，仍暂停。孤立 Finished、损坏记录、无身份归档不授权重放。续接项提示回到会话核对流程。Terminal 入口现在于目录准备/预约/消费等待项之前核对，缺失时保留原意图并给出设置指引。
+- **UX05 执行范围**：快启默认仅本批次并发 1，全局并发保留，范围与导入同事务保存；明确选择整个队列才改全局并发为 1。续接对话框默认只执行本任务，也可明确扩展整个队列，避免被旧批次范围遗漏。
+- **UX06/07 暂缓和顺序**：未领取项可暂缓，保留 EntryId/Sequence/冻结设置，后续独立任务可以检查；恢复保留原顺序。Worker 独立拒绝暂缓项的 reserve/begin。列表使用真实优先级/FIFO，范围外、暂缓明确标注；序号只计算当前范围。撤销后提示统一指向恢复页，未知结果说明不会被重绘覆盖。
+- **UX08 历史**：任务/全局历史搜索保留的 TaskRun、控制记录、领取、已核验归档，突破近期 12 条展示限制。最多扫描 10000 个目录并说明截断。中文状态、筛选列表导出、单条诊断复制/导出均具备；参数、会话 ID、环境不导出，诊断提示工作目录信息。损坏控制记录或回执不遮蔽健康身份归档，也不授权释放占用。
+- **UX09 会话帮助**：登记/续接提供各 CLI 指引，说明任务 ID 不等于会话 ID、不要粘贴整条命令。原版本/程序身份/工作目录核对继续执行。`tasks.json` 升至 schema 3，旧版本拒绝；schema 1/2 仅在内存迁移。
+
+最终验证与限制：
+
+| 检查 | 实测 | 证据 |
+| --- | --- | --- |
+| 原生/模型/存储 | **131 通过 / 0 失败，exit 0** | `native-acceptance-rerun.log/.json` |
+| Worker 修复 | **29 通过 / 0 失败，exit 0**，含暂缓预约/激活拒绝 | `repairs-acceptance.log/.json`、`native-repair-acceptance.json` |
+| 可用性 + 快速入队 WPF | **42 通过 / 0 失败，exit 0，10.54 秒，Dpi 120**，保持 30 秒上限 | `ui-acceptance/usability-checks.json`、`ui-acceptance-runner.json` |
+| IPC/进程/共享池集成 | **117 通过 / 3 失败，exit 1，406.86 秒** | `integration-final.log/.json`、`integration-runner.json` |
+| 完整 WPF | **100 项通过后失败，exit 1，17.56 秒**；未到达后续组 | `ui-full-acceptance/`、对应 runner |
+| 原型模型 | **5 通过 / 0 失败，exit 0** | `prototype-final.log` |
+| 浏览器 | **失败**，两次停于 `CDP timeout: Page.enable`；没有浏览器通过报告 | `browser-rerun.log` |
+| 生产构建 | 配套 App / Worker 顺序发布 **exit 0**，未编入测试钩子 | `release-build.log`、`release-verification.json` |
+
+- 集成三项失败为真实 Pi 读取 `C:\Users\zhugu\.pi` 遇到 `EPERM lstat`，以及找不到当前账户可用的 Windows Terminal 导致两个真实开窗场景失败。完整 WPF 在 ACC-B08 真实 pane 派发断言失败，保存的队列 Detail 明确为 Terminal 不可用，原等待项保留且未创建尝试。未改断言、资源阈值或超时来绕过这些前提；真实续接派发等后续 WPF 用例本轮未完成。续接执行范围已实现并编译，仍需在具备 Terminal 的环境补验。
+- 首次完整脚本重跑只到集成：130 原生、28 修复、112 集成通过，8 集成失败；保留 `gate-third.log`。首个 Terminal 测试先预约再发现无入口，遗留 Pending 导致后续软预算及配置清理级联失败。仅把两个 Terminal 集成夹具的入口前提检查移到预约之前；再次隔离运行共享池和 busy-pipe 等均通过，缩小为上述 3 项外部前提失败，没有削弱 Worker 的稳定槽与确认授权检查。
+- 早期界面红灯包括未等待执行按钮的异步保存，以及撤销提示仍使用旧人工步骤；分别修正执行时序和恢复提示后通过。`ui-first` / `ui-second` / `ui-verified` 保留失败证据。一次原生测试误用测试构建且未给隔离根，因缺失 `test-root.txt` 退出；随后明确隔离根重跑为 131/131，不把前次计为通过。一次发布公共测试目录被旧测试监控器锁住 DLL，改用全新测试目录，无强制结束生产进程。
+- SDK 8.0.419、Node 24.14.0。当前受限环境不能读取原用户 NuGet.Config；仅构建进程将 APPDATA 指向证据下 `build-appdata`，使用无外部源 NuGet 配置；未修改系统配置。运行和最终集成不携带该构建覆盖。脚本执行策略仅对此次 PowerShell 进程使用 Bypass。
+- 截图为真实 WPF：`ui-acceptance/queue.png`、`queue-order.png`、`recovery.png`、`handoff.png`、`history.png`；已查看版面和可见操作，不替代 DPI/主题全矩阵与屏幕阅读器人工验收。README、C6/C8 合同与验收表同步新语义。
+- 交付目录 `artifacts/preview-usability-20261112/` 与同名 ZIP，为需要 **.NET 8 Desktop Runtime x64** 的技术预览，App/Worker/DLL 须整体使用。校验清单记录当前未提交源码、程序集与测试证据哈希，ZIP 逐项长度与 SHA-256 核对。**未切换桌面入口、未覆盖第 33 节旧包、未安装外部 CLI/Terminal、未 commit/push。**
+- 本轮没有通过完整 `scripts/test.ps1`；不能使用第 33 节旧绿色结果冒充本轮通过。用户原列的 cmd/15/16 原事件归因、极端崩溃的退出证明、Job 通知与共享池竞争、无身份旧记录、F12 人工交互、S0.6/S5、两小时真实中文 CLI、无障碍与干净环境分发仍按原边界开放。未知结果保持占用，未自动删除证据或重放。

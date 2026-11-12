@@ -14,6 +14,11 @@ public partial class MainWindow
 {
     private async Task RunTaskChecksAsync(Action<string, bool> check)
     {
+        var originalSample = Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE");
+        ReviewKillMonitor();
+        Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE", "1");
+        try
+        {
         IEnumerable<T> FindLogical<T>(DependencyObject root) where T : DependencyObject
         {
             foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
@@ -24,6 +29,7 @@ public partial class MainWindow
         }
         var tasksPath = Store.FilePath("tasks.json");
         File.Delete(tasksPath);
+        File.Delete(tasksPath + ".bak");
         var fixture = Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe");
         check("ACC-B05 task fixture program exists", File.Exists(fixture));
         var book = new TaskBook();
@@ -45,20 +51,21 @@ public partial class MainWindow
         check("ACC-B05 accepting a checkbox persists without dropping the queue", taskStore.Load().Tasks.Single(task => task.Id == waiting.Id).Acceptance[0].Checked && taskStore.Load().Queue.Count == 1);
         check("ACC-B05 resume action appears only for a settled session", FindLogical<Button>(TaskList).Any(button => AutomationProperties.GetName(button) == "续接会话 任务乙")
             && !FindLogical<Button>(TaskList).Any(button => AutomationProperties.GetName(button) == "续接会话 任务甲"));
-        QueueToggleClick(this, new RoutedEventArgs());
+        await ToggleQueueAsync();
         await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
         check("ACC-B05 queue starts paused and only runs when asked", queueEnabled && QueueToggleButton.Content as string == "暂停队列");
         var attemptsBefore = taskStore.Load().Attempts.Count;
         var detail = "";
         for (var i = 0; i < 300; i++)
         {
+            if(i==10)Store.Save(Store.FilePath("queue-check-state.json"),new{Error=ErrorText.Text,Queue=QueueStatusText.Text,busy,launchFinalizing,submittedAttempts,queuePumping,queueEnabled,closeRequested,taskLoadError,readOnly,Message=status?.Message,Blocked=status?.AdmissionBlockedReason});
             detail = taskStore.Load().Queue.Single().Detail;
             if (detail.Contains("程序或参数已变化")) break;
             if (!queuePumping) await PumpQueueAsync();
             await Task.Delay(100);
         }
         check("ACC-B06 dispatch holds a changed program instead of launching", detail.Contains("程序或参数已变化") && taskStore.Load().Attempts.Count == attemptsBefore && QueueStatusText.Text.Contains("程序或参数已变化"));
-        QueueToggleClick(this, new RoutedEventArgs());
+        await ToggleQueueAsync();
         check("ACC-B05 queue toggles back to paused", !queueEnabled && QueueToggleButton.Content as string == "执行队列");
         TaskConcurrency.SelectedIndex = 1;
         for (var i = 0; i < 50 && taskBook?.MaxRunning != 2; i++) await Task.Delay(100);
@@ -96,9 +103,22 @@ public partial class MainWindow
         RenderTasks();
         check("ACC-B06 corrupt task book fails closed and keeps the file", taskBook is null && QueueToggleButton.IsEnabled == false && File.ReadAllText(tasksPath).Contains("\"bad\"") && TaskEmptyText.Text.Contains("无法读取"));
         File.Delete(tasksPath);
+        var backup = File.ReadAllBytes(tasksPath + ".bak");
+        await LoadTasksAsync();
+        check("CR-N02 missing task primary keeps queue disabled and backup untouched", taskBook is null && !QueueToggleButton.IsEnabled
+            && !File.Exists(tasksPath) && backup.SequenceEqual(File.ReadAllBytes(tasksPath + ".bak")) && TaskEmptyText.Text.Contains("备份"));
         File.Delete(tasksPath + ".bak");
         await LoadTasksAsync();
         ErrorText.Text = "";
+        }
+        finally
+        {
+            queueEnabled = false; taskTimer.Stop();
+            queueCancellation?.Cancel();
+            await queuePumpTask;
+            Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE", originalSample);
+            ReviewKillMonitor();
+        }
     }
     private async Task RunTaskCommandChecksAsync(Action<string, bool> check)
     {
@@ -138,6 +158,17 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
         Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE", "1");
         try
         {
+            var otherScript = Path.Combine(root, "other-agent.js");
+            File.WriteAllText(otherScript, "console.log('other package')");
+            var otherShim = Path.Combine(root, "other.cmd");
+            File.WriteAllText(otherShim, File.ReadAllText(shim).Replace("queue-agent.js", "other-agent.js", StringComparison.Ordinal));
+            var identityDraft = new Draft { Project = root, DirectoryMode = "shared", Slots = [
+                new() { Enabled = true, AgentId = "custom", Profiles = new() { ["custom"] = new() { Executable = shim } } },
+                new() { Enabled = true, AgentId = "custom", Profiles = new() { ["custom"] = new() { Executable = otherShim } } }] };
+            var captured = CaptureQuickQueue(identityDraft, "").Items;
+            check("CR-N04 quick queue keeps distinct package identities on one Node runtime", captured.Count == 2
+                && captured[0].Command.Executable == captured[1].Command.Executable && captured[0].ProgramFingerprint != captured[1].ProgramFingerprint
+                && captured.All(item => item.ProgramFingerprint == AgentProbe.Fingerprint(item.Command)));
             Guid taskId = default;
             check("ACC-B08 shim task is saved", await UpdateTasksAsync(book => taskId = TaskBookOps.Create(book, "队列 shim", root, "omp",
                 new AgentProfile { Executable = shim, Arguments = arguments }, "", [], "shared", null, 0).Id, "测试任务保存失败"));
@@ -176,7 +207,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
                 }
                 check("ACC-B10 the requested session dialog opens", dialog is not null);
                 ReviewFind<TextBox>(dialog!).First().Text = value;
-                ReviewFind<Button>(dialog!).Single(button => button.Content as string == (apply ? "应用" : "取消")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                ReviewFind<Button>(dialog!).Single(button => apply ? button.IsDefault : button.IsCancel).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 if (!apply && dialog!.IsVisible) dialog.Close();
                 await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
             }
@@ -238,12 +269,13 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
                 File.WriteAllText(script, verifiedScript.Replace("omp/18.18.8", "omp/99.0.0", StringComparison.Ordinal));
                 await DispatchNextAsync();
                 var versionHeld = taskStore.Load();
-                check("ACC-B10 an unverified CLI upgrade holds resume without reserving or launching", versionHeld.Queue.Single(entry => entry.TaskId == taskId).Detail.Contains("没有已验证的续接参数")
+                check("ACC-B10 an unverified CLI upgrade holds resume without reserving or launching", versionHeld.Queue.Single(entry => entry.TaskId == taskId).Detail.Contains("程序已升级或更换")
                     && versionHeld.Attempts.Count == attemptsBeforeHold && File.ReadAllLines(output).Length == 3
                     && ((await Ipc.SendAsync(new("status", Guid.NewGuid()))).Entries?.Select(entry => entry.Plan.Id).ToHashSet() ?? []).SetEquals(entriesBeforeHold));
             }
             finally { File.WriteAllText(script, verifiedScript); }
             await UpdateTasksAsync(book => TaskBookOps.Dequeue(book, taskId), "版本变化夹具清理失败");
+            await RunTaskRetryChecksAsync(check, taskId, frozenResume);
         }
         finally
         {
@@ -252,6 +284,34 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE", priorSample);
             ReviewKillMonitor();
         }
+    }
+
+    private async Task RunTaskRetryChecksAsync(Action<string, bool> check, Guid taskId, CommandSpec command)
+    {
+        await LoadTasksAsync();
+        var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "任务重试门禁", Store.Root, PhysicalDirectory.Workspace(Store.Root),
+            true, command, ResourcePolicy.AgentBudget, SourceSlotId: Guid.NewGuid());
+        var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [plan]));
+        if (!reserved.Ok) throw new IOException(reserved.Message);
+        var revoked = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: plan.Id));
+        if (!revoked.Ok) throw new IOException(revoked.Message);
+        status = await Ipc.SendAsync(new("status", Guid.NewGuid()));
+        RenderSessionsNow();
+        check("CR-N03 ordinary unstarted quick launch retains its retry action", ReviewFind<Button>(Sessions)
+            .Any(button => AutomationProperties.GetName(button) == "仅重试此项 任务重试门禁"));
+        taskStore.Update(taskBook!.Revision, book => book.Attempts.Add(new TaskRun { TaskId = taskId, TaskRevision = 1, AttemptId = plan.Id,
+            BatchId = plan.BatchId, State = "Failed", WorkspaceKey = plan.Workspace.Key, ProgramFingerprint = AgentProbe.Fingerprint(command) }));
+        var bytes = File.ReadAllBytes(taskStore.FilePath);
+        var refused = false;
+        try { await RetrySessionCoreAsync(plan.Id); } catch (IOException e) { refused = e.Message.Contains("重新入队"); }
+        var current = await Ipc.SendAsync(new("status", Guid.NewGuid()));
+        check("CR-N03 stale session retry reloads task provenance before reserving or launching", refused
+            && !current.Entries!.Any(entry => entry.Plan.RetryOf == plan.Id) && bytes.SequenceEqual(File.ReadAllBytes(taskStore.FilePath)));
+        await LoadTasksAsync();
+        RenderSessionsNow();
+        check("CR-N03 task attempts expose requeue guidance without generic retry", !ReviewFind<Button>(Sessions)
+            .Any(button => AutomationProperties.GetName(button) == "仅重试此项 任务重试门禁")
+            && ReviewFind<TextBlock>(Sessions).Any(text => text.Text.Contains("请从任务卡重新入队")));
     }
 
 }
