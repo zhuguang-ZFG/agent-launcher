@@ -149,6 +149,7 @@ internal sealed class Monitor : IDisposable
     private string? blocked;
     private bool reconcileOffered;
     private bool ledgerBroken;
+    private string ledgerBrokenDetail="控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。";
     private readonly PressureTracker pressureTracker=new();
     private bool pressure=>pressureTracker.Pressure;
     private readonly WaiverTable waivers=new(()=>DateTimeOffset.UtcNow);
@@ -163,10 +164,13 @@ internal sealed class Monitor : IDisposable
         try
         {
             Directory.CreateDirectory(Store.Root);Store.Save(Store.FilePath("monitor-pid.json"),Environment.ProcessId);
-            try{ledger=LedgerMigration.Accept(Store.Read<Ledger>(ledgerPath)??new());}
-            catch(Exception e)when(e is JsonException or InvalidDataException or IOException){ledgerBroken=true;ledger=new();blocked="控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。";}
+            LoadLedger();
             var boot=Store.BootId();
-            if(!ledgerBroken&&LedgerMigration.Rollover(ledger,boot))Save();
+            if(!ledgerBroken&&LedgerMigration.Rollover(ledger,boot))
+            {
+                // Retention must never kill the monitor at startup: fail closed with a reason the user can act on instead.
+                try{Save();}catch(Exception e)when(e is InvalidDataException or IOException){ledgerBroken=true;ledgerBrokenDetail="控制账本无法安全写入，已停止启动与回收："+e.Message;blocked=ledgerBrokenDetail;}
+            }
             root=new Job(Store.RootJob,root:true,cpuRate:RootCpuRate());
             RefreshRootCpu();
             sampler.Sample();Thread.Sleep(250);Refresh();
@@ -210,26 +214,51 @@ internal sealed class Monitor : IDisposable
         }
         finally{Dispose();single.ReleaseMutex();}
     }
+    // A missing ledger is only a fresh install. Store.Save publishes control.json.bak on every replace, so its presence proves a
+    // book existed; starting from an empty one would forget retained claims and let the same queue entry be claimed again.
+    private void LoadLedger()
+    {
+        var lost=false;
+        try
+        {
+            var stored=Store.Read<Ledger>(ledgerPath);
+            lost=stored is null&&File.Exists(ledgerPath+".bak");
+            if(lost)throw new InvalidDataException();
+            ledger=LedgerMigration.Accept(stored??new());
+            return;
+        }
+        catch(Exception e)when(e is JsonException or InvalidDataException or IOException)
+        {
+            ledgerBroken=true;ledger=new();
+            ledgerBrokenDetail=lost
+                ?"控制账本丢失但存在 .bak 备份，已停止启动与回收。请人工核对 control.json 并恢复备份后再启动。"
+                :"控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。";
+        }
+        blocked=ledgerBrokenDetail;
+    }
     private void Save()
     {
-        PruneLedger();
+        var total=PruneLedger();
+        // Never publish a book Store.Read would reject: an oversized control.json permanently loses every retained claim and cannot
+        // be repaired by the monitor itself. Active records are authority, so they are never dropped to make room.
+        if(total>LedgerBudget)throw new InvalidDataException($"控制账本超过 {LedgerBudget/(1024*1024)} MiB 写入上限，未写入；已停止启动与回收。");
         Store.Save(ledgerPath,ledger);
     }
-    private void PruneLedger()
+    private long PruneLedger()
     {
         // Terminal history is convenience only. Keep the published ledger well under Store.Read's 8 MiB bound: an unreadable
         // control.json sets ledgerBroken and refuses every launch until the file is repaired by hand. Pruning drops the oldest
-        // terminal records first and never touches active ones, which cannot exceed the budget on their own (at most sixteen agent
-        // plans plus one Git plan, each already bounded to a single frame by EnsureEntryRepresentable).
+        // terminal records first and never touches active ones, which are bounded per record by EnsureEntryRepresentable.
         var total=JsonSerializer.SerializeToUtf8Bytes(ledger,Store.Json).LongLength;
-        if(total<=LedgerBudget)return;
+        if(total<=LedgerBudget)return total;
         foreach(var entry in ledger.Entries.Where(Store.IsTerminal).ToList())
         {
-            if(total<=LedgerBudget)return;
+            if(total<=LedgerBudget)return total;
             total-=JsonSerializer.SerializeToUtf8Bytes(entry,Store.Json).LongLength+1;
             ledger.Entries.Remove(entry);
             statusEntryCache.Remove(entry.Plan.Id);
         }
+        return JsonSerializer.SerializeToUtf8Bytes(ledger,Store.Json).LongLength;
     }
     private void Refresh(bool forceSample=false)
     {
@@ -245,7 +274,7 @@ internal sealed class Monitor : IDisposable
             catch(Exception e)when(e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){floor=ResourcePolicy.DefaultPhysicalFloor(sample.Total);}
             pressureTracker.Observe(sample,floor);
         }
-        var changed=false;blocked=ledgerBroken?"控制账本损坏或版本不支持，已停止启动与回收。请人工核对 control.json，必要时用 .bak 备份恢复。":null;reconcileOffered=false;
+        var changed=false;blocked=ledgerBroken?ledgerBrokenDetail:null;reconcileOffered=false;
         foreach(var record in ledger.Pools.Where(p=>!pools.ContainsKey(p.Id)))
         {
             try{pools[record.Id]=new Job(Store.PoolName(record.Id),openOnly:true);}
@@ -298,8 +327,13 @@ internal sealed class Monitor : IDisposable
             catch(Exception ex)when(ex is not OutOfMemoryException){blocked="恢复核对失败："+ex.Message;e.Detail=blocked;}
             finally{gate.ReleaseMutex();}
         }
-        if(changed)Save();
-        foreach(var id in jobs.Keys.Where(id=>Store.IsTerminal(ledger.Entries.Single(e=>e.Plan.Id==id))).ToArray()){jobs[id].Dispose();jobs.Remove(id);receiptCache.Remove(id);}
+        if(changed)
+        {
+            try{Save();}catch(Exception ex)when(ex is InvalidDataException or IOException){blocked="控制账本未写入，已停止启动与回收："+ex.Message;}
+        }
+        // Save can prune a just-finished record in the same tick, so absence from the book means "no longer active", not a defect.
+        var activeIds=ledger.Entries.Where(e=>!Store.IsTerminal(e)).Select(e=>e.Plan.Id).ToHashSet();
+        foreach(var id in jobs.Keys.Where(id=>!activeIds.Contains(id)).ToArray()){jobs[id].Dispose();jobs.Remove(id);receiptCache.Remove(id);}
         foreach(var id in pools.Keys.Where(id=>!ledger.Entries.Any(e=>!Store.IsTerminal(e)&&e.Plan.PoolId==id)).ToArray())
         {
             var pool=pools[id];

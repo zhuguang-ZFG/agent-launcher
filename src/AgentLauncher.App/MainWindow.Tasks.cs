@@ -378,8 +378,18 @@ public partial class MainWindow
         foreach (var run in taskBook.Attempts.Where(candidate => !candidate.Terminal).ToArray())
         {
             var entry = status?.Entries?.FirstOrDefault(candidate => candidate.Plan.Id == run.AttemptId);
-            if (entry is null) continue;
-            if (entry.State is "FailedBeforeStart" or "Revoked")
+            // The status reply only carries a bounded history window, so an attempt that ended while the queue was paused or the
+            // window was closed can fall out of it. Ask the durable book (then the receipt) before assuming it is still running.
+            var retained = entry is null ? RetainedAttempt(run.AttemptId, Store.FilePath("control.json"), Store.ReceiptPath(run.AttemptId)) : null;
+            if (entry is null && retained is null) continue;
+            if (retained is not null)
+            {
+                var review = retained.State == "Settled";
+                await UpdateTasksAsync(book => TaskBookOps.FinishRun(book, run.AttemptId, review ? "Review" : "Failed",
+                    review ? "进程已结束，等待人工验收" : "未启动：" + retained.Detail), "任务状态更新失败");
+                continue;
+            }
+            if (entry!.State is "FailedBeforeStart" or "Revoked")
             {
                 await UpdateTasksAsync(book => TaskBookOps.FinishRun(book, run.AttemptId, "Failed", "未启动：" + entry.Detail), "任务状态更新失败");
                 continue;
@@ -391,6 +401,38 @@ public partial class MainWindow
             else if (run.Detail != entry.Detail)
                 await UpdateTasksAsync(book => TaskBookOps.SetRunDetail(book, run.AttemptId, entry.Detail), "任务状态更新失败");
         }
+    }
+
+    internal sealed record RetainedOutcome(string State, string Detail);
+
+    /// <summary>Terminal outcome proven by the durable book (main file, then its backup) or by the attempt receipt. Null when
+    /// neither proves the attempt ended, so the run stays pending instead of being invented as finished.</summary>
+    internal static RetainedOutcome? RetainedAttemptForChecks(Guid attemptId, string ledgerPath, string receiptPath) => RetainedAttempt(attemptId, ledgerPath, receiptPath);
+
+    private static RetainedOutcome? RetainedAttempt(Guid attemptId, string ledgerPath, string receiptPath)
+    {
+        foreach (var path in new[] { ledgerPath, ledgerPath + ".bak" })
+        {
+            Ledger? ledger;
+            try { ledger = Store.Read<Ledger>(path); }
+            catch (Exception e) when (e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException) { continue; }
+            if (ledger is null) continue;
+            ControlEntry? entry;
+            try { entry = LedgerMigration.Accept(ledger).Entries.FirstOrDefault(candidate => candidate.Plan.Id == attemptId); }
+            catch (Exception e) when (e is IOException or JsonException or InvalidDataException) { continue; }
+            // Only pruning removes records, and it only removes terminal ones: an entry still in the book is authoritative.
+            if (entry is not null) return Store.IsTerminal(entry) ? new(entry.State, entry.Detail) : null;
+        }
+        try
+        {
+            return Store.Read<Receipt>(receiptPath)?.Phase switch
+            {
+                "Finished" => new("Settled", "全部受管进程已退出"),
+                "FailedBeforeStart" => new("FailedBeforeStart", "进程未运行"),
+                _ => null
+            };
+        }
+        catch (Exception e) when (e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException) { return null; }
     }
 
     private async Task RevokeStaleAsync(Guid attemptId)
