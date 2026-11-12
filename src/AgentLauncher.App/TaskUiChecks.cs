@@ -245,10 +245,12 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             check("ACC-B09 queued resume and later occupied session are saved", await UpdateTasksAsync(book =>
             {
                 book.MaxRunning = 2;
+                book.LastDispatchTaskIds = null;
                 TaskBookOps.Enqueue(book, taskId, frozenResume, resumed.ProgramFingerprint, resumed.AttemptId, session);
                 book.Attempts.Add(new TaskRun { TaskId = taskId, AttemptId = occupiedAttempt, BatchId = Guid.NewGuid(), State = "Running", SessionRef = session,
                     WorkspaceKey = resumed.WorkspaceKey, ProgramFingerprint = resumed.ProgramFingerprint });
             }, "会话占用夹具保存失败"));
+            queueScopeTaskIds = null;
             var attemptsBeforeHold = taskStore.Load().Attempts.Count;
             var entriesBeforeHold = (await Ipc.SendAsync(new("status", Guid.NewGuid()))).Entries?.Select(entry => entry.Plan.Id).ToHashSet() ?? [];
             await DispatchNextAsync();

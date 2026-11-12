@@ -1,25 +1,45 @@
 import {spawn} from 'node:child_process';
-import {mkdtemp,readFile,writeFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
 const root=path.resolve(import.meta.dirname,'..');
+const report=path.join(root,'artifacts');
+await mkdir(report,{recursive:true});
 const profile=await mkdtemp(path.join(tmpdir(),'AgentLauncher-browser-'));
-const browser=spawn('C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',['--headless=new','--disable-gpu','--no-first-run','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{stdio:'ignore'});
-let ws;let nextId=0;const pending=new Map();
-async function send(method,params={}){const id=++nextId;return await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{pending.delete(id);reject(Error(`CDP timeout: ${method}`));},10000);pending.set(id,{resolve:v=>{clearTimeout(timeout);resolve(v);},reject:e=>{clearTimeout(timeout);reject(e);}});ws.send(JSON.stringify({id,method,params}));});}
+const executable='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--enable-logging=stderr','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{stdio:['ignore','ignore','pipe']});
+let ws;let nextId=0;const pending=new Map();let failure;let rejectOpen;let closing=false;let stderr='';let version;let lastMethod;let results=[];
+function fail(error){failure??=error;rejectOpen?.(failure);for(const waiter of pending.values())waiter.reject(failure);pending.clear();}
+browser.stderr.on('data',data=>{stderr=(stderr+data.toString()).slice(-65536);});
+browser.once('error',error=>fail(Error(`Browser startup failed: ${error.message}`)));
+browser.once('exit',(code,signal)=>{if(!closing)fail(Error(`Browser exited before checks completed: code=${code}, signal=${signal}`));});
+async function send(method,params={}){
+ if(failure)throw failure;lastMethod=method;const id=++nextId;
+ return await new Promise((resolve,reject)=>{
+  const timeout=setTimeout(()=>{pending.delete(id);reject(Error(`CDP timeout: ${method}`));},10000);
+  const waiter={resolve:v=>{clearTimeout(timeout);resolve(v);},reject:e=>{clearTimeout(timeout);reject(e);}};pending.set(id,waiter);
+  try{ws.send(JSON.stringify({id,method,params}));}catch(error){pending.delete(id);waiter.reject(error);}
+ });
+}
 async function evaluate(expression){const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value;}
 try{
- let port;for(let i=0;i<100;i++){try{port=(await readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split('\n')[0];break;}catch{await new Promise(r=>setTimeout(r,100));}}
+ await writeFile(path.join(report,'prototype-browser-results.json'),JSON.stringify({status:'running',passed:[],profile},null,2));
+ let port;for(let i=0;i<100;i++){if(failure)throw failure;try{port=(await readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split('\n')[0];break;}catch{await new Promise(r=>setTimeout(r,100));}}
  if(!port)throw Error('Browser startup timeout');
- const tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();ws=new WebSocket(tabs.find(t=>t.type==='page').webSocketDebuggerUrl);
- ws.addEventListener('message',event=>{const message=JSON.parse(event.data);const waiter=pending.get(message.id);if(waiter){pending.delete(message.id);if(message.error)waiter.reject(Error(message.error.message));else waiter.resolve(message.result);}});
- await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
+ const tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`,{signal:AbortSignal.timeout(10000)})).json();
+ const page=tabs.find(t=>t.type==='page');if(!page)throw Error('Browser did not create a page target');
+ ws=new WebSocket(page.webSocketDebuggerUrl);
+ ws.addEventListener('message',event=>{try{const message=JSON.parse(event.data);if(message.method==='Inspector.targetCrashed'){fail(Error('Browser page target crashed'));return;}const waiter=pending.get(message.id);if(waiter){pending.delete(message.id);if(message.error)waiter.reject(Error(message.error.message));else waiter.resolve(message.result);}}catch(error){fail(error);}});
+ ws.addEventListener('close',event=>{if(!closing)fail(Error(`Browser CDP connection closed: ${event.code} ${event.reason}`));});
+ ws.addEventListener('error',()=>fail(Error('Browser CDP connection failed')));
+ await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(Error('Browser CDP connection timeout')),10000);rejectOpen=reject;ws.addEventListener('open',()=>{clearTimeout(timeout);rejectOpen=undefined;resolve();},{once:true});if(failure){clearTimeout(timeout);reject(failure);}});
+ version=await send('Browser.getVersion');
  await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:1040,height:900,deviceScaleFactor:1,mobile:false});
  await send('Page.navigate',{url:pathToFileURL(path.join(root,'docs/prototype.html')).href});
  for(let i=0;i<50;i++){if(await evaluate('typeof model !== "undefined" && document.readyState === "complete"'))break;await new Promise(r=>setTimeout(r,100));}
- const results=await evaluate(`(()=>{
+ results=await evaluate(`(()=>{
  const results=[];const click=id=>document.getElementById(id).click();
  const value=(id,v)=>{const e=document.getElementById(id);e.value=v;e.dispatchEvent(new Event('change',{bubbles:true}));};
  const check=(name,ok)=>{if(!ok)throw Error(name);results.push(name);};
@@ -34,6 +54,8 @@ try{
 })()`);
  assert.equal(results.length,5);
  const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});await writeFile(path.join(root,'artifacts/prototype-browser.png'),Buffer.from(shot.data,'base64'));
- await writeFile(path.join(root,'artifacts/prototype-browser-results.json'),JSON.stringify({passed:results},null,2));console.log(results.map(x=>'PASS '+x).join('\n'));
- await send('Browser.close');
-}finally{ws?.close();if(browser.exitCode===null)browser.kill();}
+ await writeFile(path.join(report,'prototype-browser-results.json'),JSON.stringify({status:'passed',passed:results,version},null,2));console.log(results.map(x=>'PASS '+x).join('\n'));
+}catch(error){
+ await writeFile(path.join(report,'prototype-browser-results.json'),JSON.stringify({status:'failed',passed:results,failed:error.message,executable,profile,version,lastMethod,exitCode:browser.exitCode,signal:browser.signalCode,stderr},null,2));
+ console.error(`${error.message}\nBrowser diagnostics: ${path.join(report,'prototype-browser-results.json')}\n${stderr}`);process.exitCode=1;
+}finally{closing=true;ws?.close();if(browser.exitCode===null)browser.kill();await writeFile(path.join(report,'prototype-browser-stderr.log'),stderr);}
