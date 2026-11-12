@@ -392,6 +392,26 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             Assert(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"),"Terminal panes did not complete");
             Assert(File.Exists(Path.Combine(Store.Root,"terminal-1.json"))&&File.Exists(Path.Combine(Store.Root,"terminal-2.json")),"terminal command did not execute");await Ipc.SendAsync(new("status",Guid.NewGuid()));
         });
+        await Test("Terminal sixteen panes each claim and execute exactly once",async()=>{
+            var terminal=Commands.Terminal("");
+            await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
+            var settings=new ResourceSettings{Mode="custom",JobMemoryLimit=ResourcePolicy.AgentBudget,PlanningBytes=ResourcePolicy.MinPlanningBytes,Pool=ResourcePolicy.PoolShared,PoolMemoryLimit=4*ResourcePolicy.GiB};
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
+            try
+            {
+                var batch=Guid.NewGuid();var pool=Guid.NewGuid();
+                var items=Enumerable.Range(1,ResourcePolicy.MaxSlots).Select(n=>Item("Terminal 16-pane fixture "+n,["--echo",Path.Combine(Store.Root,$"terminal-16-{n}.json"),"pane-"+n]) with{BatchId=batch,Position=n,Shared=true,PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode,PoolId=pool}).ToArray();
+                var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
+                Commands.SubmitTerminal(terminal,items,"vertical");
+                var deadline=Stopwatch.StartNew();
+                while(deadline.Elapsed<TimeSpan.FromSeconds(60)&&items.Any(item=>Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is not{Phase:"Finished",ExitCode:0}))await Task.Delay(100);
+                var missing=items.Where(item=>Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is not{Phase:"Finished",ExitCode:0}).Select(item=>item.Position).ToArray();
+                Assert(missing.Length==0,"Terminal did not finish every 16-pane fixture; missing positions: "+string.Join(",",missing));
+                Assert(Enumerable.Range(1,ResourcePolicy.MaxSlots).All(n=>File.Exists(Path.Combine(Store.Root,$"terminal-16-{n}.json"))),"one or more Terminal fixture commands produced no output");
+                await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            }
+            finally { Store.Save(Store.FilePath("configuration.json"),new Configuration()); }
+        });
         await Test("ACC-S3B01 shared pool bills once, keeps kernel caps and launches on a root-pool-item chain",async()=>{
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);

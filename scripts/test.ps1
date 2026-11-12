@@ -24,8 +24,14 @@ try {
   if(-not $SkipUi){
     $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-ui-'+[guid]::NewGuid().ToString('N'))
     $report=Join-Path $root 'artifacts/ui'
+    $progressPath=Join-Path $report 'ui-progress.json'
+    $startedAt=[DateTime]::UtcNow;$lastProgressAt=$startedAt;$lastProgress='no UI progress recorded';$hardDeadline=$startedAt.AddSeconds(90)
     $p=Start-Process (Join-Path $runtime 'AgentLauncher.App.exe') -ArgumentList '--ui-check',('"'+$report+'"') -PassThru
-    if(-not $p.WaitForExit(30000)){$p.Kill();throw 'UI check timeout'}
+    while(-not $p.WaitForExit(500)){
+      try{$progressInfo=Get-Item $progressPath -ErrorAction Stop;if($progressInfo.LastWriteTimeUtc -ge $startedAt -and $progressInfo.LastWriteTimeUtc -gt $lastProgressAt){$lastProgressAt=$progressInfo.LastWriteTimeUtc;$lastProgress=Get-Content $progressPath -Raw -ErrorAction Stop}}catch{}
+      $now=[DateTime]::UtcNow
+      if($now -ge $hardDeadline -or ($now-$lastProgressAt).TotalSeconds -ge 30){try{$p.Kill()}catch{};if(-not $p.WaitForExit(5000)){throw "UI check could not stop after timeout; last progress: $lastProgress"};throw "UI check stalled or exceeded 90-second hard timeout; last progress: $lastProgress"}
+    }
     if($p.ExitCode -ne 0 -or -not(Test-Path (Join-Path $report 'ui-checks.json'))){throw 'UI checks failed'}
   }
   & node --test (Join-Path $root 'tests/prototype.test.cjs')
