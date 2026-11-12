@@ -4,7 +4,8 @@ namespace AgentLauncher.Core;
 
 public static class TaskSchema
 {
-    public const int Current = 1;
+    // Version 2 adds optional quick-launch metadata. Version 1 had no isolated-worktree intent to honor.
+    public const int Current = 2;
     public const int MaxNameLength = 120;
     public const int MaxDescriptionLength = 20000;
     public const int MaxAcceptanceItems = 32;
@@ -42,12 +43,14 @@ public sealed class TaskCard
     [JsonRequired] public List<Guid> DependsOn { get; set; } = [];
     [JsonRequired] public int Priority { get; set; }
     [JsonRequired] public DateTimeOffset UpdatedAt { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public QuickLaunchSource? QuickLaunch { get; set; }
 
     public TaskCard Copy() => new()
     {
         Id = Id, Revision = Revision, Name = Name, Project = Project, AgentId = AgentId, Profile = Profile.Copy(),
         Description = Description, Acceptance = Acceptance.Select(item => item.Copy()).ToList(), DirectoryMode = DirectoryMode,
-        Resource = Resource?.Copy(), BaseCommit = BaseCommit, Branch = Branch, DependsOn = [.. DependsOn], Priority = Priority, UpdatedAt = UpdatedAt
+        Resource = Resource?.Copy(), BaseCommit = BaseCommit, Branch = Branch, DependsOn = [.. DependsOn], Priority = Priority, UpdatedAt = UpdatedAt,
+        QuickLaunch = QuickLaunch
     };
 
     public void Validate()
@@ -69,6 +72,7 @@ public sealed class TaskCard
             if (resource.Mode is not ("conservative" or "practical" or "custom")) throw new InvalidDataException("任务资源模式无效。");
             if (resource.JobMemoryLimit == 0 || resource.PlanningBytes == 0) throw new InvalidDataException("任务资源额度无效。");
         }
+        QuickLaunch?.Validate();
     }
 }
 
@@ -91,12 +95,13 @@ public sealed class QueueEntry
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? SessionRef { get; set; }
     [JsonRequired] public ResourceSettings Resource { get; set; } = new();
     [JsonRequired] public List<Guid> DependsOn { get; set; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public QuickLaunchSource? QuickLaunch { get; set; }
     public QueueEntry Copy() => new()
     {
         Id = Id, TaskId = TaskId, TaskRevision = TaskRevision, Priority = Priority, Sequence = Sequence, EnqueuedAt = EnqueuedAt,
         Project = Project, AgentId = AgentId, Command = Command with { Arguments = [.. Command.Arguments] }, ProgramFingerprint = ProgramFingerprint,
         DirectoryMode = DirectoryMode, Resource = Resource.Copy(), DependsOn = [.. DependsOn],
-        Detail = Detail, ResumeOf = ResumeOf, SessionRef = SessionRef
+        Detail = Detail, ResumeOf = ResumeOf, SessionRef = SessionRef, QuickLaunch = QuickLaunch
     };
 }
 
@@ -144,18 +149,25 @@ public sealed class TaskBook
     public void Validate()
     {
         if (SchemaVersion != TaskSchema.Current) throw new InvalidDataException("任务文件版本不支持，禁止覆盖。");
+        if (Tasks is null || Queue is null || Attempts is null) throw new InvalidDataException("任务文件结构损坏。");
         if (Tasks.Count > TaskSchema.MaxTasks || Queue.Count > TaskSchema.MaxQueueEntries || Attempts.Count > TaskSchema.MaxAttempts) throw new InvalidDataException("任务文件超出大小边界。");
         if (MaxRunning is < 1 or > ResourcePolicy.MaxSlots) throw new InvalidDataException("并发上限无效。");
         if (Queue.Count > 0 && NextSequence <= 0) throw new InvalidDataException("队列序号无效。");
         if (Tasks.Select(task => task.Id).Distinct().Count() != Tasks.Count) throw new InvalidDataException("任务身份重复。");
-        foreach (var task in Tasks) task.Validate();
+        foreach (var task in Tasks)
+        {
+            if (task is null) throw new InvalidDataException("任务文件结构损坏。");
+            task.Validate();
+        }
         foreach (var entry in Queue)
         {
+            if (entry is null) throw new InvalidDataException("任务文件结构损坏。");
+            entry.QuickLaunch?.Validate();
             if (entry.Id == Guid.Empty || entry.Sequence <= 0 || !Tasks.Any(task => task.Id == entry.TaskId && task.Revision == entry.TaskRevision)) throw new InvalidDataException("队列项与任务修订不一致。");
             if (Queue.Count(existing => existing.TaskId == entry.TaskId) > 1) throw new InvalidDataException("同一任务重复入队。");
             if (entry.Command.Executable.Length == 0 || entry.Command.Arguments.Any(argument => argument.Contains('\0'))) throw new InvalidDataException("队列项命令无效。");
         }
-        if (Attempts.Select(run => run.AttemptId).Distinct().Count() != Attempts.Count) throw new InvalidDataException("尝试身份重复。");
+        if (Attempts.Any(run => run is null) || Attempts.Select(run => run.AttemptId).Distinct().Count() != Attempts.Count) throw new InvalidDataException("尝试身份重复。");
     }
 }
 
@@ -237,6 +249,13 @@ public static class TaskBookOps
         return task;
     }
 
+    /// <summary>
+    /// Creates one queued task per enabled draft slot from frozen resolved inputs. The whole import is validated and staged
+    /// before the book changes, so a bad later item, capacity limit, or duplicate active import leaves the book untouched.
+    /// </summary>
+    public static IReadOnlyList<Guid> EnqueueQuickLaunch(TaskBook book, Draft draft, IReadOnlyList<QuickLaunchItem> items, string worktreeRoot) =>
+        QuickLaunchQueue.Enqueue(book, draft, items, worktreeRoot);
+
     /// <summary>Edits bump the revision. Launch-relevant edits drop the queued entry because its frozen command no longer matches the task.</summary>
     public static TaskCard Edit(TaskBook book, Guid taskId, Action<TaskCard> change)
     {
@@ -252,6 +271,11 @@ public static class TaskBookOps
         draft.Revision = launchRelevant ? checked(current.Revision + 1) : current.Revision;
         draft.UpdatedAt = DateTimeOffset.UtcNow;
         draft.Validate();
+        if (launchRelevant)
+        {
+            // The frozen import no longer describes this launch; a new quick start must freeze fresh metadata.
+            draft.QuickLaunch = null;
+        }
         book.Tasks[index] = draft;
         if (launchRelevant) book.Queue.RemoveAll(entry => entry.TaskId == taskId);
         return draft;
@@ -281,7 +305,7 @@ public static class TaskBookOps
             EnqueuedAt = DateTimeOffset.UtcNow, Project = task.Project, AgentId = task.AgentId,
             Command = command with { Arguments = [.. command.Arguments] }, ProgramFingerprint = programFingerprint,
             DirectoryMode = task.DirectoryMode, Resource = (task.Resource ?? new ResourceSettings()).Copy(), DependsOn = [.. task.DependsOn],
-            ResumeOf = resumeOf, SessionRef = session
+            ResumeOf = resumeOf, SessionRef = session, QuickLaunch = task.QuickLaunch
         };
         book.NextSequence = entry.Sequence;
         book.Queue.Add(entry);
@@ -375,6 +399,7 @@ public static class TaskBookOps
     private static bool SameIntent(QueueEntry left, QueueEntry right) =>
         left.TaskId == right.TaskId && left.TaskRevision == right.TaskRevision && left.ProgramFingerprint == right.ProgramFingerprint
         && left.ResumeOf == right.ResumeOf && string.Equals(left.SessionRef, right.SessionRef, StringComparison.Ordinal)
+        && left.QuickLaunch == right.QuickLaunch
         && string.Equals(left.Command.Executable, right.Command.Executable, StringComparison.Ordinal)
         && string.Equals(left.Command.Adapter, right.Command.Adapter, StringComparison.Ordinal)
         && left.Command.Arguments.SequenceEqual(right.Command.Arguments);
@@ -383,6 +408,8 @@ public static class TaskBookOps
     {
         if (left is null || right is null) return left is null && right is null;
         return left.Mode == right.Mode && left.JobMemoryLimit == right.JobMemoryLimit && left.PlanningBytes == right.PlanningBytes
-            && left.PhysicalFloorOverride == right.PhysicalFloorOverride && left.CommitFloorOverride == right.CommitFloorOverride && left.CpuRate == right.CpuRate;
+            && left.PhysicalFloorOverride == right.PhysicalFloorOverride && left.CommitFloorOverride == right.CommitFloorOverride && left.CpuRate == right.CpuRate
+            && string.Equals(ResourcePolicy.PoolModeOf(left), ResourcePolicy.PoolModeOf(right), StringComparison.Ordinal)
+            && left.PoolMemoryLimit == right.PoolMemoryLimit;
     }
 }

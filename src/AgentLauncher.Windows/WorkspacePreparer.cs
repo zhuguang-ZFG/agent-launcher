@@ -117,15 +117,20 @@ public sealed class WorkspacePreparer
     }
     private static bool ValidText(string? value)=>!string.IsNullOrWhiteSpace(value)&&!value.Contains('\0');
     private static bool AbsolutePath(string? value)=>ValidText(value)&&Path.IsPathFullyQualified(value!);
-    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null,Func<LaunchItem[],Task<Guid?>>? authorize=null)
+    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null,Func<LaunchItem[],Task<Guid?>>? authorize=null,bool forceIsolated=false,string? expectedWorkspaceKey=null)
     {
         resourceSettings=draft.Resource??new ResourceSettings();
         draftRevision=draft.Revision;
         this.authorize=authorize;
         draft.Validate();
+        var active=draft.Slots.Where(s=>s.Enabled).ToArray();if(active.Length==0)throw new IOException("先勾选本次启动项。");
+        // A single quick-launch input can demand a worktree even when it is the only item for its workspace.
+        // Refuse anything else before the preparation lock or any record exists, so it can never fan out to other slots.
+        if(forceIsolated&&active.Length!=1)throw new IOException("强制独立目录一次只能准备一个启动项。");
+        if(forceIsolated&&draft.DirectoryMode!="isolated")throw new IOException("强制独立目录只能用于“独立工作目录”模式。");
+        if(expectedWorkspaceKey!=null&&active.Length!=1)throw new IOException("核对源工作区身份时一次只能准备一个启动项。");
         Directory.CreateDirectory(Store.Root);
         await using var preparationLock=new FileStream(Store.FilePath("preparation.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
-        var active=draft.Slots.Where(s=>s.Enabled).ToArray();if(active.Length==0)throw new IOException("先勾选本次启动项。");
         if(active.Any(s=>s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory)))throw new IOException("通用组合中有需要单独指定的工作目录，请先在对应 Agent 详情中选择文件夹。");
         var batch=Guid.NewGuid();var plans=new List<LaunchItem>();
         // One shared pool per prepared batch: every agent item joins it, Git preparation stays independently billed.
@@ -137,8 +142,10 @@ public sealed class WorkspacePreparer
             var resource=draft.Resource??new ResourceSettings();
             plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),resource.JobMemoryLimit,PlanningBytes:resource.PlanningBytes,ResourceMode:resource.Mode,SourceSlotId:slot.Id,AgentId:slot.AgentId,PoolId:poolId));
         }
+        // The enqueue-time source identity can go stale if the project directory is replaced; refuse before any preparation/Git write.
+        if(expectedWorkspaceKey!=null&&!StringComparer.Ordinal.Equals(expectedWorkspaceKey,plans[0].Workspace.Key))throw new IOException("源工作区物理身份与进入队列时不一致，已停止准备；请重新确认项目目录。");
         var defaultRoot=Store.FilePath("worktrees");var worktreeRoot=defaultRoot;var nondefaultRoot=false;
-        var isolatedGroups=plans.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1&&draft.DirectoryMode=="isolated").ToArray();
+        var isolatedGroups=plans.GroupBy(p=>p.Workspace.Key).Where(g=>(g.Count()>1||forceIsolated)&&draft.DirectoryMode=="isolated").ToArray();
         if(isolatedGroups.Length>0)
         {
             var physicalDefault=Directory.Exists(defaultRoot)?PhysicalDirectory.Resolve(defaultRoot):null;
@@ -151,7 +158,10 @@ public sealed class WorkspacePreparer
             }
         }
         var canonical=draft.Copy();canonical.Revision=0;
-        var digest=Convert.ToHexString(SHA256.HashData(!nondefaultRoot?JsonSerializer.SerializeToUtf8Bytes(canonical,Store.Json):JsonSerializer.SerializeToUtf8Bytes(new{Draft=canonical,WorktreeRoot=worktreeRoot.ToUpperInvariant()},Store.Json)));
+        // Only a forced preparation changes identity here; the default false input keeps its historical digest bytes.
+        var digest=Convert.ToHexString(SHA256.HashData(forceIsolated
+            ?JsonSerializer.SerializeToUtf8Bytes(new{Draft=canonical,WorktreeRoot=(nondefaultRoot?worktreeRoot:defaultRoot).ToUpperInvariant(),ForceIsolated=true},Store.Json)
+            :!nondefaultRoot?JsonSerializer.SerializeToUtf8Bytes(canonical,Store.Json):JsonSerializer.SerializeToUtf8Bytes(new{Draft=canonical,WorktreeRoot=worktreeRoot.ToUpperInvariant()},Store.Json)));
         var preparationPath=Store.FilePath("preparations/"+digest+".json");
         var record=Store.Read<PreparationRecord>(preparationPath);List<LaunchItem>? effective=null;
         if(record!=null)
@@ -160,8 +170,8 @@ public sealed class WorkspacePreparer
             if(record.Digest!=digest)throw new IOException("准备记录摘要不符，禁止重放。");
             if(!StructurallyValid(record,plans))throw new IOException($"准备记录损坏，禁止重放：{preparationPath}");
             // Reject batch target collisions and changed prepared-directory identities before the repair/baseline/completed writes below.
-            EnsureBatchTargetsDistinct(plans,record.Original[0].BatchId,worktreeRoot,draft.DirectoryMode,activeWorkspaces);
-            EnsureExistingTargetsStable(record,worktreeRoot,record.Original[0].BatchId,draft.DirectoryMode);
+            EnsureBatchTargetsDistinct(plans,record.Original[0].BatchId,worktreeRoot,draft.DirectoryMode,activeWorkspaces,forceIsolated);
+            EnsureExistingTargetsStable(record,worktreeRoot,record.Original[0].BatchId,draft.DirectoryMode,forceIsolated);
             var repaired=false;
             // The draft digest still matches, so slot order is authoritative; keep worktree mapping but re-resolve commands so shim/entry updates are honored.
             for(var i=0;i<record.Original.Count;i++)
@@ -173,15 +183,15 @@ public sealed class WorkspacePreparer
             if(record.SchemaVersion!=1||repaired){record.SchemaVersion=1;Store.Save(preparationPath,record);}
             effective=record.Original.Select(p=>record.Completed.GetValueOrDefault(p.Id)??p).ToList();
         }
-        if(record==null){EnsureBatchTargetsDistinct(plans,batch,worktreeRoot,draft.DirectoryMode,activeWorkspaces);record=new(){SchemaVersion=1,Digest=digest,Original=plans};Store.Save(preparationPath,record);}
+        if(record==null){EnsureBatchTargetsDistinct(plans,batch,worktreeRoot,draft.DirectoryMode,activeWorkspaces,forceIsolated);record=new(){SchemaVersion=1,Digest=digest,Original=plans};Store.Save(preparationPath,record);}
         plans=effective??record.Original.ToList();batch=record.Original[0].BatchId;
-        foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1).ToArray())
+        foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1||forceIsolated).ToArray())
         {
             if(draft.DirectoryMode=="shared")continue;
             if(draft.DirectoryMode=="prepared")throw new IOException("已有目录必须分别指向不同工作目录，请在各项参数中设置目录。");
             if(git.Length==0)throw new IOException("未找到 Git，不能创建独立工作目录。");
             var root=group.First().Workspace.Path;
-            if(!Directory.Exists(Path.Combine(root,".git"))&&!File.Exists(Path.Combine(root,".git")))throw new IOException("同目录多 Agent 需要 Git worktree，或明确选择共享目录。");
+            if(!Directory.Exists(Path.Combine(root,".git"))&&!File.Exists(Path.Combine(root,".git")))throw new IOException(forceIsolated?"强制独立目录需要 Git 仓库，或改用共享目录。":"同目录多 Agent 需要 Git worktree，或明确选择共享目录。");
             var oid=(await Git(root,["rev-parse","--verify","HEAD"],ct)).Trim();
             if(oid.Length is not (40 or 64)||!oid.All(Uri.IsHexDigit))throw new IOException("仓库没有有效基线提交。");
             if(record.Baselines.TryGetValue(group.Key,out var fixedOid))oid=fixedOid;
@@ -231,10 +241,10 @@ public sealed class WorkspacePreparer
         var launchPool=ResourcePolicy.PoolModeOf(resourceSettings)==ResourcePolicy.PoolShared?Guid.NewGuid():(Guid?)null;
         return plans.Select(p=>p.Kind=="git"?p with{Id=Guid.NewGuid(),BatchId=launchBatch}:p with{Id=Guid.NewGuid(),BatchId=launchBatch,PoolId=launchPool}).ToList();
     }
-    private static void EnsureBatchTargetsDistinct(IReadOnlyList<LaunchItem> plans,Guid batch,string worktreeRoot,string mode,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces)
+    private static void EnsureBatchTargetsDistinct(IReadOnlyList<LaunchItem> plans,Guid batch,string worktreeRoot,string mode,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces,bool forceIsolated=false)
     {
         if(mode!="isolated")return;
-        var isolated=plans.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1).SelectMany(g=>g).Select(p=>p.Id).ToHashSet();
+        var isolated=plans.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1||forceIsolated).SelectMany(g=>g).Select(p=>p.Id).ToHashSet();
         // Direct slots never write a worktree, so only isolated targets can mutate disk before the monitor's reserve check.
         if(isolated.Count==0)return;
         // Compare the eventual prepared workspace (actual worktree target), never the destination root: a direct sibling under that root may be valid.
@@ -263,10 +273,10 @@ public sealed class WorkspacePreparer
             }
         }
     }
-    private static void EnsureExistingTargetsStable(PreparationRecord record,string worktreeRoot,Guid batch,string mode)
+    private static void EnsureExistingTargetsStable(PreparationRecord record,string worktreeRoot,Guid batch,string mode,bool forceIsolated=false)
     {
         if(mode!="isolated")return;
-        foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1))
+        foreach(var group in record.Original.GroupBy(p=>p.Workspace.Key).Where(g=>g.Count()>1||forceIsolated))
         {
             var root=group.First().Workspace.Path;var baseline=record.Baselines.GetValueOrDefault(group.Key);
             foreach(var plan in group)

@@ -221,6 +221,7 @@ public partial class MainWindow
             Check($"F12 named template {name} restores its own snapshot",config.Draft.DirectoryMode=="prepared"&&config.Draft.Slots[3].Enabled&&!config.Draft.Slots[0].Enabled);
         }
         await RunTaskChecksAsync(Check);
+        await RunQuickQueueChecksAsync(Check);
         ReviewUiChecks.Run(Check);
         await RunReviewUiChecksAsync(Check);
         await RunMultipaneChecksAsync(Check);

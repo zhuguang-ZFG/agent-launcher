@@ -27,7 +27,7 @@ public sealed class FormWindow : Window
         var footer=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new(0,16,0,0)};DockPanel.SetDock(footer,Dock.Bottom);
         var cancel=new Button{Content="取消",IsCancel=true,Margin=new(0,0,8,0),MinWidth=88};var apply=new Button{Content="应用",IsDefault=true,MinWidth=88};footer.Children.Add(cancel);footer.Children.Add(apply);root.Children.Add(footer);
         var panel=new StackPanel();
-        if(!string.IsNullOrEmpty(note))panel.Children.Add(new TextBlock{Text=note,Margin=new(0,0,0,16),Foreground=(Brush)FindResource("Muted")});
+        if(!string.IsNullOrEmpty(note))panel.Children.Add(new TextBlock{Text=note,TextWrapping=TextWrapping.Wrap,Margin=new(0,0,0,16),Foreground=(Brush)FindResource("Muted")});
         if(actions!=null){var actionRow=new WrapPanel{Margin=new(0,0,0,12)};foreach(var action in actions){var button=new Button{Content=action.Key,Margin=new(0,0,8,4)};button.Click+=(_,_)=>action.Value(this);actionRow.Children.Add(button);}panel.Children.Add(actionRow);}
         var readers=new Dictionary<string,Func<string>>();Control? first=null;
         foreach(var f in fields)

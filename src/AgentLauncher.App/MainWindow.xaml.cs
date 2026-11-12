@@ -356,6 +356,7 @@ public partial class MainWindow : Window
         LaunchHint.Foreground=(Brush)FindResource(LaunchButton.IsEnabled?"Ink":"Muted");
         ReconcileButton.Visibility=status?.ReconcileOffered==true&&!busy?Visibility.Visible:Visibility.Collapsed;
         if(status?.Entries?.Any(e=>!Store.IsTerminal(e))==true)SessionExpander.IsExpanded=true;
+        UpdateQuickQueueButton();
         UpdateMultipaneSummary(admission);UpdatePollingInterval();
     }
     private static string GiB(ulong value)=>(value/(double)ResourcePolicy.GiB).ToString("F1");
@@ -717,9 +718,11 @@ public partial class MainWindow : Window
         closeRequested=true;var restartTimer=timer.IsEnabled;timer.Stop();IsEnabled=false;UpdateLaunch();
         try
         {
+            queueEnabled=false;taskTimer.Stop();queueCancellation?.Cancel();
             launchCancellation?.Cancel();
             // Keep the Dispatcher alive until both launch compensation and an explicit stop have settled.
             await GuardAsync(()=>launchTask);await GuardAsync(()=>cancelTask);
+            await GuardAsync(()=>quickQueueTask);await GuardAsync(()=>queuePumpTask);
             await commandCheckTask;await saveTask;
             if(saveError!=null&&MessageBox.Show(this,"配置尚未保存："+saveError+"\n仍要关闭？","保存失败",MessageBoxButton.YesNo)!=MessageBoxResult.Yes)return;
             closing=true;await Dispatcher.InvokeAsync(Close,DispatcherPriority.Background);

@@ -13,6 +13,9 @@ public sealed class TaskStore
     public TaskBook Load()
     {
         var book = Store.Read<TaskBook>(path) ?? new TaskBook();
+        // Version 1 predates quick-launch metadata; an absent field means "not a quick launch", so upgrade in memory only.
+        // The file is rewritten as version 2 exclusively by the normal Update path after the caller's expected revision matches.
+        if (book.SchemaVersion == 1) book.SchemaVersion = TaskSchema.Current;
         book.Validate();
         return book;
     }

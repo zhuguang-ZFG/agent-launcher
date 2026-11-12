@@ -368,11 +368,11 @@ internal sealed class Monitor : IDisposable
             if(decision.Kind==AdmissionKind.Deny)waivers.InvalidatePlan(binding.Digest);
             return waivers.Issue(decision,binding.Revision,binding.Hash,binding.Digest,binding.Slots,sample?.At??DateTimeOffset.UtcNow,binding.ConfigurationIdentity) with{Memory=sample,Epoch=epoch,RootCpuRate=rootCpuRate};
         }
-        if(request.Operation=="reserve")
+        if(request.Operation is "reserve" or "reserve-task")
         {
             if(request.WaiverId!=null)Refresh(forceSample:true);
             var items=request.Items??[];
-            var binding=BindAuthority(request,items,consumeToken:request.WaiverId!=null);
+            var binding=request.Operation=="reserve-task"?BindTaskAuthority(request,items):BindAuthority(request,items,consumeToken:request.WaiverId!=null);
             if(AdmissionBlockedReason() is {} reason)throw new IOException(reason);
             if(items.Length is <1 or >ResourcePolicy.MaxSlots||items.Select(i=>i.Id).Distinct().Count()!=items.Length)throw new IOException("启动项数量或 ID 无效。");
             var previous=ledger.Entries.Where(e=>items.Any(i=>i.Id==e.Plan.Id)).ToArray();
@@ -401,7 +401,7 @@ internal sealed class Monitor : IDisposable
                 waivers.InvalidatePlan(binding.Digest);
                 throw new IOException(decision.Reason);
             }
-            if(decision.Kind==AdmissionKind.RequireWaiver||request.WaiverId!=null)ValidateStableSlots(request,items,binding);
+            if(request.Operation!="reserve-task"&&(decision.Kind==AdmissionKind.RequireWaiver||request.WaiverId!=null))ValidateStableSlots(request,items,binding);
             if(decision.Kind==AdmissionKind.RequireWaiver&&binding.Consumed!=true)return new(false,"需要有效确认授权。",Memory:sample,Epoch:epoch,Decision:AdmissionKind.RequireWaiver.ToString(),RootCpuRate:rootCpuRate);
             var policy=binding.Policy;
             var poolIds=items.Where(i=>i.PoolId is not null).Select(i=>i.PoolId!.Value).Distinct().ToArray();
@@ -629,6 +629,40 @@ internal sealed class Monitor : IDisposable
         ResourcePolicy.ValidateSettings(settings,sample.Total,sample.CommitLimit);
         return ResourcePolicy.SnapshotFor(settings,sample.Total,sample.CommitLimit);
     }
+    private AuthorityBinding BindTaskAuthority(Request request,LaunchItem[] items)
+    {
+        if(sample==null||request.TaskEntryId is not {} entryId||items.Length!=1||request.WaiverId!=null)
+            throw new IOException("队列预约缺少单项授权身份，或包含不支持的确认令牌。");
+        var book=new TaskStore(Store.FilePath("tasks.json")).Load();
+        var queued=book.Queue.SingleOrDefault(entry=>entry.Id==entryId)??throw new IOException("队列项已移除或执行，拒绝重复预约。");
+        var task=book.Tasks.Single(entry=>entry.Id==queued.TaskId);
+        var plan=items[0];
+        if(task.Revision!=queued.TaskRevision||plan.SourceSlotId!=task.Id||plan.Kind!="agent"||plan.AgentId!=queued.AgentId||plan.RetryOf!=null
+            ||plan.Shared!=(queued.DirectoryMode=="shared")||plan.Command.Executable!=queued.Command.Executable||plan.Command.Adapter!=queued.Command.Adapter
+            ||!plan.Command.Arguments.SequenceEqual(queued.Command.Arguments)||AgentProbe.Fingerprint(plan.Command.Executable)!=queued.ProgramFingerprint)
+            throw new IOException("队列预约与冻结的任务或程序不一致。");
+        if(book.Attempts.Count(run=>!run.Terminal)>=book.MaxRunning)throw new IOException("队列并发上限已满。");
+        var source=PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(queued.Project).Path);
+        if(queued.QuickLaunch is {} quick&&source.Key!=quick.WorkspaceKey)throw new IOException("队列源目录物理身份已变化。");
+        var resume=QueuePolicy.CanDispatchResume(book,queued,source.Key,queued.ProgramFingerprint);
+        if(!resume.Allowed)throw new IOException(resume.Reason);
+        if(queued.QuickLaunch is {IsolateWorkspace:true} isolated)
+        {
+            var root=PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(isolated.WorktreeRoot)?Store.FilePath("worktrees"):isolated.WorktreeRoot).Path.TrimEnd(Path.DirectorySeparatorChar)+Path.DirectorySeparatorChar;
+            if(plan.Workspace.Key==source.Key||!plan.Workspace.Path.StartsWith(root,StringComparison.OrdinalIgnoreCase))
+                throw new IOException("队列独立目录不属于已确认的工作目录根。");
+        }
+        else if(plan.Workspace.Key!=source.Key||PhysicalDirectory.Resolve(plan.Cwd).Key!=PhysicalDirectory.Resolve(queued.Project).Key)
+            throw new IOException("队列预约工作目录与冻结目录不一致。");
+        ResourcePolicy.ValidateSettings(queued.Resource,sample.Total,sample.CommitLimit);
+        var policy=ResourcePolicy.SnapshotFor(queued.Resource,sample.Total,sample.CommitLimit);
+        if(rootCpuRate is {} cpu&&cpu!=policy.CpuRate)throw new IOException("队列 CPU 配置与当前根 Job 不一致，现有 Job 不会修改。");
+        var hash=ResourcePolicy.PolicyHash(policy);var digest=ResourcePolicy.PlanDigest(items);
+        if(request.Policy!=policy||request.PolicyHash!=hash||request.PlanDigest!=digest)throw new IOException("队列策略或计划摘要与冻结授权不一致。");
+        ResourcePolicy.ValidateLaunchItem(plan,policy,sample.Total);
+        return new(policy,hash,digest,queued.TaskRevision,[task.Id],false,null,"queue:"+queued.Id.ToString("N"));
+    }
+
     private AuthorityBinding BindAuthority(Request request,LaunchItem[] items,bool consumeToken)
     {
         if(sample==null)throw new IOException("资源读数不可用，暂停创建。");

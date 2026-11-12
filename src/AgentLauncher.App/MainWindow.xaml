@@ -161,6 +161,7 @@
      <StackPanel x:Name="FooterMessage" VerticalAlignment="Center" Margin="0,0,16,0"><TextBlock x:Name="LaunchHint" Text="先选择项目文件夹"/><DockPanel Margin="0,4,0,0"><Button x:Name="RetrySaveButton" DockPanel.Dock="Left" Content="重试保存" Style="{StaticResource QuietButton}" Padding="8,2" Margin="0,0,8,0" Visibility="Collapsed" Click="RetrySaveClick" AutomationProperties.Name="重试保存"/><TextBlock x:Name="SaveStatus" Text="配置自动保存" Style="{StaticResource Caption}" VerticalAlignment="Center"/></DockPanel></StackPanel>
      <WrapPanel x:Name="FooterActions" Grid.Column="1" VerticalAlignment="Center">
       <Button x:Name="CancelButton" Content="停止后续步骤" Style="{StaticResource QuietButton}" IsEnabled="False" Click="CancelClick" Margin="0,0,8,0"><Button.Visibility><Binding Path="IsEnabled" RelativeSource="{RelativeSource Self}" Converter="{StaticResource BooleanVisibility}"/></Button.Visibility></Button>
+      <Button x:Name="QueueQuickButton" Content="按资源依次启动" Click="QueueQuickClick" AutomationProperties.AutomationId="QueueQuick" Margin="0,0,8,0" ToolTip="将勾选项固定为任务，按并发 1 等待资源；不改变原配置或终止活动任务"/>
       <Button x:Name="LaunchButton" Content="启动 1 个 Agent" Style="{StaticResource PrimaryButton}" MinWidth="168" Click="LaunchClick" AutomationProperties.AutomationId="Launch"/>
      </WrapPanel>
     </Grid>

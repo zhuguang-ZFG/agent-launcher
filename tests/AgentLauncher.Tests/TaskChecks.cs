@@ -213,7 +213,216 @@ internal static class TaskChecks
             using var reacquired = Task.Run(() => store.TryAcquireQueueGate()).GetAwaiter().GetResult();
             Assert(reacquired is not null, "queue dispatch gate stayed locked after release");
         });
+
+        test("ACC-B11 quick launch freezes resolved raw argv and one task per enabled draft slot in order", () =>
+        {
+            var book = new TaskBook();
+            var first = QuickSlot("omp", "说明一", "--model", "a b");
+            var second = QuickSlot("codex", "说明二", "--sandbox", "workspace-write");
+            var draft = QuickDraft("shared", first, new Slot { Enabled = false, AgentId = "pi" }, second);
+            var items = new[]
+            {
+                QuickItem(second, temp, "volume:second", "C:\\resolved\\codex.exe", new[] { "--resolved", "x y" }),
+                QuickItem(first, temp, "volume:first", "C:\\resolved\\omp.exe", new[] { "--flag", "literal value" })
+            };
+            var draftBefore = JsonSerializer.Serialize(draft, Store.Json);
+            var itemsBefore = JsonSerializer.Serialize(items, Store.Json);
+            var ids = TaskBookOps.EnqueueQuickLaunch(book, draft, items, Path.Combine(temp, "worktrees"));
+
+            Assert(ids.Count == 2 && book.Tasks.Select(task => task.Id).SequenceEqual(ids), "quick launch did not return one task id per enabled slot");
+            Assert(book.Tasks[0].QuickLaunch!.Position == 1 && book.Tasks[0].QuickLaunch!.SlotId == first.Id && book.Tasks[1].QuickLaunch!.Position == 3 && book.Tasks[1].QuickLaunch!.SlotId == second.Id, "quick launch order or original position changed");
+            Assert(book.Tasks[0].Name == "Omp · 1" && book.Tasks[1].Name == "Codex · 3", "quick launch names lost the display name or original position");
+            Assert(book.Tasks[0].Profile.Executable == "C:\\raw\\omp.exe" && book.Tasks[0].Profile.Arguments.SequenceEqual(new[] { "--model", "a b" }), "quick launch did not freeze the raw profile arguments");
+            Assert(book.Tasks[0].Description == "说明一" && book.Tasks[0].Project == temp && book.Tasks[0].DirectoryMode == "shared", "quick launch lost the note, project, or directory mode");
+            Assert(book.Tasks[0].Resource!.Pool == ResourcePolicy.PoolIndependent && book.Tasks[0].Resource!.PoolMemoryLimit is null && book.Tasks[0].Resource!.JobMemoryLimit == draft.Resource.JobMemoryLimit, "quick launch did not freeze an independent resource pool");
+            var entry = book.Queue[0];
+            Assert(entry.QuickLaunch == book.Tasks[0].QuickLaunch && entry.Command.Executable == "C:\\resolved\\omp.exe" && entry.Command.Arguments.SequenceEqual(new[] { "--flag", "literal value" }), "queue entry lost the resolved command or frozen metadata");
+            Assert(entry.QuickLaunch!.Key.Length == 64 && entry.QuickLaunch!.Key.All(Uri.IsHexDigit), "quick launch key is not 64 hex characters");
+            Assert(entry.Sequence == 1 && book.Queue[1].Sequence == 2 && book.NextSequence == 2 && book.MaxRunning == 1, "quick launch did not keep FIFO order or reset the limit");
+            Assert(book.Attempts.Count == 0 && book.Tasks.All(task => task.DependsOn.Count == 0), "quick launch created an attempt or dependency");
+            Assert(JsonSerializer.Serialize(draft, Store.Json) == draftBefore && JsonSerializer.Serialize(items, Store.Json) == itemsBefore, "quick launch mutated its inputs");
+            book.Validate();
+            var restored = JsonSerializer.Deserialize<TaskBook>(JsonSerializer.Serialize(book, Store.Json), Store.Json)!;
+            restored.Validate();
+            Assert(restored.Tasks[1].QuickLaunch == book.Tasks[1].QuickLaunch && restored.Queue[1].QuickLaunch == book.Queue[1].QuickLaunch, "quick launch metadata did not round-trip");
+        });
+
+        test("ACC-B12 quick launch forces isolation only for duplicate workspace groups and rejects prepared duplicates", () =>
+        {
+            var book = new TaskBook();
+            var repoA = QuickSlot("omp", "甲", "--a");
+            var repoB = QuickSlot("codex", "乙", "--b");
+            var other = QuickSlot("pi", "丙", "--c");
+            var draft = QuickDraft("isolated", repoA, repoB, other);
+            var items = new[]
+            {
+                QuickItem(repoA, temp, "volume:repo", "C:\\resolved\\omp.exe", Array.Empty<string>()),
+                QuickItem(repoB, temp, "volume:repo", "C:\\resolved\\codex.exe", Array.Empty<string>()),
+                QuickItem(other, temp, "volume:other", "C:\\resolved\\pi.exe", Array.Empty<string>())
+            };
+            var root = Path.Combine(temp, "worktrees");
+            TaskBookOps.EnqueueQuickLaunch(book, draft, items, root);
+            Assert(book.Tasks[0].QuickLaunch!.IsolateWorkspace && book.Tasks[1].QuickLaunch!.IsolateWorkspace && !book.Tasks[2].QuickLaunch!.IsolateWorkspace, "per-slot isolation flag did not follow duplicate workspace keys");
+            Assert(book.Queue.All(entry => entry.QuickLaunch!.WorktreeRoot == root), "frozen worktree root was not stored");
+
+            var preparedBook = new TaskBook();
+            var prepared = QuickDraft("prepared", repoA, repoB);
+            var preparedItems = new[]
+            {
+                QuickItem(repoA, temp, "volume:repo", "C:\\resolved\\omp.exe", Array.Empty<string>()),
+                QuickItem(repoB, temp, "volume:repo", "C:\\resolved\\codex.exe", Array.Empty<string>())
+            };
+            var before = JsonSerializer.Serialize(preparedBook, Store.Json);
+            AssertThrows(() => TaskBookOps.EnqueueQuickLaunch(preparedBook, prepared, preparedItems, root), "prepared mode accepted duplicate workspace keys");
+            Assert(JsonSerializer.Serialize(preparedBook, Store.Json) == before, "rejected prepared import changed the book");
+        });
+
+        test("ACC-B13 quick launch refuses an identical active import without mutation", () =>
+        {
+            var book = new TaskBook();
+            var slot = QuickSlot("omp", "重复", "--once");
+            var draft = QuickDraft("shared", slot);
+            var item = QuickItem(slot, temp, "volume:dup", "C:\\resolved\\omp.exe", new[] { "--resolved" });
+            var root = Path.Combine(temp, "worktrees");
+            var ids = TaskBookOps.EnqueueQuickLaunch(book, draft, new[] { item }, root);
+            var queued = JsonSerializer.Serialize(book, Store.Json);
+            AssertThrows(() => TaskBookOps.EnqueueQuickLaunch(book, draft, new[] { item }, root), "identical queued import was accepted");
+            Assert(JsonSerializer.Serialize(book, Store.Json) == queued, "rejected queued import changed the book");
+            TaskBookOps.StartRun(book, book.Queue.Single(), Guid.NewGuid(), Guid.NewGuid(), item.Workspace.Key);
+            var running = JsonSerializer.Serialize(book, Store.Json);
+            AssertThrows(() => TaskBookOps.EnqueueQuickLaunch(book, draft, new[] { item }, root), "identical import was accepted while a run was live");
+            Assert(JsonSerializer.Serialize(book, Store.Json) == running, "rejected running import changed the book");
+            TaskBookOps.FinishRun(book, book.Attempts.Single().AttemptId, "Cancelled", "测试结束");
+            var again = TaskBookOps.EnqueueQuickLaunch(book, draft, new[] { item }, root);
+            Assert(again.Count == 1 && again[0] != ids[0] && book.Tasks.Count == 2, "terminal import was not re-importable as new tasks");
+        });
+
+        test("ACC-B14 quick launch stages invalid items and capacity failures without mutating the book", () =>
+        {
+            var slotA = QuickSlot("omp", "甲", "--a");
+            var slotB = QuickSlot("codex", "乙", "--b");
+            var slotC = QuickSlot("pi", "丙", "--c");
+            var draft = QuickDraft("shared", slotA, slotB, slotC);
+            var valid = new[]
+            {
+                QuickItem(slotA, temp, "volume:a", "C:\\resolved\\a.exe", Array.Empty<string>()),
+                QuickItem(slotB, temp, "volume:b", "C:\\resolved\\b.exe", Array.Empty<string>()),
+                QuickItem(slotC, temp, "volume:c", "C:\\resolved\\c.exe", Array.Empty<string>())
+            };
+            var root = Path.Combine(temp, "worktrees");
+            var book = new TaskBook();
+            var existing = TaskBookOps.Create(book, "旧任务", temp, "omp", new AgentProfile(), "", Array.Empty<string>(), "shared", null, 0);
+            TaskBookOps.Enqueue(book, existing.Id, new CommandSpec("C:\\old\\omp.exe", new[] { "--old" }, "exe"), new string('Z', 64));
+            book.MaxRunning = 3;
+            var before = JsonSerializer.Serialize(book, Store.Json);
+            AssertThrows(() => TaskBookOps.EnqueueQuickLaunch(book, draft, new[] { valid[0], valid[1] with { Command = new CommandSpec("", Array.Empty<string>(), "exe") }, valid[2] }, root), "an invalid later command was accepted");
+            Assert(JsonSerializer.Serialize(book, Store.Json) == before, "invalid later item changed the book");
+            AssertThrows(() => TaskBookOps.EnqueueQuickLaunch(book, draft, new[] { valid[0], valid[1] with { SlotId = Guid.NewGuid() }, valid[2] }, root), "a mismatched slot input was accepted");
+            AssertThrows(() => TaskBookOps.EnqueueQuickLaunch(book, draft, new[] { valid[0], valid[2] }, root), "a partial input set was accepted");
+            Assert(JsonSerializer.Serialize(book, Store.Json) == before, "rejected input sets changed the book");
+
+            var full = new TaskBook { MaxRunning = 2 };
+            while (full.Tasks.Count < TaskSchema.MaxTasks) full.Tasks.Add(new TaskCard { Id = Guid.NewGuid(), Revision = 1, Name = "占位", Project = temp, AgentId = "omp", Profile = new AgentProfile(), UpdatedAt = DateTimeOffset.UtcNow });
+            var fullBefore = JsonSerializer.Serialize(full, Store.Json);
+            AssertThrows(() => TaskBookOps.EnqueueQuickLaunch(full, draft, valid, root), "task capacity was exceeded");
+            Assert(JsonSerializer.Serialize(full, Store.Json) == fullBefore, "task capacity rejection changed the book");
+
+            var crowded = new TaskBook();
+            while (crowded.Queue.Count < TaskSchema.MaxQueueEntries) crowded.Queue.Add(new QueueEntry
+            {
+                Id = Guid.NewGuid(), TaskId = Guid.NewGuid(), TaskRevision = 1, Priority = 0, Sequence = crowded.Queue.Count + 1,
+                EnqueuedAt = DateTimeOffset.UtcNow, Project = temp, AgentId = "omp", Command = new CommandSpec("C:\\old\\omp.exe", Array.Empty<string>(), "exe"),
+                ProgramFingerprint = new string('0', 64), DirectoryMode = "shared", Resource = new ResourceSettings(), DependsOn = []
+            });
+            var crowdedBefore = JsonSerializer.Serialize(crowded, Store.Json);
+            AssertThrows(() => TaskBookOps.EnqueueQuickLaunch(crowded, draft, valid, root), "queue capacity was exceeded");
+            Assert(JsonSerializer.Serialize(crowded, Store.Json) == crowdedBefore, "queue capacity rejection changed the book");
+        });
+
+        test("ACC-B15 quick launch metadata freezes at enqueue and detaches only on launch-relevant edits", () =>
+        {
+            var book = new TaskBook();
+            var slot = QuickSlot("omp", "元数据", "--meta");
+            var draft = QuickDraft("isolated", slot);
+            var item = QuickItem(slot, temp, "volume:meta", "C:\\resolved\\omp.exe", new[] { "--resolved" });
+            var id = TaskBookOps.EnqueueQuickLaunch(book, draft, new[] { item }, Path.Combine(temp, "worktrees")).Single();
+            var task = book.Tasks.Single();
+            Assert(task.Copy().QuickLaunch == task.QuickLaunch && book.Queue.Single().QuickLaunch == task.QuickLaunch, "task or entry copy detached the frozen metadata");
+            TaskBookOps.Edit(book, id, edit => edit.Description = "显示修改");
+            Assert(book.Tasks.Single().QuickLaunch == task.QuickLaunch && book.Queue.Count == 1 && book.Tasks.Single().Revision == 1, "display-only edit dropped metadata or the queue");
+            var tampered = book.Queue.Single().Copy();
+            tampered.QuickLaunch = tampered.QuickLaunch! with { WorkspaceKey = "volume:tampered" };
+            var before = JsonSerializer.Serialize(book, Store.Json);
+            AssertThrows(() => TaskBookOps.StartRun(book, tampered, Guid.NewGuid(), Guid.NewGuid(), item.Workspace.Key), "tampered metadata dispatched");
+            Assert(JsonSerializer.Serialize(book, Store.Json) == before, "rejected tampered dispatch changed history");
+            TaskBookOps.Edit(book, id, edit => { edit.Resource!.Pool = ResourcePolicy.PoolShared; edit.Resource.PoolMemoryLimit = 4 * ResourcePolicy.GiB; });
+            Assert(book.Tasks.Single().QuickLaunch is null && book.Queue.Count == 0 && book.Tasks.Single().Revision == 2, "pool edit retained frozen metadata or the queued entry");
+            var invalid = book.Tasks.Single().Copy();
+            invalid.QuickLaunch = new QuickLaunchSource("short", Guid.NewGuid(), 1, "volume:x", temp, false);
+            AssertThrows(invalid.Validate, "task validation accepted an invalid quick launch key");
+            var fresh = new TaskBook();
+            var freshId = TaskBookOps.EnqueueQuickLaunch(fresh, draft, new[] { item }, Path.Combine(temp, "worktrees")).Single();
+            fresh.Tasks.Single().QuickLaunch = new QuickLaunchSource(new string('0', 63), freshId, 1, "volume:x", temp, false);
+            AssertThrows(fresh.Validate, "book validation accepted invalid task metadata");
+        });
+
+        test("ACC-B16 task store migrates schema1 in memory only and refuses unsupported versions without writing", () =>
+        {
+            var path = Path.Combine(temp, "tasks-migrate", "tasks.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var legacy = JsonSerializer.Serialize(new
+            {
+                SchemaVersion = 1,
+                Revision = 3,
+                MaxRunning = 1,
+                NextSequence = 0,
+                Tasks = new[]
+                {
+                    new
+                    {
+                        Id = Guid.NewGuid(), Revision = 1, Name = "旧任务", Project = temp, AgentId = "omp",
+                        Profile = new { Executable = "C:\\old\\omp.exe", Arguments = new[] { "--old", "a b" } },
+                        Description = "旧说明", Acceptance = Array.Empty<object>(), DirectoryMode = "shared",
+                        DependsOn = Array.Empty<Guid>(), Priority = 0, UpdatedAt = DateTimeOffset.UtcNow
+                    }
+                },
+                Queue = Array.Empty<object>(),
+                Attempts = Array.Empty<object>()
+            }, Store.Json);
+            File.WriteAllText(path, legacy);
+            var store = new TaskStore(path);
+            var loaded = store.Load();
+            Assert(loaded.SchemaVersion == TaskSchema.Current && loaded.Tasks.Count == 1 && loaded.Tasks[0].Profile.Arguments.SequenceEqual(new[] { "--old", "a b" }) && loaded.Tasks[0].QuickLaunch is null, "schema1 book did not load with its old content");
+            Assert(File.ReadAllText(path) == legacy, "loading a schema1 book rewrote the file");
+            var updated = store.Update(3, book => book.MaxRunning = 2);
+            Assert(updated.SchemaVersion == TaskSchema.Current && store.Load().MaxRunning == 2 && File.ReadAllText(path).Contains("\"SchemaVersion\":2", StringComparison.Ordinal), "update path did not persist the migrated schema");
+            var future = legacy.Replace("\"SchemaVersion\":1", "\"SchemaVersion\":3", StringComparison.Ordinal);
+            File.WriteAllText(path, future);
+            AssertThrows(() => store.Load(), "a future schema was accepted");
+            AssertThrows(() => store.Update(4, book => book.MaxRunning = 1), "a future schema was overwritten");
+            Assert(File.ReadAllText(path) == future, "failed future load rewrote the file");
+            AssertThrows(() => new TaskBook { SchemaVersion = 1 }.Validate(), "the old schema version still validated as writable");
+        });
     }
+
+    private static Draft QuickDraft(string mode, params Slot[] slots) => new()
+    {
+        Project = "",
+        DirectoryMode = mode,
+        Slots = [.. slots],
+        Resource = new ResourceSettings { Pool = ResourcePolicy.PoolShared, PoolMemoryLimit = 4 * ResourcePolicy.GiB }
+    };
+
+    private static Slot QuickSlot(string agent, string note, params string[] rawArguments) => new()
+    {
+        Enabled = true,
+        AgentId = agent,
+        Note = note,
+        Profiles = new() { [agent] = new AgentProfile { Executable = "C:\\raw\\" + agent + ".exe", Arguments = rawArguments } }
+    };
+
+    private static QuickLaunchItem QuickItem(Slot slot, string project, string workspaceKey, string executable, string[] arguments) =>
+        new(slot.Id, project, new WorkspaceIdentity(Path.Combine(project, "ws", workspaceKey.Replace(':', '_')), workspaceKey), new CommandSpec(executable, arguments, "exe"), new string('Q', 64));
 
     private static void Assert(bool condition, string message)
     {

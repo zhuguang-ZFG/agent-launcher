@@ -706,3 +706,28 @@ powershell -NoProfile -File scripts/test.ps1
 - 修复只拆分请求读取与回复发送各自的 3 秒时间窗；客户端 8 秒上限、资源策略、授权签名与不自动重放保持不变。相同窄回归新 Worker 通过；随后实际 worktree 准备/复用/替换拒绝/冲突检查 **7/7** 通过。证据 `artifacts/ipc-deadline-regression.json`（含旧 RED、新 GREEN 和工作区场景）；新增 RuntimeReviewChecks 断言保留在原集成入口，临时探针源码已删除。测试增量仍需操作员审查。
 - 补丁后的候选目录仍为 `artifacts/preview-vibe-review`，重新生产构建与双编码标记扫描 CLEAN；本次产物替换上节候选哈希：App `80bbefe028023d269f14975adb0fa8c8577f1724a4efb54055ed78883c18c6f1`、Windows `161a96bbbffe262018bc8eb6487a6ef287603e0a1b6f2fffbe554a03e4504f29`、Core `640bd068f35ad21b6ea53eec8326e3986344979fc0e019bb94587807b76f9ae5`、Worker `11a0aa651f80a75ab2b9ef25ab2698ed1475905e23bfa220c5ec116a34edca95`。生产入口未切换。
 
+## 27. 本机入口切换与 S0.6 准入检查（2026-11-12）
+
+- 源码仍为 `5c04a3d7a311e1a8d73f4b6f40740eef24f7a937`；复核 `artifacts/preview-vibe-review` 四个程序集哈希与 §26.2 / `verification.json` 一致。既有完整 SHA CI 成功证据为 run `43079229748`，本轮未改产品源码、固定测试、runner 或 CI policy，未重复执行已通过的完整 gate。
+- S0.5：核对没有启动器 App/Worker 存活、生产账本 16 项均为 Settled 且无保留池后，将 `D:\Desktop\多 Agent 启动器.lnk` 从旧 `artifacts/preview` 指向完整 `artifacts/preview-vibe-review`，工作目录同步，参数保持空。旧快捷方式完整备份在 `artifacts/delivery-s05-5c04a3d-20261112-073138/previous-entry.lnk`；未覆盖旧发布目录。候选仍标注稳定性观察未完成，不标稳定版。
+- 实际通过快捷方式打开 WPF，核对进程路径为候选 App；界面显示真实内存不足并禁止启动，任务队列保持「队列已暂停」。仅展开队列查看后正常关闭本次窗口，未点击启动/执行队列，未启动或终止用户 Agent。关闭后 App/Worker 数为零，生产配置、账本、全部回执与 `.bak` 等 **61 个文件 SHA-256 全部不变**。
+- 首次界面采集使用 `ErrorText` 定位器得到 ElementNotFound：实际无启动错误，空错误条折叠，不在 UIA 树中；改为记录实际树与截图，不重启程序、不修改产品。此为临时采集输入失配，不是应用故障。新增的内存/界面采集输入仍需操作员审查，不能替代配置验证基线。
+- S0.6 **受阻，0/3 轮启动**：真实采样可用物理内存 `2,420,641,792` bytes（约 2.25 GiB）；现有实用模式每项规划 768 MiB、默认物理余量 2 GiB，双独立任务至少需 `3,758,096,384` bytes（3.50 GiB），此外仍需现场 CPU/提交余量等准入通过。没有减少规划、降低门槛、使用 fake sample 或结束现有进程来凑观测。短时打开界面不计入 30 分钟 × 3 轮；S5 前置仍未满足，保持未实现、未启用。
+- 原始证据：`artifacts/delivery-s05-5c04a3d-20261112-073138/{preflight.json,surface-and-preflight.json,result.json}`，实际截图 `main-window.png`、`task-queue-stopped.png`。GitNexus 当前仅有无关的 `clideck`（落后 11 commits），本仓库 context/impact 明确不可用；未重建无关索引。LSP 无服务。
+- `task_verify run` 返回 **unverified / project-or-git-baseline-unavailable，checks=[]**；operator-configured passed/failed 均无执行项。以上为实际入口/UI 与数据保全的手动证据，临时采集输入请操作员审查。本轮仅本地更新本节与交付产物，未新建提交或推送；不把文档变更宣称为新的已验证代码版本。
+
+## 28. 快速启动转资源等待队列与空队列节能（2026-11-12）
+
+- 新增「按资源依次启动」：先复制当前启用槽与各自 raw profile/目录/备注/资源，解析命令和物理身份；确认后一次原子导入任务并以并发 1 执行。取消不写任务，重复点击不重复保存，相同快照有等待/非终态尝试时拒绝重复导入。确认框说明已有队列也会继续，以及只有新任务副本使用独立额度；原快启配置、单项限制和活动 Job/池不修改。
+- 不能只把多槽拆开：原 `WorkspacePreparer` 只在同批相同工作区多项时创建 worktree，拆项会丢失隔离。新增 trailing `forceIsolated` / `expectedWorkspaceKey`，只接受单项 isolated，并在写准备记录/Git 前核对源身份；原 default false 的准备身份保持兼容。每项实际获准后才独立准备，完成时绑定真实工作目录，后续审查/续接不会误指向源仓库。
+- `TaskSchema` 升为 2；schema 1 只读迁移内存，下一次正常 Update 才持久化。新 metadata 的快照、修改失效、重复/容量/非法后项原子拒绝已有回归。新 `reserve-task` 绑定已保存的 `TaskEntryId`，monitor 自己读取任务资源并核对命令、程序指纹、物理身份、根 CPU 与并发；旧 Worker 不会把新队列请求静默按快启执行。原硬保护与软确认策略不变。
+- 准备前先判资源；不足只保存等待原因，不创建 worktree/Agent。准备结束后重新获取 monitor 状态；暂停/关闭携带取消并等待当前派发，预约结果不明立即停队列，不自动补发；撤销只对确认 Pending 的项有效，已运行进程不终止。
+- **已复现并修复的自身开销**：旧版打开空队列窗口时无 monitor，点击「执行队列」却生成 monitor，`red-empty-queue.json` 保存 RED；首个分歧在 `DispatchNextAsync` 的空队列判断之前调用 Refresh。修复为无等待项且无非终态尝试时停 timer，不发状态请求、不创建 monitor。新 WPF 同路径断言通过。保留活动/未知尝试核对，不从进程数猜测工具可回收。
+- 窄验证（实际执行）：任务模型 **15/15**，真实 Git/worktree 准备 **12/12**，既有任务/续接与新快启 WPF **46/46**；记录 `artifacts/quick-queue-20261112-080514/focused-results.json`。旧版缺少新入口的 RED 为 `red-ui.json` / `old-missing-queue-action.png`。
+- **实际资源恢复场景**：隔离测试根保留两条未领取预约模拟预算占用，真实窗口确认导入后两项都等待：0 尝试、无 worktree、无执行日志、原配置 SHA-256 不变。只撤销这两条测试预约后，两个受控 Node 程序自动先后经真实 Terminal/Worker/Job 执行，事件顺序 `start/end/start/end`，工作目录不同且均为 linked worktree；空参数、中文空格、`; &` 与末尾反斜杠保留，源仓库文件未变，两项均 exit 0 后进入 Review。`reserve-task` 的篡改参数请求被拒绝。证据 `resource-wait.json`、`recovery-result.json`、`tamper.log` 及 `confirmation.png` / `resource-waiting.png` / `serial-completed.png`。
+- 采集故障单独保留：第一次驱动用了 stdout PIPE，子 monitor 继承输出导致采集进程等 EOF；确认 `blocker-ids.json` 与两条 Pending 已落盘后继续，未重发预约，改用文件接收输出。另一次 UIA 误把确认框当顶级窗口；实际为主窗口的 owned descendant，按实际控件树继续，没有重启或改产品。
+- 边界：以上 fake sample 仅用于隔离的受控轻量程序，不能证明真实 Agent 内存节省或替代 S0.6 的双任务 30 分钟 × 3 轮。既有 Runner 会等全部 Job 后代排干，父进程退出不证明工具可安全回收；本轮没有杀用户工具、共享 MCP 或启用 S5。新增/修改回归与临时 runner 输入仍需操作员审查，原测试断言与 `scripts/test.ps1` / CI policy / `ResourcePolicy.cs` 未改变。
+- 本地完整 `scripts/test.ps1` 首次运行：原生/模型 **114/114**，集成 **110 passed / 0 failed**；WPF 被原 runner 的 30 秒上限终止，原型/浏览器阶段当时未执行。`artifacts/ui/ui-checks.json` 为旧文件，未拿它计本轮成功。日志 `full-gate.log`（PowerShell UTF-16）。随后独立原 `--ui-check` 流程 **213/213、Dpi 120、exit 0**，新目录 `full-ui-diagnose/ui-checks.json`；未修改任何断言或超时。时间戳显示失败轮约第 22 秒进入新夹具、成功轮约第 16 秒，新夹具各约 1.6 / 1.8 秒；支持累计运行时间差异，不足以把具体主机负载当已证明根因。
+- `task_verify run` 为 **unverified / project-or-git-baseline-unavailable，checks=[]**；没有 operator-configured passed/failed 项。待评审输入清单 `review-inputs.json`、差异 `test-changes.patch`、临时源归档 `verification-inputs.zip`；临时 probe 源码已从工作目录移除。固定 runner/CI 与资源策略哈希不变。
+- 补执行未到达的 `node --test tests/prototype.test.cjs` **5/5** 与 `node scripts/test-browser.mjs` **5/5**，均 exit 0。顺序生产构建 `scripts/build.ps1 -Output ./artifacts/preview-quick-queue` 成功，完整 App/Worker 同目录；测试标记检查与程序集哈希落在该目录 `verification.json`。没有把本地分段绿色写成首次完整脚本通过。
+

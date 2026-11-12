@@ -21,6 +21,8 @@ public partial class MainWindow
     private bool queueEnabled;
     private bool queuePumping;
     private bool renderingTasks;
+    private Task queuePumpTask = Task.CompletedTask;
+    private CancellationTokenSource? queueCancellation;
 
     private async Task LoadTasksAsync()
     {
@@ -61,7 +63,7 @@ public partial class MainWindow
     private void RenderTasks()
     {
         renderingTasks = true;
-        try { RenderTaskCards(); } finally { renderingTasks = false; }
+        try { RenderTaskCards(); } finally { renderingTasks = false; UpdateQuickQueueButton(); }
     }
 
     private void RenderTaskCards()
@@ -85,9 +87,9 @@ public partial class MainWindow
         var hold = book.Queue.OrderByDescending(entry => entry.Priority).ThenBy(entry => entry.Sequence).FirstOrDefault(entry => entry.Detail.Length > 0);
         QueueStatusText.Text = queueEnabled ? hold is null ? $"队列运行中 · 每 {TaskPollSeconds} 秒检查一次" : $"队列等待：{hold.Detail}" : "队列已暂停";
         QueueToggleButton.Content = queueEnabled ? "暂停队列" : "执行队列";
-        QueueToggleButton.IsEnabled = true;
+        QueueToggleButton.IsEnabled = !closeRequested && !quickQueueImporting;
         TaskConcurrency.SelectedIndex = Math.Clamp(book.MaxRunning - 1, 0, 3);
-        TaskConcurrency.IsEnabled = true;
+        TaskConcurrency.IsEnabled = !closeRequested && !quickQueueImporting;
         foreach (var task in book.Tasks.OrderByDescending(task => task.Priority).ThenBy(task => task.UpdatedAt))
             TaskList.Children.Add(TaskCardView(book, task));
     }
@@ -208,8 +210,9 @@ public partial class MainWindow
     });
     private async void QueueToggleClick(object sender, RoutedEventArgs e) => await GuardAsync(async () =>
     {
+        if (closeRequested || quickQueueImporting) return;
         queueEnabled = !queueEnabled;
-        if (queueEnabled) taskTimer.Start(); else taskTimer.Stop();
+        if (queueEnabled) taskTimer.Start(); else { taskTimer.Stop(); queueCancellation?.Cancel(); }
         RenderTasks();
         if (queueEnabled) await PumpQueueAsync();
     });
@@ -316,17 +319,41 @@ public partial class MainWindow
         if (queueEnabled) await PumpQueueAsync();
     }
 
-    private async Task PumpQueueAsync()
+    private Task PumpQueueAsync()
     {
-        if (!queueEnabled || taskBook is null || taskLoadError.Length > 0 || queuePumping || readOnly) return;
-        if (busy || launchFinalizing || launchCancellation is not null || !cancelTask.IsCompleted || submittedAttempts.Length > 0) return;
+        if (!queueEnabled || closeRequested || taskBook is null || taskLoadError.Length > 0 || queuePumping || readOnly) return Task.CompletedTask;
+        if (busy || launchFinalizing || launchCancellation is not null || !cancelTask.IsCompleted || submittedAttempts.Length > 0) return Task.CompletedTask;
+        if (PauseEmptyQueue()) return Task.CompletedTask;
         queuePumping = true;
+        queueCancellation = new();
+        UpdateQuickQueueButton();
+        return queuePumpTask = RunQueuePumpAsync(queueCancellation);
+    }
+
+    private bool PauseEmptyQueue()
+    {
+        if (taskBook is null || taskBook.Queue.Count != 0 || taskBook.Attempts.Any(run => !run.Terminal)) return false;
+        queueEnabled = false;
+        taskTimer.Stop();
+        RenderTasks();
+        QueueStatusText.Text = "队列已空，已停止轮询；新增任务后需明确执行。";
+        return true;
+    }
+
+    private async Task RunQueuePumpAsync(CancellationTokenSource cancellation)
+    {
         try
         {
             await ReconcileTaskRunsAsync();
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (PauseEmptyQueue()) return;
             using var gate = taskStore.TryAcquireQueueGate();
             if (gate is null) { QueueStatusText.Text = "另一个窗口正在执行队列，本窗口等待。"; return; }
-            await DispatchNextAsync();
+            await DispatchNextAsync(cancellation.Token);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            QueueStatusText.Text = "队列已暂停；已运行任务不受影响。";
         }
         catch (Exception e) when (e is IOException or InvalidDataException or OperationCanceledException or UnauthorizedAccessException or TimeoutException or JsonException)
         {
@@ -336,6 +363,9 @@ public partial class MainWindow
         finally
         {
             queuePumping = false;
+            queueCancellation = null;
+            cancellation.Dispose();
+            UpdateQuickQueueButton();
         }
     }
 
@@ -370,10 +400,12 @@ public partial class MainWindow
         await UpdateTasksAsync(book => TaskBookOps.FinishRun(book, attemptId, "Failed", "超过 5 分钟未被终端领取，已撤销，可重新入队"), "任务状态更新失败");
     }
 
-    private async Task DispatchNextAsync()
+    private async Task DispatchNextAsync(CancellationToken cancellationToken = default)
     {
         var book = taskBook!;
+        if (book.Queue.Count == 0) { QueueStatusText.Text = "队列为空。"; return; }
         await RefreshAsync();
+        cancellationToken.ThrowIfCancellationRequested();
         if (status?.Ok != true || status.Memory is null) { QueueStatusText.Text = "监控状态不可用，队列暂不启动。"; return; }
         if (status.AdmissionBlockedReason is { Length: > 0 } blocked) { QueueStatusText.Text = "队列暂停：" + blocked; return; }
         if (book.Queue.Count == 0)
@@ -410,6 +442,11 @@ public partial class MainWindow
         catch (Exception e) when (e is IOException or FileNotFoundException or UnauthorizedAccessException) { await HoldEntryAsync(entry, "命令无法解析：" + e.Message); return; }
         var fingerprint = await Task.Run(() => AgentProbe.Fingerprint(resolved.Executable));
         var workspace = PhysicalDirectory.Workspace(PhysicalDirectory.Resolve(Path.GetFullPath(entry.Project)).Path);
+        if (entry.QuickLaunch is { } source && !string.Equals(source.WorkspaceKey, workspace.Key, StringComparison.Ordinal))
+        {
+            await HoldEntryAsync(entry, "工作目录物理身份已改变，请核对后重新入队。");
+            return;
+        }
         var (dispatchAllowed, dispatchReason) = QueuePolicy.CanDispatchResume(book, entry, workspace.Key, fingerprint);
         if (!dispatchAllowed) { await HoldEntryAsync(entry, dispatchReason); return; }
         if (resume)
@@ -433,6 +470,29 @@ public partial class MainWindow
             return;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
+        ResourcePolicySnapshot policy;
+        try
+        {
+            policy = ResourcePolicy.SnapshotFor(entry.Resource, status.Memory.Total, status.Memory.CommitLimit);
+            ResourcePolicy.ValidateSettings(entry.Resource, status.Memory.Total, status.Memory.CommitLimit);
+        }
+        catch (Exception e) when (e is InvalidDataException or ArgumentException)
+        {
+            await HoldEntryAsync(entry, "任务资源设置无效：" + e.Message);
+            return;
+        }
+        var forceIsolated = entry.QuickLaunch?.IsolateWorkspace == true;
+        var pendingBudget = new BudgetItem(entry.Id, "agent", policy.PlanningBytes, policy.JobMemoryLimit,
+            policy.PoolMode == ResourcePolicy.PoolShared ? entry.Id : null,
+            policy.PoolMode == ResourcePolicy.PoolShared ? policy.PoolMemoryLimit : null);
+        BudgetItem[] requested = forceIsolated
+            ? [pendingBudget, new(Guid.Empty, "git", policy.GitPlanningBytes, policy.GitJobMemoryLimit)] : [pendingBudget];
+        var reserved = status.Entries?.Where(candidate => !Store.IsTerminal(candidate)).Select(candidate => ResourcePolicy.BudgetOf(candidate.Plan, candidate.PoolMemoryLimit)).ToArray() ?? [];
+        var admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, requested);
+        if (admission.Kind == AdmissionKind.Deny) { await HoldEntryAsync(entry, "资源不足：" + admission.Reason); return; }
+        if (admission.Kind == AdmissionKind.RequireWaiver) { await HoldEntryAsync(entry, "需要一次性资源确认；队列不会自动确认，请暂停并人工核对。"); return; }
+
         var draft = new Draft
         {
             SchemaVersion = config.Draft.SchemaVersion,
@@ -447,11 +507,12 @@ public partial class MainWindow
         LaunchItem[] planned;
         try
         {
-            var preparer = new WorkspacePreparer(config.WorktreeDirectory);
+            var preparer = new WorkspacePreparer(entry.QuickLaunch?.WorktreeRoot ?? config.WorktreeDirectory);
             var activeWorkspaces = status.Entries?.Where(candidate => !Store.IsTerminal(candidate) && candidate.Plan.Kind == "agent").Select(candidate => candidate.Plan.Workspace).ToArray() ?? [];
             planned = (await Task.Run(() => preparer.PrepareAsync(draft, text => Dispatcher.Invoke(() => QueueStatusText.Text = text),
-                _ => Task.FromResult(false), CancellationToken.None, activeWorkspaces, null))).ToArray();
+                _ => Task.FromResult(false), cancellationToken, activeWorkspaces, null, forceIsolated, entry.QuickLaunch?.WorkspaceKey))).ToArray();
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception e) when (e is IOException or OperationCanceledException or InvalidDataException)
         {
             await HoldEntryAsync(entry, "准备失败：" + e.Message);
@@ -459,55 +520,89 @@ public partial class MainWindow
         }
         if (planned.Length != 1) { await HoldEntryAsync(entry, "任务只允许一个启动项。"); return; }
         var plan = planned[0];
-        if (!string.Equals(plan.Workspace.Key, workspace.Key, StringComparison.Ordinal) || !SameCommand(plan.Command, entry.Command))
+        if ((!forceIsolated && !string.Equals(plan.Workspace.Key, workspace.Key, StringComparison.Ordinal)) || !SameCommand(plan.Command, entry.Command))
         {
             await HoldEntryAsync(entry, "准备结果与冻结的工作目录或命令不一致，请重新入队。");
             return;
         }
 
-        ResourcePolicySnapshot policy;
-        try
-        {
-            policy = ResourcePolicy.SnapshotFor(entry.Resource, status.Memory.Total, status.Memory.CommitLimit);
-            ResourcePolicy.ValidateSettings(entry.Resource, status.Memory.Total, status.Memory.CommitLimit);
-        }
-        catch (Exception e) when (e is InvalidDataException or ArgumentException)
-        {
-            await HoldEntryAsync(entry, "任务资源设置无效：" + e.Message);
-            return;
-        }
-        var reserved = status.Entries?.Where(candidate => !Store.IsTerminal(candidate)).Select(candidate => ResourcePolicy.BudgetOf(candidate.Plan, candidate.PoolMemoryLimit)).ToArray() ?? [];
-        var admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, [ResourcePolicy.BudgetOf(plan, plan.PoolId is null ? null : policy.PoolMemoryLimit)]);
+        cancellationToken.ThrowIfCancellationRequested();
+        await RefreshAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (status?.Ok != true || status.Memory is null || status.AdmissionBlockedReason is { Length: > 0 })
+        { await HoldEntryAsync(entry, status?.AdmissionBlockedReason ?? "准备后监控状态不可用，等待重新核验。"); return; }
+        reserved = status.Entries?.Where(candidate => !Store.IsTerminal(candidate)).Select(candidate => ResourcePolicy.BudgetOf(candidate.Plan, candidate.PoolMemoryLimit)).ToArray() ?? [];
+        admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, [ResourcePolicy.BudgetOf(plan, plan.PoolId is null ? null : policy.PoolMemoryLimit)]);
         if (admission.Kind == AdmissionKind.Deny) { await HoldEntryAsync(entry, "资源不足：" + admission.Reason); return; }
-        if (admission.Kind == AdmissionKind.RequireWaiver) { await HoldEntryAsync(entry, "需要一次性资源确认；队列不会自动确认，请降低规划或稍后重试。"); return; }
+        if (admission.Kind == AdmissionKind.RequireWaiver) { await HoldEntryAsync(entry, "需要一次性资源确认；队列不会自动确认，请暂停并人工核对。"); return; }
 
         Response reserve;
-        try { reserve = await Ipc.ReserveWithCleanupAsync([plan], CancellationToken.None, null, policy, null, null, ResourcePolicy.PlanDigest([plan]), null, null); }
-        catch (Exception e) when (e is IOException or TimeoutException) { await HoldEntryAsync(entry, "监控器未响应：" + e.Message); return; }
-        if (!reserve.Ok) { await HoldEntryAsync(entry, reserve.Message); return; }
-
-        var recorded = await UpdateTasksAsync(editor => TaskBookOps.StartRun(editor, entry, plan.Id, plan.BatchId, workspace.Key, entry.ResumeOf, entry.SessionRef), "启动记录失败");
-        if (!recorded)
+        try { reserve = await Ipc.ReserveWithCleanupAsync([plan], cancellationToken, null, policy, null, ResourcePolicy.PolicyHash(policy), ResourcePolicy.PlanDigest([plan]), null, null, entry.Id); }
+        catch (Exception e) when (e is IOException or TimeoutException)
         {
-            try { await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: plan.Id)); } catch (Exception e) when (e is IOException or TimeoutException) { }
+            queueEnabled = false;
+            taskTimer.Stop();
+            await HoldEntryAsync(entry, "预约结果未确认，队列已暂停；先核对运行记录，不会自动重放：" + e.Message);
             return;
         }
-        QueueStatusText.Text = $"正在提交任务：{task.Name}";
+        if (!reserve.Ok) { await HoldEntryAsync(entry, reserve.Message); return; }
+
+        var recorded = false;
+        var submitted = false;
         try
         {
-            var terminal = await Task.Run(() => Commands.Terminal(config.TerminalPath));
+            cancellationToken.ThrowIfCancellationRequested();
+            recorded = await UpdateTasksAsync(editor =>
+            {
+                TaskBookOps.StartRun(editor, entry, plan.Id, plan.BatchId, plan.Workspace.Key, entry.ResumeOf, entry.SessionRef);
+                if (forceIsolated)
+                {
+                    var bound = editor.Tasks.Single(candidate => candidate.Id == entry.TaskId);
+                    bound.Project = plan.Cwd;
+                    bound.DirectoryMode = "prepared";
+                    bound.QuickLaunch = entry.QuickLaunch! with { WorkspaceKey = plan.Workspace.Key, IsolateWorkspace = false };
+                }
+            }, "启动记录失败");
+            if (!recorded) return;
+            cancellationToken.ThrowIfCancellationRequested();
+            QueueStatusText.Text = $"正在提交任务：{task.Name}";
+            var terminalPath = config.TerminalPath;
+            var terminal = await Task.Run(() => Commands.Terminal(terminalPath));
+            cancellationToken.ThrowIfCancellationRequested();
             await Task.Run(() => Commands.SubmitTerminal(terminal, [plan], "vertical"));
+            submitted = true;
             QueueStatusText.Text = $"已提交任务：{task.Name}。进程出现不代表 Agent 已就绪。";
-            if (config.MinimizeAfterLaunch) WindowState = WindowState.Minimized;
+            if (!closeRequested && config.MinimizeAfterLaunch) WindowState = WindowState.Minimized;
         }
         catch (Exception e) when (e is IOException or FileNotFoundException or UnauthorizedAccessException)
         {
-            string detail = "Terminal 提交结果未确认，请核对运行记录：" + e.Message;
-            try { await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: plan.Id)); }
-            catch (Exception revoke) when (revoke is IOException or TimeoutException) { detail = "Terminal 提交与撤销结果都未确认，请核对运行记录：" + e.Message; }
-            await UpdateTasksAsync(editor => TaskBookOps.FinishRun(editor, plan.Id, "Failed", detail), "任务状态更新失败");
-            ErrorText.Text = detail;
+            ErrorText.Text = "Terminal 提交结果未确认，请核对运行记录：" + e.Message;
         }
+        finally
+        {
+            if (!submitted) await RevokeQueueReservationAsync(plan.Id, recorded, cancellationToken.IsCancellationRequested);
+        }
+    }
+
+    private async Task RevokeQueueReservationAsync(Guid attemptId, bool recorded, bool cancelled)
+    {
+        try
+        {
+            var reply = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: attemptId));
+            if (reply.Ok && reply.Entries?.Any(entry => entry.Plan.Id == attemptId && entry.State == "Revoked") == true)
+            {
+                if (recorded) await UpdateTasksAsync(book => TaskBookOps.FinishRun(book, attemptId, cancelled ? "Cancelled" : "Failed", "未启动预约已撤销"), "撤销记录保存失败");
+                return;
+            }
+            QueueStatusText.Text = "预约已领取或撤销结果未确认，队列已暂停；请核对运行记录，不会自动重放。";
+        }
+        catch (Exception e) when (e is IOException or TimeoutException)
+        {
+            QueueStatusText.Text = "撤销结果未确认，队列已暂停；请核对运行记录：" + e.Message;
+        }
+        queueEnabled = false;
+        taskTimer.Stop();
+        RenderTasks();
     }
 
     private Task HoldEntryAsync(QueueEntry entry, string detail)

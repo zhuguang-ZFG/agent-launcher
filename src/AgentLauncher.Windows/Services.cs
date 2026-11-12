@@ -101,9 +101,9 @@ public static class Ipc
 #endif
         return await ReadResponseAsync(pipe,timeout.Token);
     }
-    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default,Action? beforeCleanup=null,ResourcePolicySnapshot? policy=null,long? draftRevision=null,string? policyHash=null,string? planDigest=null,IReadOnlyList<Guid>? enabledSlotIds=null,Guid? waiverId=null)
+    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default,Action? beforeCleanup=null,ResourcePolicySnapshot? policy=null,long? draftRevision=null,string? policyHash=null,string? planDigest=null,IReadOnlyList<Guid>? enabledSlotIds=null,Guid? waiverId=null,Guid? taskEntryId=null)
     {
-        try{return await SendCoreAsync(new("reserve",Guid.NewGuid(),items,WaiverId:waiverId,DraftRevision:draftRevision,PolicyHash:policyHash,PlanDigest:planDigest,EnabledSlotIds:enabledSlotIds,Policy:policy),ct,true);}
+        try{return await SendCoreAsync(new(taskEntryId is null?"reserve":"reserve-task",Guid.NewGuid(),items,WaiverId:waiverId,DraftRevision:draftRevision,PolicyHash:policyHash,PlanDigest:planDigest,EnabledSlotIds:enabledSlotIds,Policy:policy,TaskEntryId:taskEntryId),ct,true);}
         catch(Exception e)when(e is IOException or TimeoutException or OperationCanceledException)
         {
             // The server may have committed the reservation before the client saw a failure; revoke best-effort so the workspace is not held.
