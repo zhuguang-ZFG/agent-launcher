@@ -76,24 +76,17 @@ public partial class MainWindow
         check("ACC-B07 removing a queued item keeps attempts and the task record",
             taskStore.Load().Queue.Count == 0 && taskStore.Load().Attempts.Count == attemptsBeforeDequeue && taskStore.Load().Tasks.Any(task => task.Id == waiting.Id));
         await RunTaskCommandChecksAsync(check);
-        // Review findings: the status reply carries only a bounded history window, so a task that ended while the queue was paused
-        // must settle from the durable book or receipt; and one shared pool must be billed once by the launch precheck.
-        var retainedPath = Path.Combine(Store.Root, "retained-" + Guid.NewGuid().ToString("N") + ".json");
-        var retainedItem = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "retained", Store.Root, PhysicalDirectory.Workspace(Store.Root), false, new CommandSpec(Path.Combine(Environment.SystemDirectory, "cmd.exe"), [], "exe"), ResourcePolicy.AgentBudget);
-        Store.Save(retainedPath, new Ledger { Entries = [new ControlEntry { Plan = retainedItem, State = "Settled", Detail = "已核对的结束" }] });
-        check("ACC-L01 a finished attempt outside the history window settles from the durable book",
-            RetainedAttemptForChecks(retainedItem.Id, retainedPath, retainedPath + ".receipt") is { State: "Settled", Detail: "已核对的结束" });
-        Store.Save(retainedPath + ".receipt", new Receipt("Finished", 0, 0, 0, "全部受管进程已退出", DateTimeOffset.UtcNow));
-        check("ACC-L01 a pruned attempt settles from its finished receipt",
-            RetainedAttemptForChecks(Guid.NewGuid(), retainedPath, retainedPath + ".receipt") is { State: "Settled" });
-        check("ACC-L01 an unknown attempt stays pending instead of being invented as finished",
-            RetainedAttemptForChecks(Guid.NewGuid(), retainedPath, retainedPath + ".missing") is null);
-        File.Delete(retainedPath);
-        File.Delete(retainedPath + ".receipt");
+        var retainedItem = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "retained", Store.Root, PhysicalDirectory.Workspace(Store.Root), false, new CommandSpec(Path.Combine(Environment.SystemDirectory, "cmd.exe"), [], "exe"), ResourcePolicy.AgentBudget,SourceSlotId:Guid.NewGuid());
+        var retainedRun=new TaskRun{AttemptId=retainedItem.Id,BatchId=retainedItem.BatchId,TaskId=retainedItem.SourceSlotId!.Value,WorkspaceKey=retainedItem.Workspace.Key};
+        check("ACC-L01 task recovery only accepts its own attempt batch task and workspace",AttemptIdentity.Matches(retainedRun,new(){Plan=retainedItem,Digest=Store.Digest(retainedItem)})&&!AttemptIdentity.Matches(retainedRun,new(){Plan=retainedItem with{BatchId=Guid.NewGuid()},Digest=Store.Digest(retainedItem)}));
         var pooledDraft = new Draft { Project = Store.Root, Resource = new ResourceSettings { Mode = "practical", JobMemoryLimit = 2 * ResourcePolicy.GiB, PlanningBytes = 2 * ResourcePolicy.GiB, Pool = ResourcePolicy.PoolShared, PoolMemoryLimit = 2 * ResourcePolicy.GiB }, Slots = [new() { Enabled = true }, new() { Enabled = true }, new() { Enabled = true }] };
         var pooledSample = new MemorySnapshot(16 * ResourcePolicy.GiB, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 5, DateTimeOffset.UtcNow);
         check("ACC-L02 three slots in one shared pool are billed once by the precheck",
             DecideAdmission(pooledDraft, pooledSample, []).CapSumRequested == 2 * ResourcePolicy.GiB);
+        var checkedPool=Guid.NewGuid();var checkedPolicy=ResourcePolicy.SnapshotFor(pooledDraft.Resource,pooledSample.Total,pooledSample.CommitLimit);
+        var monitorBudgets=pooledDraft.Slots.Select(slot=>ResourcePolicy.BudgetOf(retainedItem with{Id=slot.Id,PoolId=checkedPool,PlanningBytes=pooledDraft.Resource.PlanningBytes},pooledDraft.Resource.PoolMemoryLimit)).ToArray();
+        var monitorDecision=ResourcePolicy.Evaluate(pooledSample,checkedPolicy,[],monitorBudgets);
+        check("ACC-L02 shared precheck equals monitor admission",DecideAdmission(pooledDraft,pooledSample,[]).CapSumRequested==monitorDecision.CapSumRequested&&DecideAdmission(pooledDraft,pooledSample,[]).Kind==monitorDecision.Kind);
         pooledDraft.Resource.Pool = ResourcePolicy.PoolIndependent;
         check("ACC-L02 independent slots are billed per item",
             DecideAdmission(pooledDraft, pooledSample, []).CapSumRequested == 6 * ResourcePolicy.GiB);

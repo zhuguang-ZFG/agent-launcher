@@ -12,6 +12,11 @@ foreach($project in @('tests/AgentLauncher.Tests','src/AgentLauncher.Worker','sr
 $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-integration-'+[guid]::NewGuid().ToString('N'))
 $env:AGENT_LAUNCHER_FAKE_SAMPLE='1'
 try {
+  $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-repairs-'+[guid]::NewGuid().ToString('N'))
+  & (Join-Path $runtime 'AgentLauncher.Tests.exe') --repair-checks
+  if($LASTEXITCODE -ne 0){throw 'Repair checks failed'}
+  Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'repair-results.json') (Join-Path $root 'artifacts/repair-results.json')
+  $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-integration-'+[guid]::NewGuid().ToString('N'))
   & (Join-Path $runtime 'AgentLauncher.Tests.exe') --integration
   if($LASTEXITCODE -ne 0){throw 'Integration failed'}
   Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'integration-results.json') (Join-Path $root 'artifacts/integration-results.json')

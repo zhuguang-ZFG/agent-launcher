@@ -124,7 +124,8 @@ public partial class MainWindow
             try{LedgerNeedsRecovery(brokenLedger);}catch(Exception error)when(error is InvalidDataException or NullReferenceException){brokenRejected=true;}
             check("ACC-S3A08 a ledger entry without a plan fails closed",brokenRejected);
             config=Fixture();Healthy();Render();var dropped=Enumerable.Repeat(Store.Root,ResourcePolicy.MaxSlots).ToArray();await ApplyDroppedDirectoriesAsync(dropped,null,config.Draft.Revision);
-            check("ACC-L02 sixteen dropped directories are applied atomically",config.Draft.Slots.Count==ResourcePolicy.MaxSlots&&config.Draft.Slots.All(s=>s.Directory==Store.Root));
+            var expectedDrop=PhysicalDirectory.Resolve(Store.Root).Path;
+            check("ACC-L02 sixteen dropped directories are applied atomically",config.Draft.Slots.Count==ResourcePolicy.MaxSlots&&config.Draft.Slots.All(s=>s.Directory==expectedDrop));
             var dropRevision=config.Draft.Revision;var dropSnapshot=JsonSerializer.Serialize(config.Draft,Store.Json);var rejected=false;
             try{await ApplyDroppedDirectoriesAsync([..dropped,Store.Root],null,dropRevision);}catch(IOException){rejected=true;}
             check("ACC-L02 seventeenth dropped directory leaves configuration untouched",rejected&&config.Draft.Revision==dropRevision&&JsonSerializer.Serialize(config.Draft,Store.Json)==dropSnapshot);
