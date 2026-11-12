@@ -8,6 +8,7 @@ if(args is ["--repair-checks"]) return RepairChecks.Run();
 if(args is ["--integration"]) return await Integration.RunAsync();
 if(args is ["--terminal-batch-checks"]) return await Integration.RunAsync(terminalOnly:true);
 if(args is ["--parallel-batch-checks"]) return await Integration.RunAsync(terminalOnly:true,directBatch:true);
+if(args is ["--startup-queue-checks"]) return await Integration.RunAsync(startupOnly:true);
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
 if(args.Length>0&&args[0]=="--echo") { File.WriteAllText(args[1],JsonSerializer.Serialize(new { Cwd=Environment.CurrentDirectory, Args=args.Skip(2).ToArray() }));return 0; }
@@ -17,6 +18,15 @@ if(args is ["--pane-ready",var paneReadyOutput,var paneRelease])
     var deadline=Stopwatch.StartNew();
     while(!File.Exists(paneRelease)){if(deadline.Elapsed>TimeSpan.FromSeconds(60))return 3;Thread.Sleep(50);}
     return 0;
+}
+if(args is ["--startup-gate",var gateReady,var gateRelease,var gateExit])
+{
+    using var gate=new Mutex(false,Store.RootJob+"-startup");
+    if(!gate.WaitOne(TimeSpan.FromSeconds(5)))return 4;
+    File.WriteAllText(gateReady,"ready");var deadline=Stopwatch.StartNew();
+    while(!File.Exists(gateRelease)){if(deadline.Elapsed>TimeSpan.FromSeconds(30))return 3;Thread.Sleep(20);}
+    if(gateExit=="crash")Environment.Exit(97);
+    gate.ReleaseMutex();return 0;
 }
 if(args.Length>0&&args[0]=="--hold") {Thread.Sleep(int.Parse(args[1]));return 0;}
 if(args.Length>2&&args[0]=="--spawn-late") {var psi=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false};psi.ArgumentList.Add("--write-after");psi.ArgumentList.Add(args[1]);psi.ArgumentList.Add(args[2]);_ = Process.Start(psi);return 0;}

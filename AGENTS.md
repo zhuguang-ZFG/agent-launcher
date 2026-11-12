@@ -53,7 +53,7 @@ dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Rel
 
 - There is **no `dotnet test`** — tests are console executables gated by exit code.
 - Builds are serialized (`-m:1`) and `--nologo`; preserve these flags in new scripts.
-- There is **no CI** (no `.github/`), no `.editorconfig`, no `global.json`.
+- GitHub Actions `.github/workflows/ci.yml` runs the full gate on Windows. No `.editorconfig` or `global.json` is configured.
 
 ## Code Conventions & Common Patterns
 
@@ -84,11 +84,11 @@ dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Rel
 - **PowerShell 5.1** scripts; no Bun, no package managers besides dotnet/node built-ins.
 - External programs (Git, Windows Terminal, agent CLIs) are user-installed and never bundled or copied.
 - Runtime state lives in `%LOCALAPPDATA%\AgentLauncher` (config, backups, grants, prepared dirs); no auto-delete policy. Never put long-lived secrets in launch arguments.
-- No `.git` directory in this workspace — don't assume VCS operations are available.
+- Git metadata is present; inspect the current branch and working tree before committing. Verify CI against the pushed commit SHA.
 
 ## Testing & QA
 
-- **Single supported gate**: `scripts/test.ps1`. Phases: (1) in-process model/Win32 tests via `dotnet run`; (2) republish with `-p:DefineConstants=INTEGRATION_TESTS` to `artifacts/test-runtime`; (3) `--integration` scenarios under a fresh `%TEMP%\AgentLauncher-tests-integration-<guid>` root; (4) WPF `--ui-check` (30 s timeout, expects `artifacts/ui/ui-checks.json`); (5) `node --test tests/prototype.test.cjs`; (6) headless-Edge CDP checks.
+- **Single supported gate**: `scripts/test.ps1`. Phases: model/Win32 tests; sequential `INTEGRATION_TESTS` publishes; repair checks; startup queue, direct 16-Worker, real 16-pane Terminal and full integration suites in separate fresh test roots; WPF checks (30 s without progress, 90 s total maximum); prototype and headless-Edge CDP checks. WPF expects `artifacts/ui/ui-checks.json`; failed CI retains diagnostics.
 - **Never run test-build exes from `artifacts/test-runtime` interactively** (README warning); integration tests require `AGENT_LAUNCHER_TEST_ROOT` containing `AgentLauncher-tests-` as a hard guard.
 - No coverage tooling, no mocking framework; the test exe doubles as a child-process fixture (`--echo`, `--hold`, `--allocate`).
 - New tests go in `tests/AgentLauncher.Tests/Program.cs` (`Test("ID name", …)`), `Integration.cs` (`await Test(...)`), or `tests/prototype.test.cjs` (`test('ID: name', …)`), keyed to `docs/ACCEPTANCE.md` IDs.

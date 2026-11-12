@@ -16,7 +16,7 @@ try {
   & (Join-Path $runtime 'AgentLauncher.Tests.exe') --repair-checks
   if($LASTEXITCODE -ne 0){throw 'Repair checks failed'}
   Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'repair-results.json') (Join-Path $root 'artifacts/repair-results.json')
-  foreach($suite in @('parallel-batch','terminal-batch','integration')){
+  foreach($suite in @('startup-queue','parallel-batch','terminal-batch','integration')){
     $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-'+$suite+'-'+[guid]::NewGuid().ToString('N'))
     $testArgument=if($suite -eq 'integration'){'--integration'}else{'--'+$suite+'-checks'}
     try { & (Join-Path $runtime 'AgentLauncher.Tests.exe') $testArgument }

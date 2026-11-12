@@ -5,7 +5,7 @@ using AgentLauncher.Windows;
 
 internal static class Integration
 {
-    public static async Task<int> RunAsync(bool terminalOnly=false,bool directBatch=false)
+    public static async Task<int> RunAsync(bool terminalOnly=false,bool directBatch=false,bool startupOnly=false)
     {
         if(!(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_TEST_ROOT")??"").Contains("AgentLauncher-tests-"))throw new InvalidOperationException("Integration requires an isolated test root.");
         Directory.CreateDirectory(Store.Root);var evidence=new List<object>();var cwd=Path.Combine(Store.Root,"项目 & spaces");Directory.CreateDirectory(cwd);
@@ -82,6 +82,42 @@ internal static class Integration
             process.Resume();return process;
         }
         var initial=await Ipc.EnsureMonitorAsync();Assert(initial.Ok,initial.Message);
+        if(startupOnly)
+        {
+            foreach(var mode in new[]{"release","crash"})await Test("P04 startup queue waits without spawning and continues after "+mode,async()=>{
+                var ready=Store.FilePath("gate-"+mode+".ready");var release=Store.FilePath("gate-"+mode+".release");var output=Store.FilePath("gate-"+mode+".json");
+                var gateInfo=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false,CreateNoWindow=true};
+                foreach(var arg in new[]{"--startup-gate",ready,release,mode})gateInfo.ArgumentList.Add(arg);
+                using var holder=Process.Start(gateInfo)!;Process? runner=null;
+                try
+                {
+                    var deadline=Stopwatch.StartNew();while(!File.Exists(ready)&&!holder.HasExited&&deadline.Elapsed<TimeSpan.FromSeconds(5))await Task.Delay(20);
+                    Assert(File.Exists(ready),"startup gate fixture did not acquire ownership");
+                    var item=Item("queued-"+mode,["--echo",output]);var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
+                    runner=Start("run",item.Id);deadline.Restart();
+                    var claim=Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim");
+                    while(!File.Exists(claim)&&!runner.HasExited&&deadline.Elapsed<TimeSpan.FromSeconds(5))await Task.Delay(20);
+                    Assert(File.Exists(claim),"runner did not claim its queued attempt");
+                    // Exceed the IPC budget while held: queueing must happen before begin, not inside a pipe request.
+                    await Task.Delay(mode=="release"?9000:250);
+                    var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+                    Assert(!runner.HasExited&&!File.Exists(output)&&Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is null,"queued attempt spawned or failed before startup ownership");
+                    Assert(status.Ok&&status.Entries!.Single(e=>e.Plan.Id==item.Id).State=="Pending","waiting for startup ownership consumed the grant or blocked status");
+                    File.WriteAllText(release,"release");await holder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                    Assert(holder.ExitCode==(mode=="crash"?97:0),"startup gate fixture did not exit as requested");
+                    await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(8));
+                    Assert(runner.ExitCode==0&&File.Exists(output)&&Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0},"queued attempt did not complete after "+mode);
+                    status=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(status.Entries!.Single(e=>e.Plan.Id==item.Id).State=="Settled","queued attempt did not settle");
+                }
+                finally
+                {
+                    File.WriteAllText(release,"release");await holder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                    if(runner is not null){try{await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(8));}finally{runner.Dispose();}}
+                }
+            });
+            Store.Save(Store.FilePath("integration-results.json"),evidence);
+            return evidence.Any(e=>e.GetType().GetProperty("passed")?.GetValue(e) is false)?1:0;
+        }
         if(terminalOnly)
         {
             await Test("Terminal sixteen panes all become ready before any fixture exits",TerminalBatch);

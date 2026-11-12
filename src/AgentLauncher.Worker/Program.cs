@@ -85,6 +85,10 @@ internal static class Program
         using var mutex=new Mutex(false,Store.AttemptLock(id));bool owned;
         try{owned=mutex.WaitOne(0);}catch(AbandonedMutexException){owned=true;}
         if(!owned)throw new IOException("该启动请求正在处理。");
+        // The monitor serves one pipe at a time. In a full pane batch, concurrent begin requests can each create
+        // a pool helper before queued resume requests are served, exhausting the 8-second IPC budget.
+        // Queue only the spawn transaction; release it as soon as Started is durable, so Agents still run in parallel.
+        using var startup=new Mutex(false,Store.RootJob+"-startup");var startupOwned=false;
         ProtectedProcess? child=null;Job? root=null;Job? pool=null;Job? job=null;JobMemoryWatch? memoryWatch=null;var resumeIntent=false;var claimCreated=false;int? memoryOffender=null;
         JobMemoryEvidence? exitMemory=null;int? poolOffender=null;Guid? panePoolId=null;DateTimeOffset? poolNoticeAt=null;string poolNoticeDetail="";var poolCheck=Stopwatch.StartNew();
         try
@@ -94,6 +98,8 @@ internal static class Program
 #if INTEGRATION_TESTS
             if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")=="BeforeBegin")Environment.Exit(97);
 #endif
+            try{startupOwned=startup.WaitOne(TimeSpan.FromSeconds(60));}catch(AbandonedMutexException){startupOwned=true;}
+            if(!startupOwned)throw new IOException("同一监控器的启动队列等待超时，尚未创建 Agent；请在运行记录中核对。");
             var grant=Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:id)).GetAwaiter().GetResult();
             if(!grant.Ok||grant.Entries is not {Length:1})throw new IOException(grant.Message);
             var entry=grant.Entries[0];var plan=entry.Plan;
@@ -129,7 +135,7 @@ internal static class Program
             finally{memoryWatch?.Dispose();child?.Dispose();job?.Dispose();pool?.Dispose();root?.Dispose();}
             throw;
         }
-        finally{mutex.ReleaseMutex();}
+        finally{if(startupOwned)startup.ReleaseMutex();mutex.ReleaseMutex();}
         try
         {
             while(!child!.Process.WaitForExit(250))ObserveMemory();

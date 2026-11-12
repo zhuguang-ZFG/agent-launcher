@@ -892,3 +892,11 @@ powershell -NoProfile -File scripts/test.ps1
 - 文档提交 `381c972` 的 run `43240231942` 再次失败于 16 窗格：25 秒时第 3、6 项未就绪，随后配置/预算相关用例级联失败。不能用 `11f385f` 的一次成功替代此提交失败；入口中的产品代码与该文档提交相同，保留此前记录但不宣称窗格问题已经解决。
 - 夹具现支持独立的 `--parallel-batch-checks` 和 `--terminal-batch-checks`；前者绕过 Terminal，保留 16 个 Worker 同时走真实 IPC/Job 启动。在本机隔离根、既有 FAKE_SAMPLE 下，直接并发对照 16/16 就绪并统一释放后成功。它不能证明 Terminal 路径正常。
 - 失败快照同时写入日志，包含每项 claim/回执及监控器退出码；统一释放与等待放入 finally，未领取的合成项仅走已有 revoke 协议，恢复之前的隔离配置，避免失败污染后续测试。全量 gate 前增加两种独立对照，仍保留全量中的真实 Terminal 场景。远端归档下载受本机网络权限限制，新增日志用于下一次精确归因；未凭缺失推断完成。
+
+## 38. 并发启动 IPC 排队超时修复（2026-11-12）
+
+- `2ea0080` 的 run `43245351197` 在不经过 Terminal 的直接 16 Worker 对照失败：16 项全部已有 claim，2、3、7、8、10、12、14 的回执为 `FailedBeforeStart/Pid=0`，错误为请求取消，监控器仍存活。该次失败排除了 Terminal 未创建 pane runner；结合单线程 pipe 服务及 begin 内同步池 helper 创建，确认大量 begin/resume 请求争用同一服务、耗尽 8 秒 IPC 预算的启动缺陷。此证据不证明历史无 claim 的 15/16 或运行中的 cmd 退出同因。
+- Worker 领取单项 claim 后，先等待同一监控器的启动事务互斥，再发送 begin、受保护地创建 suspended 子进程、resume 和持久 Started；之后立即释放事务互斥，已启动 Agent 仍并行运行。排队最多 60 秒，超时明确记录未创建 Agent；异常退出的互斥通过 abandoned ownership 继续。没有延长 IPC 预算、重发未知请求、降低资源阈值或释放无法证明退出的占用。
+- 本机匹配测试构建 `artifacts/concurrent-start-fixed/`：独立 16 Worker 回归 **16/16 就绪，统一释放后全部 Finished/0**；新增两项排队边界检查 **2/2 通过**。其中正常释放场景在互斥内等待 9 秒，超过 IPC 预算，仍保持 Pending、无子进程输出/回执且 status 可查询；另一场景让互斥所有者 exit 97，等待项随后正常执行并 Settled。测试夹具只操作独立 AgentLauncher-tests-* 根。
+- `scripts/test.ps1` 将两项边界检查作为独立启动阶段，随后继续直接并发、真实 Terminal、全量集成、WPF、原型及浏览器检查，失败诊断仍上传。最终对应 SHA 的 CI、生产包和入口切换证据单独保存在 artifacts；不以本机定向通过替代完整门禁。
+- S0.6 的 30 分钟三轮、真实中文 CLI 两小时、生产 Terminal F12 人工交互、无障碍/干净环境分发与 S5 的能力前置仍须实际完成；本节不将它们标成通过。缺失身份的旧记录与无法证明结束的进程树继续保留待核对状态。
