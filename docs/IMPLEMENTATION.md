@@ -758,3 +758,40 @@ powershell -NoProfile -File scripts/test.ps1
 - S0.6 真实双任务准入为 **Deny**（可用 `3,624,382,464` bytes < 所需 `3,758,096,384` bytes，CPU 27.34%，提交余量 `6,818,865,152` bytes），0/3 轮。用户表单明确选择先交付已验证修复、S0.6/S5 保留受阻，不安装新运行时；长时实验草稿停止并归档 `deferred-soak-draft.zip`，未编译、未执行，不是发布交付物，活动源码已删除。
 - 工具版本不是冻结常量：本轮初始直接查询 Omp 为 18.18.9、Bun 为 1.3.14，完整 gate 的后续能力探测已观察到 Omp 18.19.0。没有替换或安装它们；历史 18.18.8 原生模块路径不再存在，不将旧 SDK/原生探针能力套用于新版本。S5 宿主仍未实现、未启用，也不宣称整个 spec 已完成。
 
+
+## 31. 六项审查与窗格内存拒绝修复（2026-11-11，America/Adak）
+
+### 改动与边界
+
+- 现场 HEAD 为 `198c852`，main 有四个未提交的部分修复。经用户“继续”授权，在 `fix/review-and-cmd-overflow-20261111` 先提交 `9afe2d4` 保全，再补缺口；没有 reset、丢弃现场修改或 push。现场 WIP 产品代码先于本轮测试，不把它描述为 TDD。
+- `LoadLedger` 区分首次启动与主 control.json 丢失但 .bak 存在；后者维持损坏阻止态，不写回空账本。QQ-C11 使用真实 IPC 预约任务、撤销形成含领取的备份、终止己方隔离 monitor、删除测试主账本、重启，检查不能重新领取且备份字节不变。
+- 预约前精确序列化投影的活动 Entries、Pools 与 TaskClaims，额外保留 512 KiB 固定余量和每活动项 64 KiB 生命周期余量，超过 6 MiB 整批拒绝，发生在池创建/领取写入前。Save 限制诊断 Detail 长度，保留 8 MiB 读取上限；活动记录不裁剪。文件发布失败回滚 Entries/Pools/Claim，并同步释放新增池 observer；Refresh 写失败则锁定阻止态，下一 tick 不会清掉错误。
+- Refresh 用活动 ID 集合清理 Job 所有权，不再对可能刚被裁剪的记录执行 Single。终态裁剪前原子保存 `attempts/<id>/outcome.json`（schema、AttemptId、计划摘要及完整终态），再删除展示历史。只读 `attempt` IPC 优先读当前权威记录，其次校验身份和摘要的归档；不信任旧 .bak 或无身份 receipt。UI 另核对 AttemptId、BatchId、TaskId、WorkspaceKey；缺失保持未确认，不凭空判完成。旧版本已裁剪且没有身份归档的尝试仍需人工核对。
+- `LoadAuthority` 在主配置丢失但存在备份时拒绝默认策略，status/reserve/waiver 使用同一阻止原因；reserve-task 同样持配置互斥。自审再发现已预约的 begin/resume 可在主配置丢失后激活，新增回归先红（旧 begin 实际给出授权），再在两种激活请求前复用同一配置阻止检查。真正没有配置/备份的新安装保留原首次启动兼容行为。
+- UI 预检为整批共享项构造同一个临时池 ID 与冻结池上限，池只计费一次；ACC-L02 比较前后台实际 BudgetOf/Evaluate 结果。另为规划估算之和大于共享池硬限额的计划增加明确风险确认（保守模式拒绝），begin 不重复消耗授权。不会调整运行中的 Job。
+
+### “cmd 子窗口超限退出”的证据与修法
+
+- 不能把用户这次原始退出事件宣称已复现或完全归因；没有该次进程/回执记录。本轮确认的机制是：`JOB_OBJECT_LIMIT_JOB_MEMORY`（Native.cs）拒绝超额提交，不是“内核必然杀掉整个 Job”；CLI 可能自行报错/快速失败。旧实现只比较峰值与退出码，不能证明具体内存拒绝；普通 ReadLine 还可能消费 CLI 遗留换行而立即退出，早期异常直接从 Main 返回。
+- 新 `JobMemoryWatch` 通过 Job completion port 观察内核消息 9/10，记录拒绝进程 PID，不修改内存限制、不结束任何进程。每 pane runner 持有自己单项 Job 的 observer，内存证据随 Started/Exited/Finished 回执保存；共享池由 monitor 观察并保存带 PoolId/PID 的通知。只有能匹配主进程或当前 Job 成员时才归属该窗格，否则明确显示共享池事件且归属未确认。通知缺失/峰值接近不被当作确定死因。
+- 异常或已观察到内存拒绝的交互窗格改为按 F12 明确关闭，避免普通缓冲 Enter 自动消失；正常退出仍按 Enter。早期创建失败由唯一 claim 所有者保存实际错误，重复 runner 不得覆盖原尝试 receipt。资源/句柄通过 finally 释放，工作目录保留。INTEGRATION_TESTS 不等待人工按键；F12 的实际 Terminal 人工交互本轮未验证。
+- 原生小额度夹具（96 MiB）用 VirtualAlloc 触发内核拒绝，证明通知 PID 对应失败进程、同胞 Job 进程仍存活、原上限未变；runner 隔离夹具同样验证明确内核证据进入 receipt。没有启动 16 个真实 Agent，没有耗尽系统内存；CPU 默认仍 3500（35%），无 KILL_ON_JOB_CLOSE、无全局 Terminal 设置修改。
+- TerminalCommands.cs 直接提交 Worker pane + GUID，并在提交前拒绝超长命令；这不能解释已经运行中途的退出。历史 15/16 部分启动仍未复现/归因，不因这些测试而关闭。共享池本身仍存在共享额度竞争，不能承诺其它程序的后续分配永不被拒绝；实现不会因一个事件终止整池或同胞。
+
+### 测试纪律与自审
+
+- 新缺口先执行失败回归：缺配置退默认、容量预留、持久结果查询、Job 消息观察、任务身份、runner 回执、共享池预警、异常保留、observer 回滚及重复 runner 回执所有权均有 RED → GREEN 日志。WIP 已修路径补测试；另增加归档重建与 Refresh 写失败持续阻止的后补覆盖。
+- 自审抓到两项新生命周期缺口并补红绿：池发布失败留下 observer、早期失败回执误覆盖已有 claim 的原 runner；均已修复。另两次测试夹具/产物问题明确保留：池工厂在反射 monitor 下曾误用 Tests.exe（改为明确 Store.WorkerPath）；仅更新 Tests 未更新 Worker 的定向目录出现旧重复回执行为，统一重发布后再测，未修改断言掩盖失败。
+- 初次完整门禁因新 QQ-C11 夹具默认等待 healthy 而失败；该场景预期就是 blocked，改为原夹具的 requireHealthy:false，保留拒绝、备份字节与不写主文件断言。未放宽产品保护、原断言、UI 30 秒超时或 CI 阈值。
+- 证据归档目录：`artifacts/review-cmd-20261111/`，包括各轮红灯、中途失败与定向绿色。运行期状态仅在隔离 AgentLauncher-tests-* 根；没有切换桌面快捷方式或覆盖正在使用的预览包。
+
+- 第二次完整门禁原生 117/117、当时定向 14/14、集成 120/120 通过，WPF 30 秒超时且新报告明确失败于 ACC-L02 拖入 16 目录断言，不能归咎仅仅运行慢。独立原 30 秒 UI 取证证实 Root 为 D:\Temp\User，而物理规范化为 D:\temp\User：busy/readOnly/checkingDrop 全 false，16 项均正确保存规范路径。仅把夹具预期改成 PhysicalDirectory.Resolve(Store.Root).Path，数量、原子性与第 17 项整批拒绝断言不变；未修改产品拖放逻辑。失败报告与诊断为 gate-ui-failed.json、ui-drop-state-red.json。
+
+### 本轮最终验证（America/Adak 2026-11-11）
+
+- 原入口 `powershell -NoProfile -File scripts/test.ps1 -SkipBrowser` 最终 **exit 0，464.99 秒**，于 **20:51:34 America/Adak** 完成。原生/模型 **117/117**、新增隔离修复 **16/16**、真实 IPC/进程/既有双窗格集成 **120/120**、真实 WPF 检查 **229/229、Dpi 120**、原型 **5/5**。WPF 保持原 30 秒上限；不是把分段结果拼成完整脚本绿色。
+- 最终匹配 Worker 额外运行 `artifacts/test-runtime/AgentLauncher.Tests.exe --admission-integration`，fresh AgentLauncher-tests-* 根，**16/16、exit 0**。未把 16 条准入断言说成启动 16 个真实 Agent。
+- 生产 `dotnet build src/AgentLauncher.Worker/AgentLauncher.Worker.csproj -c Release --nologo -m:1` 与 App 同命令均 **exit 0、0 警告、0 错误**。`git diff --check` 无空白错误（只出现仓库既有换行转换提示）。未发布覆盖生产入口。
+- 最终证据为 `gate-final-pass.log`、`focused-final16.json`、`integration-final120.json`、`ui-final.json`、`admission-current16.json`；早期失败及红灯继续保留。新增激活权威红灯单独为 `activation-red.log/.json`。
+- 自审覆盖失主文件/权威配置、容量拒绝与完整回滚、裁剪与 Job/observer/cache 所有权、持久结果身份、重复 runner 的 receipt 所有权与写失败后的持续阻止。未发现这些修复路径有新的 fail-open；未独立运行第二个代码审查代理。
+- **未验证/仍保留**：浏览器阶段明确 SkipBrowser；没有 16 个真实 Agent 压测、OOM 实验、用户本次原始退出复现、生产 Windows Terminal 中 F12 人工交互或 S0.6 长时观察。通知为 best-effort，不能把无通知当作没有内存压力；共享池通知无法确认成员归属时明确保留未确认。历史 15/16 偶发部分启动仍未归因；旧版已裁剪且没有身份归档的结果仍需人工核对。没有改全局 Terminal、CPU 默认或内存封顶，没有切换快捷方式或 push。
