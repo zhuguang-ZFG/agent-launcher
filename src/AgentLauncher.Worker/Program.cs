@@ -17,7 +17,12 @@ internal static class Program
             if(args.Length==2 && args[0] is "pane" or "run" && Guid.TryParse(args[1],out var id))return RunPane(id,args[0]=="pane");
             Console.Error.WriteLine("用法: monitor | pane <attempt-guid> | pool-host <池> <项> <就绪> <释放> <新建池>");return 2;
         }
-        catch(Exception e)when(e is not OutOfMemoryException){Console.Error.WriteLine("启动器: "+e.Message);HoldPane(args is ["pane",_],1,false);return 1;}
+        catch(Exception e)when(e is not OutOfMemoryException)
+        {
+            if(args is ["monitor"])
+                try{Store.Save(Store.FilePath("monitor-error.json"),new{At=DateTimeOffset.UtcNow,Type=e.GetType().FullName,e.HResult,Error=e.ToString()});}catch(Exception writeError)when(writeError is not OutOfMemoryException){}
+            Console.Error.WriteLine("启动器: "+e.Message);HoldPane(args is ["pane",_],1,false);return 1;
+        }
     }
     private static void HoldPane(bool interactive,int exit,bool limited)
     {
