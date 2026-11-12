@@ -21,6 +21,8 @@ internal static class Program
         {
             if(args is ["monitor"])
                 try{Store.Save(Store.FilePath("monitor-error.json"),new{At=DateTimeOffset.UtcNow,Type=e.GetType().FullName,e.HResult,Error=e.ToString()});}catch(Exception writeError)when(writeError is not OutOfMemoryException){}
+            if(args.Length==2&&args[0] is "pane" or "run"&&Guid.TryParse(args[1],out var failedAttempt))
+                try{Store.Save(Store.FilePath(Path.Combine("attempts",failedAttempt.ToString("N"),"runner-error.json")),new{At=DateTimeOffset.UtcNow,Pid=Environment.ProcessId,Type=e.GetType().FullName,e.HResult,Error=e.ToString()});}catch(Exception writeError)when(writeError is not OutOfMemoryException){}
             Console.Error.WriteLine("启动器: "+e.Message);HoldPane(args is ["pane",_],1,false);return 1;
         }
     }
@@ -82,6 +84,7 @@ internal static class Program
     }
     private static int RunPane(Guid id,bool interactive)
     {
+        Store.Save(Store.FilePath(Path.Combine("attempts",id.ToString("N"),"runner-entered.json")),new{At=DateTimeOffset.UtcNow,Pid=Environment.ProcessId});
         using var mutex=new Mutex(false,Store.AttemptLock(id));bool owned;
         try{owned=mutex.WaitOne(0);}catch(AbandonedMutexException){owned=true;}
         if(!owned)throw new IOException("该启动请求正在处理。");
@@ -262,6 +265,10 @@ internal sealed class Monitor : IDisposable
                     using var readDeadline=new CancellationTokenSource(3000);
                     try
                     {
+                        // WhenAny reports completion even when ConnectNamedPipe failed because its peer already closed.
+                        // Observe that outcome before reading; otherwise PipeStream can throw "not connected" and exit the monitor.
+                        accept.GetAwaiter().GetResult();
+                        if(!pipe.IsConnected)continue;
                         var request=Ipc.ReadAsync<Request>(pipe,readDeadline.Token).GetAwaiter().GetResult();Refresh(forceSample:!ledger.Entries.Any(e=>!Store.IsTerminal(e)));
                         Response response;
                         try{response=Handle(request);}catch(Exception e)when(e is not OutOfMemoryException){response=new(false,e.Message);}
@@ -270,6 +277,7 @@ internal sealed class Monitor : IDisposable
                         Ipc.WriteResponseAsync(pipe,response,replyDeadline.Token).GetAwaiter().GetResult();
                         if(retireForCpuChange&&CanRetire())return 0;
                     }
+                    catch(InvalidOperationException)when(!pipe.IsConnected){/* A peer may disappear between accept and the first read. */}
                     catch(Exception e)when(e is IOException or OperationCanceledException or JsonException){/* Peer failure never grants additional authorization. */}
                 }
             }

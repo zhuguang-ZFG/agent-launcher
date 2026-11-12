@@ -11,10 +11,21 @@ if(args is ["--parallel-batch-checks"]) return await Integration.RunAsync(termin
 if(args is ["--startup-queue-checks"]) return await Integration.RunAsync(startupOnly:true);
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
-if(args.Length>0&&args[0]=="--echo") { File.WriteAllText(args[1],JsonSerializer.Serialize(new { Cwd=Environment.CurrentDirectory, Args=args.Skip(2).ToArray() }));return 0; }
-if(args is ["--pane-ready",var paneReadyOutput,var paneRelease])
+if(args.Length>1&&args[0]=="-w"&&Environment.GetEnvironmentVariable("AGENT_LAUNCHER_TERMINAL_FIXTURE") is{Length:>0} captureRoot)
 {
-    using(var file=new FileStream(paneReadyOutput,FileMode.CreateNew,FileAccess.Write,FileShare.Read))JsonSerializer.Serialize(file,new{Pid=Environment.ProcessId,Cwd=Environment.CurrentDirectory});
+    var pane=Array.IndexOf(args,"pane");if(pane<0||pane+1>=args.Length)return 2;
+    var attempt=Guid.Parse(args[pane+1]);Directory.CreateDirectory(captureRoot);
+    using(var capture=new FileStream(Path.Combine(captureRoot,attempt.ToString("N")+".json"),FileMode.CreateNew))JsonSerializer.Serialize(capture,args);
+    var watch=Stopwatch.StartNew();while(!File.Exists(Path.Combine(captureRoot,attempt.ToString("N")+".release"))){if(watch.Elapsed>TimeSpan.FromSeconds(15))return 3;Thread.Sleep(20);}
+    var claim=Path.Combine(Store.Root,"attempts",attempt.ToString("N"),"claim");Directory.CreateDirectory(Path.GetDirectoryName(claim)!);
+    using(var file=new FileStream(claim,FileMode.CreateNew))file.WriteByte(1);
+    return 0;
+}
+if(args.Length>0&&args[0]=="--echo") { File.WriteAllText(args[1],JsonSerializer.Serialize(new { Cwd=Environment.CurrentDirectory, Args=args.Skip(2).ToArray() }));return 0; }
+if(args.Length>=3&&args[0]=="--pane-ready")
+{
+    var paneReadyOutput=args[1];var paneRelease=args[2];
+    using(var file=new FileStream(paneReadyOutput,FileMode.CreateNew,FileAccess.Write,FileShare.Read))JsonSerializer.Serialize(file,new{Pid=Environment.ProcessId,Cwd=Environment.CurrentDirectory,Args=args.Skip(3).ToArray()});
     var deadline=Stopwatch.StartNew();
     while(!File.Exists(paneRelease)){if(deadline.Elapsed>TimeSpan.FromSeconds(60))return 3;Thread.Sleep(50);}
     return 0;

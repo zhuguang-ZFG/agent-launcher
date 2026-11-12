@@ -909,3 +909,13 @@ powershell -NoProfile -File scripts/test.ps1
 - 同一产品修复的原生/模型 **131/131、0 失败**。测试 runner 增加 `-RuntimeDirectory`，允许在旧测试监控器仍持有默认目录时使用新发布目录；不会为重建而结束旧进程。正在验证的本机统一脚本使用此选项、隔离 Pi 及便携 Terminal；浏览器仍另以完整 CI 验证，本机脚本的 SkipBrowser 会明确记录，不能标为本机完整 gate。
 - 2026-11-12 **15:36:51 UTC** 原生内存预检可用物理内存 **3,175,452,672 bytes**，S0.6 默认双任务要求 **3,758,096,384 bytes**，准入不满足，已执行轮数仍为 0。证据：`artifacts/acceptance-preflight-7e014a0.json`。独立真实长期负载、S5 与人工验收继续按实际状态保留；不靠降低门槛、终止用户进程或远端普通 CI 成功替代。
 - 最终生产 App/Worker 必须按同一最终提交顺序发布，扫描无测试钩子，并在匹配 SHA 的完整 CI 成功后替换 `artifacts/preview-claim-recovery/`；原快捷方式的目标路径不变。逐文件 SHA-256、ZIP 和旧目录备份保存在 artifacts 的最终提交交付清单中，操作结果以清单为准。
+
+## 40. 重跑发现的断连崩溃与无领取窗格（2026-11-13，Asia/Shanghai）
+
+- `ca6def3` 的 run `43251943785` 通过直接并发、真实 16 窗格等场景后，失败于 QQ-C08 隔离 monitor 提前退出，错误 **Pipe hasn't been connected yet**。服务端原来只检查 `WhenAny` 中 accept 已完成，未观察该 Task 的异常，也未处理连接成功后立即断开的 InvalidOperationException。现在先观察连接结果，未连接即重建 listener，并仅对已断连 pipe 的该异常进行隔离；不重发请求、不修改账本。新增 64 次短连接断开检查，确认原 monitor PID/epoch 保持，status 持续正常。
+- 本机统一脚本 `artifacts/local-final-startup-queue/` **exit 1**：Pi Node 入口在原安装路径上 lstat `.pi` 遭 EPERM；另有第 10 项无 claim、无回执，monitor 仍活着。该轮不能用第 39 节 121/121 的单独运行替代。Pi 临时配置能避免写用户数据，但不能解决读取原安装目录被拒绝；工作区另按 CI 同版本安装官方 **1.5.0**，验证版本 exit 0，仅对测试进程设置 PATH，无全局安装或配置修改。
+- 无领取窗格已实际复现，具体 Terminal 内部丢失/早退原因仍未有完整证据，不能将其与历史故障全部同因关闭。产品将整批 Terminal 命令拆为逐项提交，每次等待对应 Worker 的一次性 claim 后才提交下一次 focus/split；每项 8 秒仍未确认则停止后续，明确提示核对，支持取消，不重试未知提交。完整命令长度仍在任何提交前校验，参数继续使用 ArgumentList。已启动 Agent 不等待其他项完成。
+- Worker 增加进入 RunPane 的 PID/时间证据及未处理错误的类型/HResult/堆栈（不记录参数）；16 窗格快照在 finally 保存，因此提交阶段提前失败也能保留各项 entered、claim、receipt、error。缺失证据仍不等于进程退出或任务完成。
+- 更新双窗格夹具为与长期 CLI 相符的就绪/释放屏障，继续真实核对 cwd 与中文、分号、空格字面参数。新增外部 Terminal 替身验证“未领取不发送下一项、取消不继续发送”，并保留真实 Terminal 检查。真实 16 窗格连续 **8 轮、128 项全部通过**；启动事务正常/崩溃释放与断连检查均通过。生产 solution 编译 **0 警告、0 错误**。新增快照和夹具之后仍以最终 SHA 的完整 gate 为发布依据。
+- `artifacts/production-pane-check/result.json` 对 `ca6def3` 生产 Worker 的真实 Terminal 自动化检查 **3/3 通过**：异常退出、明确内存受限两种情形忽略缓冲 Enter，F12 可关闭；正常退出 Enter 可关闭。该探针使用真实生产程序集和 console input，并非 `INTEGRATION_TESTS` 跳过等待；仍不冒充独立人类验收。后续产品提交须核对相同逻辑及最终包。
+- 长期代表性负载、两小时真实中文 CLI、S5 及无障碍/干净环境人工验收未获得新通过证据，继续保留实际状态。当前处理的是可执行的故障修复、完整门禁与最终交付，不将短回归或 CI 代替这些要求。

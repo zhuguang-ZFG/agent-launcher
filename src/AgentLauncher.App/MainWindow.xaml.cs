@@ -583,7 +583,7 @@ public partial class MainWindow : Window
             var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots,waiverId);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
-            try{await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout));}
+            try{await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout,launchCancellation.Token));}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
             if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="已交给 Windows Terminal 打开，正在等每个窗口确认。进程出现不代表 Agent 已就绪。";

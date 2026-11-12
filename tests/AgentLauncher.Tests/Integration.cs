@@ -48,13 +48,13 @@ internal static class Integration
                     if(directBatch)foreach(var item in items)runners.Add(Start("run",item.Id));else Commands.SubmitTerminal(terminal,items,"vertical");
                     var deadline=Stopwatch.StartNew();
                     while(deadline.Elapsed<TimeSpan.FromSeconds(25)&&items.Any(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))))await Task.Delay(100);
-                    missing=items.Where(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))).Select(item=>item.Position).ToArray();
-                    var snapshot=new{missing,monitorExited=monitor.HasExited,monitorExitCode=monitor.HasExited?(int?)monitor.ExitCode:null,items=items.Select(item=>new{item.Id,item.Position,claim=File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim")),receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id))}).ToArray()};
-                    Store.Save(Store.FilePath("terminal-16-diagnostics.json"),snapshot);
-                    Console.WriteLine("Terminal sixteen pane diagnostics: "+JsonSerializer.Serialize(snapshot,Store.Json));
                 }
                 finally
                 {
+                    missing=items.Where(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))).Select(item=>item.Position).ToArray();
+                    var snapshot=new{missing,monitorExited=monitor.HasExited,monitorExitCode=monitor.HasExited?(int?)monitor.ExitCode:null,items=items.Select(item=>new{item.Id,item.Position,claim=File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim")),receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id)),entered=Store.Read<JsonElement?>(Store.FilePath(Path.Combine("attempts",item.Id.ToString("N"),"runner-entered.json"))),error=Store.Read<JsonElement?>(Store.FilePath(Path.Combine("attempts",item.Id.ToString("N"),"runner-error.json")))}).ToArray()};
+                    Store.Save(Store.FilePath("terminal-16-diagnostics.json"),snapshot);
+                    Console.WriteLine("Terminal sixteen pane diagnostics: "+JsonSerializer.Serialize(snapshot,Store.Json));
                     File.WriteAllText(release,"release");
                     var finished=Stopwatch.StartNew();
                     while(finished.Elapsed<TimeSpan.FromSeconds(15)&&items.Any(item=>File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim"))&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase is not("Finished" or "FailedBeforeStart")))await Task.Delay(100);
@@ -84,6 +84,41 @@ internal static class Integration
         var initial=await Ipc.EnsureMonitorAsync();Assert(initial.Ok,initial.Message);
         if(startupOnly)
         {
+            await Test("F05 Terminal sends one creation at a time and cancellation stops later panes",async()=>{
+                var capture=Path.Combine(Store.Root,"terminal-submission-capture");Directory.CreateDirectory(capture);
+                var batch=Guid.NewGuid();var items=Enumerable.Range(1,3).Select(n=>Item("submit "+n,["--hold","1"]) with{BatchId=batch,Position=n,Shared=true}).ToArray();
+                var previous=Environment.GetEnvironmentVariable("AGENT_LAUNCHER_TERMINAL_FIXTURE");Environment.SetEnvironmentVariable("AGENT_LAUNCHER_TERMINAL_FIXTURE",capture);
+                using var cancellation=new CancellationTokenSource();Task? submission=null;
+                try
+                {
+                    submission=Task.Run(()=>Commands.SubmitTerminal(Environment.ProcessPath!,items,"vertical",cancellation.Token));
+                    var first=Path.Combine(capture,items[0].Id.ToString("N")+".json");var deadline=Stopwatch.StartNew();
+                    while(!File.Exists(first)&&!submission.IsCompleted&&deadline.Elapsed<TimeSpan.FromSeconds(5))await Task.Delay(20);
+                    Assert(File.Exists(first),"first pane was not submitted");await Task.Delay(250);
+                    Assert(Directory.GetFiles(capture,"*.json").Length==1&&!submission.IsCompleted,"later split was sent without the first claim");
+                    cancellation.Cancel();try{await submission;Assert(false,"cancellation was ignored");}catch(OperationCanceledException){}
+                    File.WriteAllText(Path.Combine(capture,items[0].Id.ToString("N")+".release"),"release");
+                    await Task.Delay(100);Assert(Directory.GetFiles(capture,"*.json").Length==1,"cancellation sent another pane");
+                    var command=JsonSerializer.Deserialize<string[]>(File.ReadAllText(first))!;
+                    Assert(command.Count(arg=>arg is "new-tab" or "split-pane")==1&&command.Contains(items[0].Id.ToString("D")),"submission contained multiple pane creations");
+                }
+                finally
+                {
+                    cancellation.Cancel();foreach(var item in items)File.WriteAllText(Path.Combine(capture,item.Id.ToString("N")+".release"),"release");
+                    if(submission!=null)try{await submission;}catch(OperationCanceledException){}
+                    Environment.SetEnvironmentVariable("AGENT_LAUNCHER_TERMINAL_FIXTURE",previous);
+                }
+            });
+            await Test("CR10 disconnected pipe clients preserve the original monitor",async()=>{
+                using var monitor=Process.GetProcessById(Store.Read<int>(Store.FilePath("monitor-pid.json")));_ = monitor.Handle;
+                using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                for(var i=0;i<64;i++)
+                {
+                    using(var client=new System.IO.Pipes.NamedPipeClientStream(".",Store.Pipe,System.IO.Pipes.PipeDirection.InOut,System.IO.Pipes.PipeOptions.Asynchronous|System.IO.Pipes.PipeOptions.CurrentUserOnly))await client.ConnectAsync(deadline.Token);
+                    if(i%8==0){var status=await Ipc.SendAsync(new("status",Guid.NewGuid()),deadline.Token);Assert(status.Ok&&status.Epoch==initial.Epoch&&!monitor.HasExited,"short-lived peer exited or replaced the monitor");}
+                }
+                var final=await Ipc.SendAsync(new("status",Guid.NewGuid()),deadline.Token);Assert(final.Ok&&final.Epoch==initial.Epoch&&!monitor.HasExited,"disconnect burst exited or replaced the monitor");
+            });
             foreach(var mode in new[]{"release","crash"})await Test("P04 startup queue waits without spawning and continues after "+mode,async()=>{
                 var ready=Store.FilePath("gate-"+mode+".ready");var release=Store.FilePath("gate-"+mode+".release");var output=Store.FilePath("gate-"+mode+".json");
                 var gateInfo=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false,CreateNoWindow=true};
@@ -467,9 +502,19 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
         await Test("Terminal two panes exact child cwd and arguments",async()=>{
             var terminal=Commands.Terminal("");
             await File.WriteAllTextAsync(Path.Combine(AppContext.BaseDirectory,"test-root.txt"),Store.Root);
-            var batch=Guid.NewGuid();var items=Enumerable.Range(1,2).Select(n=>Item("Terminal fixture "+n,["--echo",Path.Combine(Store.Root,$"terminal-{n}.json"),"中文 & ; spaces"]) with{BatchId=batch,Position=n,Shared=true}).ToArray();
+            var batch=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-two.release");var items=Enumerable.Range(1,2).Select(n=>Item("Terminal fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-{n}.json"),release,"中文 & ; spaces"]) with{BatchId=batch,Position=n,Shared=true}).ToArray();
             var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
-            Commands.SubmitTerminal(terminal,items,"vertical");
+            try
+            {
+                Commands.SubmitTerminal(terminal,items,"vertical");
+                for(var i=0;i<100&&!items.All(item=>File.Exists(Path.Combine(Store.Root,$"terminal-{item.Position}.json")));i++)await Task.Delay(100);
+                foreach(var item in items)
+                {
+                    var actual=JsonDocument.Parse(File.ReadAllText(Path.Combine(Store.Root,$"terminal-{item.Position}.json"))).RootElement;
+                    Assert(actual.GetProperty("Cwd").GetString()==item.Cwd&&actual.GetProperty("Args")[0].GetString()=="中文 & ; spaces","Terminal changed the child cwd or literal arguments");
+                }
+            }
+            finally{File.WriteAllText(release,"release");}
             for(var i=0;i<100;i++){if(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"))break;await Task.Delay(100);}
             Assert(items.All(p=>Store.Read<Receipt>(Store.ReceiptPath(p.Id))?.Phase=="Finished"),"Terminal panes did not complete");
             Assert(File.Exists(Path.Combine(Store.Root,"terminal-1.json"))&&File.Exists(Path.Combine(Store.Root,"terminal-2.json")),"terminal command did not execute");await Ipc.SendAsync(new("status",Guid.NewGuid()));
