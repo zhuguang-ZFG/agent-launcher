@@ -862,3 +862,12 @@ powershell -NoProfile -File scripts/test.ps1
 - 截图为真实 WPF：`ui-acceptance/queue.png`、`queue-order.png`、`recovery.png`、`handoff.png`、`history.png`；已查看版面和可见操作，不替代 DPI/主题全矩阵与屏幕阅读器人工验收。README、C6/C8 合同与验收表同步新语义。
 - 交付目录 `artifacts/preview-usability-20261112/` 与同名 ZIP，为需要 **.NET 8 Desktop Runtime x64** 的技术预览，App/Worker/DLL 须整体使用。校验清单记录当前未提交源码、程序集与测试证据哈希，ZIP 逐项长度与 SHA-256 核对。**未切换桌面入口、未覆盖第 33 节旧包、未安装外部 CLI/Terminal、未 commit/push。**
 - 本轮没有通过完整 `scripts/test.ps1`；不能使用第 33 节旧绿色结果冒充本轮通过。用户原列的 cmd/15/16 原事件归因、极端崩溃的退出证明、Job 通知与共享池竞争、无身份旧记录、F12 人工交互、S0.6/S5、两小时真实中文 CLI、无障碍与干净环境分发仍按原边界开放。未知结果保持占用，未自动删除证据或重放。
+
+## 35. `69bc500` 完整 CI 与本机验收边界（2026-11-12）
+
+- GitHub Actions run `43222175697` 对 commit `69bc50053fde0332fcc010ed011fbecb9950ca30` 于 2026-11-12 13:07:56 UTC 完成，结论 `success`。真实 Pi CLI 安装步骤和完整 `scripts/test.ps1` 门禁均通过；完整门禁覆盖 model、integration、WPF、prototype、browser，集成结果为 0 失败。该结果关闭此提交的 CI 门禁，不覆盖下方需要本机或人工操作的验收项。
+- 本机同一源码的完整门禁仍因 Pi 配置目录 `EPERM`、Windows Terminal 不可用及 Edge CDP `Page.enable` 超时而失败；此前 117/120 是本机运行结果，不能覆盖 CI 成功，也不能反过来冒充本机全绿。CI 完整门禁已通过，说明这些限制没有阻断当前提交的 CI 验收。
+- `scripts/build.ps1` 已将同一源码的 App/Worker 顺序构建到 `artifacts/preview-final-69bc500/`，正式程序集测试钩子扫描为 CLEAN。它是并列技术预览产物，不代表已经安装或切换入口。
+- 复查本机当前空闲物理内存为 1,824,632 KiB（1,868,423,168 bytes），低于 S0.6 双任务准入线 3,758,096,384 bytes；没有降低门槛或开始长时负载。S0.6 尚未执行，S5 尚未实现或验收。
+- 桌面快捷方式 `D:\Desktop\多 Agent 启动器.lnk` 仍指向 `D:\Users\pj\agent-launcher\artifacts\preview-claim-recovery\AgentLauncher.App.exe`；本轮未切换。当前工作区写入范围不包含 `D:\Desktop`，因此此入口变更无法在本会话内执行。
+- 原始 cmd 中途退出及历史 15/16 部分启动仍未复现和归因；极端崩溃后不能证明退出时继续 fail-closed；Job 内存通知仍为 best-effort，共享池竞争仍可能拒绝后续分配；无身份归档的旧裁剪任务仍须人工核对。生产 Terminal F12、两小时真实中文 CLI、无障碍及干净环境分发仍未人工验收。CI 变绿不关闭这些独立风险。
