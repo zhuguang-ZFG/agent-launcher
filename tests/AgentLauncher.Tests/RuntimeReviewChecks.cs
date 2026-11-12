@@ -33,9 +33,65 @@ internal static class RuntimeReviewChecks
         await test("ACC-S03 status signatures invalidate on activity history blockers and epoch",()=>StatusSignatureAsync(cwd));
         await test("ACC-C01 status exposes the existing root CPU and rejects an idle configuration mismatch",()=>RootCpuAsync(cwd));
         await test("ACC-S03 unchanged receipt metadata skips reads but still reconciles Job members",()=>ReceiptCacheAsync(cwd));
+        await test("QQ-C01 two clients cannot reserve one queue entry with different attempt IDs",()=>TaskClaimClientsAsync(cwd));
+        await test("QQ-C02 queue claim survives monitor restart before StartRun",()=>TaskClaimRestartAsync(cwd));
     }
 
     private static void Assert(bool value,string message){if(!value)throw new Exception(message);}
+
+    private static (QueueEntry Entry, LaunchItem Plan, ResourcePolicySnapshot Policy) PendingTask(string root)
+    {
+        var project=Path.Combine(root,"shared-project");Directory.CreateDirectory(project);
+        var command=new CommandSpec(Environment.ProcessPath!,["--hold","1"],"exe");
+        var book=new TaskBook { MaxRunning=2 };
+        var task=TaskBookOps.Create(book,"claim race",project,"custom",new AgentProfile{Executable=command.Executable,Arguments=command.Arguments},"",[],"shared",new ResourceSettings(),0);
+        var entry=TaskBookOps.Enqueue(book,task.Id,command,AgentProbe.Fingerprint(command.Executable));
+        Store.Save(Path.Combine(root,"tasks.json"),book);
+        Store.Save(Path.Combine(root,"configuration.json"),new Configuration());
+        var plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"claim race",project,PhysicalDirectory.Workspace(project),true,command,
+            entry.Resource.JobMemoryLimit,PlanningBytes:entry.Resource.PlanningBytes,ResourceMode:entry.Resource.Mode,SourceSlotId:task.Id,AgentId:task.AgentId);
+        var sample=FreshSample();
+        return (entry,plan,ResourcePolicy.SnapshotFor(entry.Resource,sample.Total,sample.CommitLimit));
+    }
+
+    private static Request TaskReservation(QueueEntry entry,LaunchItem plan,ResourcePolicySnapshot policy)=>
+        new("reserve-task",Guid.NewGuid(),[plan],Policy:policy,PolicyHash:ResourcePolicy.PolicyHash(policy),PlanDigest:ResourcePolicy.PlanDigest([plan]),TaskEntryId:entry.Id);
+
+    private static async Task TaskClaimClientsAsync(string cwd)
+    {
+        using var monitor=await OwnedMonitor.StartAsync(cwd);
+        var (entry,first,policy)=PendingTask(monitor.Root);
+        var second=first with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()};
+        var replies=await Task.WhenAll(monitor.SendAsync(TaskReservation(entry,first,policy)),monitor.SendAsync(TaskReservation(entry,second,policy)));
+        var status=await monitor.SendAsync(new("status",Guid.NewGuid()));
+        var book=new TaskStore(Path.Combine(monitor.Root,"tasks.json")).Load();
+        Store.Save(Path.Combine(monitor.Root,"claim-clients-evidence.json"),new{Replies=replies.Select(reply=>new{reply.Ok,reply.Message}),Entries=status.Entries?.Select(item=>item.Plan.Id),Attempts=book.Attempts.Count});
+        Assert(replies.Count(reply=>reply.Ok)==1,$"same queue entry admitted {replies.Count(reply=>reply.Ok)} distinct attempts; expected exactly one");
+        Assert(status.Entries is {Length:1}&&book.Attempts.Count==0&&book.Queue.Single().Id==entry.Id,"claim was not enforced at the reservation-before-StartRun boundary");
+        var accepted=replies[0].Ok?first:second;
+        var replay=await monitor.SendAsync(TaskReservation(entry,accepted,policy));
+        Assert(replay.Ok&&replay.Entries is {Length:1}&&replay.Entries[0].Plan.Id==accepted.Id,"exact reservation replay lost its original attempt identity");
+        Assert((await monitor.SendAsync(new("status",Guid.NewGuid()))).Entries is {Length:1},"exact replay duplicated the ledger entry");
+    }
+
+    private static async Task TaskClaimRestartAsync(string cwd)
+    {
+        using var original=await OwnedMonitor.StartAsync(cwd);
+        var (entry,first,policy)=PendingTask(original.Root);
+        var initial=await original.SendAsync(TaskReservation(entry,first,policy));
+        Assert(initial.Ok,initial.Message);
+        var taskBytes=File.ReadAllBytes(Path.Combine(original.Root,"tasks.json"));
+        original.Crash();
+        using var restarted=await OwnedMonitor.StartAsync(cwd,existingRoot:original.Root);
+        var second=first with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid()};
+        var duplicate=await restarted.SendAsync(TaskReservation(entry,second,policy));
+        var replay=await restarted.SendAsync(TaskReservation(entry,first,policy));
+        var status=await restarted.SendAsync(new("status",Guid.NewGuid()));
+        Store.Save(Path.Combine(original.Root,"claim-restart-evidence.json"),new{Duplicate=new{duplicate.Ok,duplicate.Message},Replay=new{replay.Ok,replay.Message},Entries=status.Entries?.Select(item=>item.Plan.Id)});
+        Assert(!duplicate.Ok,"restarted monitor admitted a second attempt for an already claimed queue entry");
+        Assert(replay.Ok&&status.Entries is {Length:1}&&status.Entries[0].Plan.Id==first.Id,"restart changed the durable claim or duplicated the exact replay");
+        Assert(File.ReadAllBytes(Path.Combine(original.Root,"tasks.json")).SequenceEqual(taskBytes),"reservation test unexpectedly called StartRun or changed queue intent");
+    }
 
     private static async Task FutureMemoryAsync(string cwd)
     {
@@ -454,9 +510,9 @@ internal static class RuntimeReviewChecks
         public string Root { get; }
         private readonly string pipe;private readonly Process process;private readonly DateTime started;
         private OwnedMonitor(string root,string pipe,Process process){Root=root;this.pipe=pipe;this.process=process;started=process.StartTime;}
-        public static async Task<OwnedMonitor> StartAsync(string cwd,bool fakeSample=true)
+        public static async Task<OwnedMonitor> StartAsync(string cwd,bool fakeSample=true,string? existingRoot=null)
         {
-            var root=OwnedRoot(cwd);Directory.CreateDirectory(root);
+            var root=existingRoot??OwnedRoot(cwd);Directory.CreateDirectory(root);
             var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
             start.ArgumentList.Add("monitor");start.Environment["AGENT_LAUNCHER_TEST_ROOT"]=root;
             if(fakeSample)start.Environment["AGENT_LAUNCHER_FAKE_SAMPLE"]="1";else start.Environment.Remove("AGENT_LAUNCHER_FAKE_SAMPLE");
@@ -485,6 +541,12 @@ internal static class RuntimeReviewChecks
             return await Ipc.ReadResponseAsync(client,cts.Token);
         }
         public bool WaitForExit(TimeSpan timeout)=>process.WaitForExit((int)timeout.TotalMilliseconds);
+        public void Crash()
+        {
+            if(process.HasExited||Store.Read<int>(Path.Combine(Root,"monitor-pid.json"))!=process.Id||process.StartTime!=started
+                ||!StringComparer.OrdinalIgnoreCase.Equals(process.MainModule?.FileName,Store.WorkerPath))throw new IOException("owned monitor identity changed before crash fixture");
+            process.Kill();if(!process.WaitForExit(3000))throw new IOException("owned monitor did not stop");
+        }
         public void Dispose()
         {
             try{if(!process.HasExited&&!process.WaitForExit(5000)&&Store.Read<int>(Path.Combine(Root,"monitor-pid.json"))==process.Id&&process.StartTime==started){process.Kill();process.WaitForExit(3000);}}finally{process.Dispose();}
