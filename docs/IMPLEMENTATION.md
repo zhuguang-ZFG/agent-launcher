@@ -968,3 +968,11 @@ powershell -NoProfile -File scripts/test.ps1
 - 新增 `tests/AgentLauncher.PaneChecks` 和 `scripts/test-production-pane.ps1`，在唯一命名的真实 Terminal 窗口中加载配套生产 Worker：异常退出和资源受限两种情况均忽略已缓冲 Enter，随后由 F12 关闭；正常完成仍由 Enter 关闭。探针无测试构建依赖，结果包含生产 Worker SHA-256，20 秒 watchdog 只退出自身夹具。CI 在生产包构建后执行并保留结果。
 - 首次探针因 Terminal 丢弃末尾空参数未启动检查；改为显式占位后，本机三项通过，证据 `artifacts/production-pane-dd91a24e163d42c68b5e29a6e16b2def/result.json`。该候选包带 SourceDirty=true，只用于验证，不是最终交付包。自动键盘注入不能替代独立人工 F12 验收。
 - 用户已授权 S5 在独立 CI 临时环境验证所需 Bun 运行时，本机仍不安装。后续隔离实验及长稳结果须分别核验后更新；当前不将 S5、历史退出归因或完整发布验收标为通过。
+
+## 46. 批量共享池启动与 S5 实测（2026-11-13，Asia/Shanghai）
+
+- `bb26fad` 的 CI run `43367850339` 在直接并发 16 Worker 对照失败：16 项均 entered/claim，monitor 仍存活；25 秒截止时 7 项已启动，1 项 SpawnIntent，其余仍等待。此前每项 begin 都启动一个新的托管 pool helper，创建事务串行会累积运行时启动开销。该证据证明本次超时发生在 Worker/共享池路径，不能称为原始历史 cmd 事件的同因证明。
+- 现在首个 begin 用一个短 helper 为同池最多 16 条 Pending 预约预建空 leaf Job，逐一校验各项内存硬限额；不领取兄弟任务、不创建 Agent、不写兄弟 claim/receipt。后续每项仍须资源/身份/权限复检及一次性 begin/resume；预建组有未核对成员时拒绝。撤销空项只释放自己的句柄，池限额及根 CPU 不变。
+- 新回归在旧 Worker 上 **34 通过 / 1 失败**，新 Worker 上 **35/35**；真实 Terminal 双窗格及 16 窗格通过。直接对照本机从首个 entered 到最后 Started 约 **5.5 秒 → 2.9 秒**，整个套件约 **23.4 秒 → 20.5 秒**（含初始化与清理）；不能把套件总耗时当成启动耗时。保持原 25 秒断言。证据 `pool-batch-red-repairs.log`、`pool-batch-final-repairs.log`、`pool-startup-baseline.json`、`pool-startup-batched.json`、`pool-batch-terminal.log`。
+- S5 独立 CI run `43370251803` 已完成真实双 SDK 会话，**13 通过 / 1 失败**，确认会话 A 技能补全泄露 B 描述；`IsolationPassed=false / EligibleForHost=false`。详见 [能力审计](OMP-HOST-AUDIT.md)。本机未安装 Bun，实验不含真实凭据或模型请求。按原计划任一串会话即阻断收益测试，保持宿主关闭，不能把审计 workflow 成功称为隔离通过。
+- 本节生产 Worker 已变化，旧 `87b7f64` 正在运行的 90 分钟长稳仍保留到自然收尾；其结果只属于旧版本。新 Worker 必须另跑完整三轮，最终交付以精确提交的完整门禁和长稳结果为准。

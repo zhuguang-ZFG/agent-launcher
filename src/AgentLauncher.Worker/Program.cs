@@ -14,6 +14,7 @@ internal static class Program
         {
             if(args is ["monitor"])return new Monitor().Run();
             if(args is ["root-anchor"])return 0;
+            if(args.Length>=7&&args[0]=="pool-items")return PoolItems(args);
             if(args.Length>=6&&args[0]=="pool-host")return PoolHost(args);
             if(args.Length==2 && args[0] is "pane" or "run" && Guid.TryParse(args[1],out var id))return RunPane(id,args[0]=="pane");
             Console.Error.WriteLine("用法: monitor | pane <attempt-guid> | pool-host <池> <项> <就绪> <释放> <新建池>");return 2;
@@ -82,6 +83,38 @@ internal static class Program
             return 1;
         }
         finally{pool?.Dispose();}
+    }
+    // One helper establishes all empty leaf Jobs in a reserved pool. This does
+    // not claim sibling attempts or create their Agents; each still needs begin/resume.
+    private static int PoolItems(string[] args)
+    {
+        var items=new List<Job>();
+        try
+        {
+            if((args.Length-5)%2!=0||(args.Length-5)/2>ResourcePolicy.MaxSlots)throw new IOException("资源池子组参数无效。");
+            using var pool=new Job(args[1],openOnly:true);
+            var limit=ulong.Parse(args[4],System.Globalization.CultureInfo.InvariantCulture);
+            if(pool.QueryMemory()?.LimitBytes!=limit)throw new IOException("资源池上限未生效。");
+            for(var index=5;index<args.Length;index+=2)
+            {
+                var itemLimit=ulong.Parse(args[index+1],System.Globalization.CultureInfo.InvariantCulture);
+                if(itemLimit==0||itemLimit>limit)throw new IOException("单项上限无效。");
+                var item=new Job(args[index]);items.Add(item);
+                if(!item.CreatedNew)throw new IOException("资源子组已存在，未重复使用。");
+                item.SetMemoryLimit(itemLimit);
+                if(item.QueryMemory()?.LimitBytes!=itemLimit)throw new IOException("单项上限未生效。");
+            }
+            File.WriteAllText(args[2],"ready");
+            var watch=Stopwatch.StartNew();
+            while(!File.Exists(args[3])){if(watch.ElapsedMilliseconds>15000)return 3;Thread.Sleep(20);}
+            return 0;
+        }
+        catch(Exception error)when(error is not OutOfMemoryException)
+        {
+            try{File.WriteAllText(args[2],"error:"+error.Message);}catch{}
+            return 1;
+        }
+        finally{foreach(var item in items)item.Dispose();}
     }
     private static int RunPane(Guid id,bool interactive)
     {
@@ -797,16 +830,41 @@ internal sealed class Monitor : IDisposable
     }
     private Job CreateItemJob(Guid poolId,Guid itemId,Job pool,ulong limit,ulong itemLimit)
     {
+        if(jobs.TryGetValue(itemId,out var existing))
+        {
+            if(existing.QueryMemory()?.LimitBytes!=itemLimit)throw new IOException("已准备的单项上限不符。");
+            if(existing.Members().Length!=0)throw new IOException("预建资源子组存在未核对进程，已停止创建 Agent。");
+            return existing;
+        }
+        var pending=ledger.Entries.Where(entry=>entry.State=="Pending"&&entry.Plan.PoolId==poolId&&!jobs.ContainsKey(entry.Plan.Id)).OrderBy(entry=>entry.Plan.Id==itemId?0:1).Take(ResourcePolicy.MaxSlots).ToArray();
+        if(!pending.Any(entry=>entry.Plan.Id==itemId))throw new IOException("资源子组没有匹配的预约。");
         var ready=PoolMarker(itemId,"ready");var release=PoolMarker(itemId,"release");
         Directory.CreateDirectory(Path.GetDirectoryName(ready)!);
         File.Delete(ready);File.Delete(release);
-        using var helper=new ProtectedProcess(new(Store.WorkerPath,["pool-host",Store.PoolName(poolId),Store.JobName(itemId),ready,release,"0",limit.ToString(System.Globalization.CultureInfo.InvariantCulture),itemLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)],"exe"),Store.Root,[root!,pool],createNoWindow:true);
+        var arguments=new[]{"pool-items",Store.PoolName(poolId),ready,release,limit.ToString(System.Globalization.CultureInfo.InvariantCulture)}
+            .Concat(pending.SelectMany(entry=>new[]{Store.JobName(entry.Plan.Id),entry.Plan.Budget.ToString(System.Globalization.CultureInfo.InvariantCulture)})).ToArray();
+        using var helper=new ProtectedProcess(new(Store.WorkerPath,arguments,"exe"),Store.Root,[root!,pool],createNoWindow:true);
         helper.Resume();
-        WaitForPool(ready,itemId);
-        var item=new Job(Store.JobName(itemId),openOnly:true);
-        File.WriteAllText(release,"1");
-        helper.Process.WaitForExit(5000);
-        return item;
+        var opened=new Dictionary<Guid,Job>();
+        try
+        {
+            WaitForPool(ready,itemId);
+            foreach(var entry in pending)
+            {
+                var item=new Job(Store.JobName(entry.Plan.Id),openOnly:true);opened.Add(entry.Plan.Id,item);
+                if(item.QueryMemory()?.LimitBytes!=entry.Plan.Budget)throw new IOException("资源子组上限不符。");
+            }
+            File.WriteAllText(release,"1");
+            if(!helper.Process.WaitForExit(5000)||helper.Process.ExitCode!=0)throw new IOException("资源子组助手未正常退出，已停止创建 Agent。");
+            foreach(var (id,item) in opened)jobs.Add(id,item);
+            opened.Clear();
+            return jobs[itemId];
+        }
+        finally
+        {
+            foreach(var item in opened.Values)item.Dispose();
+            File.WriteAllText(release,"1");
+        }
     }
     private static void WaitForPool(string ready,Guid id)
     {

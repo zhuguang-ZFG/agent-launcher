@@ -30,6 +30,25 @@ internal static class RepairChecks
             Set(monitor,"root",new Job(Store.RootJob+"-fixture-"+Guid.NewGuid().ToString("N"),root:true));Set(monitor,"rootCpuRate",3500);Set(monitor,"ledger",book??new Ledger());
             Set(monitor,"ledgerPath",Store.FilePath("repair-"+Guid.NewGuid().ToString("N")+".json"));return monitor;
         }
+        Test("S3 pending pool leaves prepare together without claiming or starting siblings",()=>
+        {
+            var poolId=Guid.NewGuid();var limit=4*ResourcePolicy.GiB;
+            var first=Item("first") with{PoolId=poolId};var second=Item("second") with{PoolId=poolId,Budget=ResourcePolicy.GiB};
+            var revoked=Item("revoked") with{PoolId=poolId};var other=Item("other-pool") with{PoolId=Guid.NewGuid()};
+            var entries=new[]{first,second,revoked,other}.Select(plan=>new ControlEntry{Plan=plan,Digest=Store.Digest(plan)}).ToList();entries[2].State="Revoked";
+            var book=new Ledger{Entries=entries,Pools=[new(){Id=poolId,MemoryLimit=limit,BatchId=first.BatchId,PolicyHash="fixture"}]};
+            using var monitor=Monitor(book);var pool=(Job)Call(monitor,"EnsurePoolJob",poolId,limit)!;
+            var item=(Job)Call(monitor,"CreateItemJob",poolId,first.Id,pool,limit,first.Budget)!;
+            var prepared=Get<Dictionary<Guid,Job>>(monitor,"jobs");
+            Assert(prepared.Count==2&&prepared.ContainsKey(second.Id),"pending siblings were not prepared in one helper");
+            Assert(item.QueryMemory()?.LimitBytes==first.Budget&&prepared[second.Id].QueryMemory()?.LimitBytes==second.Budget,"leaf limits were mixed");
+            Assert(prepared.Values.All(job=>job.Members().Length==0)&&pool.Members().Length==0,"preparation started an Agent or left a helper");
+            Assert(entries.Take(2).All(entry=>entry.State=="Pending")&&entries[2].State=="Revoked","preparation consumed sibling authority");
+            Assert(new[]{first,second,revoked,other}.All(plan=>!File.Exists(Store.ReceiptPath(plan.Id))&&!File.Exists(Store.FilePath(Path.Combine("attempts",plan.Id.ToString("N"),"claim")))),"preparation published a claim or receipt");
+            Assert(ReferenceEquals(Call(monitor,"CreateItemJob",poolId,second.Id,pool,limit,second.Budget),prepared[second.Id]),"prepared handle was not reused");
+            entries[1].State="Revoked";Call(monitor,"Refresh",false);
+            Assert(!prepared.ContainsKey(second.Id)&&prepared.ContainsKey(first.Id),"revoked empty sibling did not release its handle independently");
+        });
         Test("R11 missing ledger keeps durable queue claims blocked",()=>
         {
             var item=Item();var claim=new TaskReservationClaim(Guid.NewGuid(),item.Id);var book=new Ledger{BootId=Store.BootId(),Entries=[new(){Plan=item,Digest=Store.Digest(item)}],TaskClaims=[claim]};

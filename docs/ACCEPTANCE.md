@@ -242,3 +242,4 @@ powershell -NoProfile -File scripts/run-soak.ps1 -OmpPath 'C:\path\omp.exe' -Omp
 | R14 | 核对释放时账本被占用、替换失败 | 原占用在内存和磁盘均保留；持久故障阻止后续 begin/resume，不得在下个 tick 自愈放行。 |
 | UX08 | 历史运行器原生错误和内存诊断 | 可导出类型、HResult、时间与内存证据；不导出原异常文本、堆栈或启动参数。 |
 | R17 | 发布包配套文件、运行时、替换 | 中文路径及继承异常 PSModulePath 可检查；缺件、混版、重复/越界清单、缺失 Desktop Runtime 和测试环境均拒绝；生产包无测试钩子，已有运行包不覆盖；构建失败不改变原包。 |
+| S3 | 同池 Pending 空 Job 预建 | 一个 helper 可准备多条预约，各自上限精确；不启动 Agent 或消费兄弟授权，不写 claim/receipt；撤销独立释放；有未知成员拒绝复用。真实 16 项原 25 秒检查不变。 |

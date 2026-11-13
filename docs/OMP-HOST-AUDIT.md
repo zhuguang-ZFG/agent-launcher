@@ -1,8 +1,8 @@
 # Omp 多会话宿主能力审计
 
-审计日期：2026-11-13。对象为官方 `v18.19.0`，提交 `04cd1a7549a02d62ad1d24826198d52507595683`，不是浮动主分支。源码只读检出于 `artifacts/omp-audit-18.19.0/`。本表是静态审计；未运行双会话 SDK、故障演练或内存收益对照，不能把“存在 API”标为隔离验收通过。
+审计日期：2026-11-13。对象为官方 `v18.19.0`，提交 `04cd1a7549a02d62ad1d24826198d52507595683`，不是浮动主分支。源码只读检出于 `artifacts/omp-audit-18.19.0/`。下表记录静态审计；末节记录随后完成的独立 Windows CI 双会话实测。
 
-结论：当前不能启用或分发 S5 同进程双会话宿主。通用 CLI 模式和共享 Job 资源池继续可用。S5.1 的静态审计已完成，运行验证受下列前提阻碍；S5.2–S5.6 尚未完成。
+结论：当前不能启用或分发 S5 同进程双会话宿主。独立 CI 已排除本机运行时前提并实际复现技能补全串会话。通用 CLI 模式和共享 Job 资源池继续可用。S5.1 静态审计和最小隔离反例已完成；S5.2–S5.6 没有通过证据。
 
 | 核对项 | 固定版本源码证据（相对于 Omp 仓库） | 审计结果与剩余验证 |
 | --- | --- | --- |
@@ -21,3 +21,7 @@
 用户随后授权在独立 CI 临时环境验证，本机不安装运行时。`Omp host isolation audit` 手动 workflow 将 Bun 1.4.4 官方 ZIP 校验到固定 SHA-256，在 runner 临时目录安装固定 SDK 18.19.0 并核对 npm integrity；禁安装脚本，不使用用户配置或模型凭据，保留完整依赖 lock。子进程只继承基础系统环境，配置与 home 指向新的临时根。
 
 `tests/omp-host/isolation.mjs` 创建两个真实 Git worktree 与 SDK 会话，显式分离 registry、事件总线、设置、内存认证和会话管理器，检查并发相对路径读取、技能读取、技能/规则补全及 cwd。报告的 `IsolationPassed` 和 `EligibleForHost` 决定结果；审计 workflow 成功只表示实验完成，不能把发现不支持后的绿色 workflow 称为宿主隔离通过。当前这组探针不覆盖权限、取消、故障和收益，`EligibleForHost` 始终 false。任何串会话错误先阻断后续收益实验并保持生产宿主关闭。
+
+2026-11-13 13:12:28（Asia/Shanghai），源码 `91b673752c3f331e586cf5955fe0ac9cd1a58ee0` 的 CI run `43370251803` 完成：Bun 1.4.4 / npm SDK 18.19.0、0 模型请求，**13 项通过、1 项失败**。`S5-A07 skill completions A` 在单会话基线返回 scope-A，创建 B 后即使传入 A 的 skills context 仍返回 scope-B；源码 `SkillProtocolHandler.complete()` 忽略传入 context，读取进程级 `getActiveSkills()`，与实测一致。两会话相对文件读取、技能/规则读取、规则显式补全、registry、事件和 cwd 子场景通过不抵消此失败。报告 `IsolationPassed=false / EligibleForHost=false / unsupported-cross-session-state`。
+
+证据：`artifacts/omp-audit-ci-91b6737/result.json`、`environment.json`、`package-lock.json` 及官方 CI artifact `14012002769`。准备脚本两次失败分别是 PowerShell 5.1 将 npm stderr 警告提升为异常、以及不能转换 package-lock 的空键；已修为核对真实 npm exit code并用 Node 提取身份，保留失败历史。宿主须修正这类全局回退并补齐权限/取消/故障全套隔离后才能进入五轮收益对照；不在已知串会话版本上花费长时收益实验或把上游源码补丁当作已发布产品。
