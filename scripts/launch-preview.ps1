@@ -1,5 +1,11 @@
 ﻿param([switch]$CheckOnly, [string]$PackageDirectory = $PSScriptRoot)
 $ErrorActionPreference = 'Stop'
+function Get-PackageSha256([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '') }
+    finally { $algorithm.Dispose(); $stream.Dispose() }
+}
 try {
     if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess) { throw '请在 Windows x64 中使用 64 位 PowerShell 启动此包。' }
     $package = [IO.Path]::GetFullPath($PackageDirectory)
@@ -15,7 +21,7 @@ try {
         if ($file.Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or -not $seen.Add([string]$file.Name) -or $file.Sha256 -notmatch '^[0-9a-fA-F]{64}$' -or $file.Length -lt 0) { throw '发布清单包含无效或重复文件，已停止启动。' }
         $path = Join-Path $package $file.Name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ('配套文件缺失：' + $file.Name + '。请完整解压 App、Worker 和 DLL。') }
-        if ((Get-Item -LiteralPath $path).Length -ne $file.Length -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $file.Sha256) { throw ('文件版本不一致或已损坏：' + $file.Name + '。请重新完整解压同一版本的发布包。') }
+        if ((Get-Item -LiteralPath $path).Length -ne $file.Length -or (Get-PackageSha256 $path) -ne $file.Sha256) { throw ('文件版本不一致或已损坏：' + $file.Name + '。请重新完整解压同一版本的发布包。') }
     }
     foreach ($name in $required) { if (-not $seen.Contains($name)) { throw ('发布清单缺少配套文件：' + $name) } }
     if ($env:AGENT_LAUNCHER_TEST_ROOT -or $env:AGENT_LAUNCHER_FAKE_SAMPLE) { throw '当前终端带有验收用环境变量。请从资源管理器重新打开发布包。' }

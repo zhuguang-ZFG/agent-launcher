@@ -21,13 +21,15 @@ internal static class PackageChecks
             });
             var manifestPath = Path.Combine(root, "distribution.json"); var manifest = Manifest(); File.WriteAllText(manifestPath, manifest);
             var lastOutput="";
-            int Check(string? invalidRuntime = null, bool fake = false)
+            int Check(string? invalidRuntime = null, bool fake = false, bool inheritedModules = false)
             {
                 var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe")) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
                 foreach (var value in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(root, "Launch.ps1"), "-CheckOnly" }) start.ArgumentList.Add(value);
                 start.Environment.Remove("AGENT_LAUNCHER_TEST_ROOT"); start.Environment.Remove("AGENT_LAUNCHER_FAKE_SAMPLE");
                 if (invalidRuntime is not null) start.Environment["DOTNET_ROOT_X64"] = invalidRuntime;
                 if (fake) start.Environment["AGENT_LAUNCHER_FAKE_SAMPLE"] = "1";
+                // A Windows PowerShell child of pwsh inherits its module path; optional script cmdlets may be unavailable.
+                if (inheritedModules) start.Environment["PSModulePath"] = Path.Combine(root, "unavailable-modules");
                 using var process = Process.Start(start)!;
                 var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
                 if (!process.WaitForExit(15000)) { process.Kill(entireProcessTree: true); process.WaitForExit(5000); throw new Exception("Package check timed out"); }
@@ -36,6 +38,7 @@ internal static class PackageChecks
                 return process.ExitCode;
             }
             if (Check() != 0) throw new Exception("Valid package failed CheckOnly: "+lastOutput);
+            if (Check(inheritedModules: true) != 0) throw new Exception("Inherited module path broke valid package CheckOnly: "+lastOutput);
             var worker = Path.Combine(root, "AgentLauncher.Worker.dll"); var original = File.ReadAllBytes(worker); File.WriteAllText(worker, "different worker version");
             if (Check() == 0) throw new Exception("Mixed Worker was accepted"); File.WriteAllBytes(worker, original);
             var companion = Path.Combine(root, "AgentLauncher.Worker.runtimeconfig.json"); File.Delete(companion);
