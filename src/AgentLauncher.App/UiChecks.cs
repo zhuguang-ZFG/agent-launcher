@@ -152,9 +152,25 @@ public partial class MainWindow
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();await saveTask;
         await Task.Delay(1000);
         using(var process=Process.GetCurrentProcess()){process.Refresh();Store.Save(System.IO.Path.Combine(folder,"ui-idle-memory.json"),new{PrivateBytes=process.PrivateMemorySize64,WorkingSet=process.WorkingSet64});}
+        async Task ResizeForCheckAsync(double width,double height)
+        {
+            Width=width;Height=height;
+            var deadline=Stopwatch.StartNew();var settled=0;
+            while(deadline.Elapsed<TimeSpan.FromSeconds(2))
+            {
+                // A Render callback can run before the native WM_SIZE message. Drain input and layout before measuring.
+                await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
+                var ready=Math.Abs(ActualWidth-Width)<1&&Math.Abs(ActualHeight-Height)<1&&WorkGrid.IsMeasureValid&&WorkGrid.IsArrangeValid&&ConfigurationPanel.IsArrangeValid&&SummaryPanel.IsArrangeValid;
+                settled=ready?settled+1:0;
+                if(settled>=2)return;
+                await Task.Delay(25);
+            }
+            Store.Save(System.IO.Path.Combine(folder,"layout-timeout.json"),new{RequestedWidth=width,RequestedHeight=height,Width,Height,ActualWidth,ActualHeight,WorkGrid.IsMeasureValid,WorkGrid.IsArrangeValid});
+            Check($"native resize and layout settle ({width}, {height})",false);
+        }
         foreach(var variant in new[]{("light",1040d,800d),("dark",800d,650d),("light",650d,500d),("dark",1040d,800d)})
         {
-            config.Theme=variant.Item1;ApplyTheme();Width=variant.Item2;Height=variant.Item3;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
+            config.Theme=variant.Item1;ApplyTheme();await ResizeForCheckAsync(variant.Item2,variant.Item3);
             var point=LaunchButton.TranslatePoint(new Point(),this);Check($"launch visible {variant}",point.Y>=0&&point.Y+LaunchButton.ActualHeight<=ActualHeight&&point.X>=0&&point.X+LaunchButton.ActualWidth<=ActualWidth);
             var narrow=variant.Item2<900;
             Store.Save(System.IO.Path.Combine(folder,$"layout-{variant.Item1}-{variant.Item2}.json"),new{RequestedWidth=variant.Item2,RequestedHeight=variant.Item3,Width,ActualWidth,Height,ActualHeight,Scale=UiScale.Value,WorkWidth=WorkGrid.ActualWidth,ConfigWidth=ConfigurationPanel.ActualWidth,SummaryWidth=SummaryPanel.ActualWidth,ConfigMargin=ConfigurationPanel.Margin.ToString(),SummaryMargin=SummaryPanel.Margin.ToString(),SummaryColumn=Grid.GetColumn(SummaryPanel),SummaryRow=Grid.GetRow(SummaryPanel),ColumnWidth=SummaryColumn.Width.ToString(),Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});
@@ -219,7 +235,7 @@ public partial class MainWindow
         config.Draft.Project=priorProject;
         foreach(var scale in new[]{125,150})
         {
-            config.TextScalePercent=scale;config.Theme="dark";ApplyTheme();Render();Width=650;Height=700;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+            config.TextScalePercent=scale;config.Theme="dark";ApplyTheme();Render();await ResizeForCheckAsync(650,700);
             var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth*UiScale.Value<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight*UiScale.Value<=ActualHeight);
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-text-{scale}.png"));encoder.Save(file);
         }
