@@ -43,3 +43,5 @@ Windows 原生配置窗口 + Windows Terminal 分屏。默认只启用一个 Age
 
 
 源码使用 .NET BCL/WPF，没有引用第三方 NuGet UI 库。Git、Terminal 和各 CLI 是用户已有的外部程序，不随包复制。工具默认在 `%LOCALAPPDATA%\AgentLauncher` 保存配置、备份、授权记录及准备目录；不会自动删除工作目录或计划，控制账本的已结束历史按大小上限裁剪。配置中参数按本地执行需要保存，请勿在参数中填写长期密钥。
+
+S0.6 长稳验收使用 `scripts/run-soak.ps1 -OmpPath <omp.exe绝对路径> -OmpVersion <精确版本>`，要求源码已提交、已有 .NET 8 SDK / Node / Git / Omp。脚本在全新证据目录顺序发布验收器和 Worker，最多等待 120 分钟；连续三次内存采样达到原定 3.5 GiB 准入线后，先执行短校准，再执行真实双任务 30 分钟 × 3 轮。每个任务使用独立目录与配置，通过 Omp RPC 执行读写、哈希、搜索和 Git 工具；不发送模型 prompt。短校准、资源受阻、活动停滞或清理未核实都不能计作长稳通过。使用方法与证据边界见 [验收说明](docs/ACCEPTANCE.md#11-s06-长稳工具与结果判定)。

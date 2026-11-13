@@ -207,3 +207,27 @@ WPF 夹具必须等待当前行的真实下拉选项容器生成，再执行原�
 | UX09 | Codex/Omp 与其他 CLI | 提供对应标识指引，不将任务 ID 或整条命令当会话值；取消不写入，原版本/指纹/目录核对仍生效。 |
 
 原生模型/存储用例纳入主测试；Worker 暂缓防护纳入修复检查；WPF 可用性与快速入队用例纳入完整 `--ui-check`。仅测试构建另提供 `--usability-check <报告目录>`，用于独立诊断这些交互，仍使用原 30 秒限制；定向通过不替代完整 gate。截图必须为真实 WPF；本轮实际执行、失败与外部依赖限制见 IMPLEMENTATION 第 34 节。
+
+## 11. S0.6 长稳工具与结果判定
+
+`tests/AgentLauncher.Soak` 为验收程序，使用 .NET 8 BCL，通过真实 monitor `reserve/run` 启动两个独立任务。它不随生产预览分发。`scripts/test.ps1` 编译它，并通过原生 harness 检查其参数、路径、计时、活动检测和 RPC 失败边界；这些检查不计作正式长稳轮次。
+
+在干净工作树执行：
+
+```powershell
+powershell -NoProfile -File scripts/run-soak.ps1 -OmpPath 'C:\path\omp.exe' -OmpVersion '18.19.0'
+```
+
+可指定 `-NodePath`、`-GitPath`、`-WaitMinutes 1..120` 和 artifacts 下不存在的 `-EvidenceDirectory`。工具必须由使用者安装；脚本不安装运行时、CLI 或依赖。不要从带模拟采样或测试根环境的进程调用它。原定双任务物理余量为 2 GiB + 2 × 768 MiB；等待结束仍不足时只写受阻结果，不启动负载、不结束其他进程。每轮还须通过真实资源策略的 CPU、commit 和软预算检查。
+
+| 阶段 | 必须核实的证据 |
+| --- | --- |
+| 版本与隔离 | 精确 Omp 版本、工具/运行时 SHA-256、加载 DLL 与 Worker 一致；全新普通路径；不使用用户配置或继承凭据。 |
+| 校准 | 单独 20 秒双任务轮次；报告 mode=calibration，stability.eligible=false；不纳入长稳计数。 |
+| 正式轮次 | 固定 3 × 1800 秒；两个 driver 均 ready 后开始单调计时；全程 Worker/monitor/Job 存活可查询；工具活动持续且计数不倒退。 |
+| 停止与清理 | 双方观察停止文件，Omp/Worker/Finished 全部 exit 0，实际 Job 上限 2 GiB、峰值可读且大于零、成员归零；自有 monitor 停止、日志排干、cleanup.verified=true。 |
+| 最终结论 | 三轮全部满足且最终 status=succeeded、无失败或清理错误，才可写 stability.eligible=true。任何短轮、缺失证据、强制终止或未知退出不得通过。 |
+
+`supervisor.json` 原子记录等待、校准、正式执行或停止状态，`memory-samples.jsonl` 保存逐次真实余量；独立根下的 `soak-result.json` 包含每轮采样、工具计数、回执、峰值及清理记录。Ctrl+C 要求验收器收尾；若进程被强制结束，应按原有账本/Job 核对，不能从报告缺失推断完成。日志按字符数有界，JSON 读取上限 8 MiB。
+
+该负载验证 Omp RPC 工具与 Launcher 生命周期，不涉及模型推理；Omp 启动可能刷新公共模型目录。它不代替两小时真实中文交互 CLI、生产 F12 的人工交互、无障碍、干净环境分发或 S5 多会话隔离/收益验收。失败请求不重放，无法证明退出时保留占用与文件。

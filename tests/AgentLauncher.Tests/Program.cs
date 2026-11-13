@@ -4,6 +4,15 @@ using System.Text.Json;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
+if(args.Length>=2&&args[0]=="--mode"&&args[1]=="rpc"&&Environment.GetEnvironmentVariable("AGENT_LAUNCHER_SOAK_RPC_FIXTURE") is {Length:>0} rpcFixture)
+{
+    Console.WriteLine("{\"type\":\"ready\",\"protocolVersion\":1,\"maxFrameBytes\":4096}");Console.Out.Flush();
+    if(rpcFixture=="ready-eof")return 0;
+    var line=Console.ReadLine();
+    if(line is null)return 3;
+    if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_SOAK_RPC_CAPTURE") is {Length:>0} rpcCapture)File.AppendAllText(rpcCapture,line+"\n");
+    return 8;
+}
 if(args is ["--repair-checks"]) return RepairChecks.Run();
 if(args is ["--integration"]) return await Integration.RunAsync();
 if(args is ["--terminal-batch-checks"]) return await Integration.RunAsync(terminalOnly:true);
@@ -73,6 +82,8 @@ if(args.Length>0&&args[0]=="--allocate") {try {var data=new byte[256*1024*1024];
 var failures=new List<string>();var passed=new List<string>();var temp=Path.Combine(Path.GetTempPath(),"AgentLauncher-tests-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temp);
 void Test(string name,Action action){try{action();passed.Add(name);Console.WriteLine("PASS "+name);}catch(Exception e){failures.Add(name+": "+e);Console.WriteLine("FAIL "+name+": "+e.Message);}}
 void Assert(bool value,string message){if(!value)throw new Exception(message);}
+SoakChecks.Register(Test,temp);
+if(args is ["--soak-checks"]){Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");return failures.Count==0?0:1;}
 Test("P01 rapid native sampling retains a valid CPU interval",()=>{
     var sampler=new Sampler();var first=sampler.Sample();
     Assert(double.IsNaN(first.CpuPercent),"first CPU reading fabricated usage");

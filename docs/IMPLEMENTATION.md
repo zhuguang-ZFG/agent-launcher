@@ -928,3 +928,15 @@ powershell -NoProfile -File scripts/test.ps1
 - 新建根 Job 时，monitor 在提供服务前创建并等待一个 `root-anchor` 短进程，使用原保护创建路径固定与 monitor 一致的祖先链，保留 CPU 上限和原子 Job 关联；打开已有根时不改变它。初始化未完成则阻止启动。anchor 与 pool-host 使用 CREATE_NO_WINDOW，避免内部助手闪出控制台，不改变交互 Agent 的控制台行为。
 - 同一输入修复前双窗格通过、共享池预约拒绝；修复后专项门禁 **3 轮全部通过，每轮真实双窗格与共享 16 窗格均完成**。证据 `artifacts/anchor-hidden-1.json`～`anchor-hidden-3.json`，本机 Test/Worker 顺序发布 0 警告、0 错误。新增 native 错误诊断仅记录操作、attempt、类型/错误码/堆栈，不记录参数；CI 保留此文件。最终提交仍须完整 CI 后交付。
 - 这些复现不证明用户历史 cmd 退出或所有 15/16 都是同一个原因。可确认的缺陷、缓解效果、长期验证与无法证明的历史事件继续分别记录；未知退出、无身份旧记录不自动释放或重放。
+
+## 42. 已交付修复核对与可重复的长稳验收（2026-11-13，Asia/Shanghai）
+
+- 第 41 节最终提交 `c2da0e7b3c172e6a1ec1dc753226604ad0ad20fa` 对应完整 CI run `43266055283`，结论 `success`。同一源码的本机统一门禁 `artifacts/local-final-root-anchor/runner.json` 为 exit 0、577.39 秒：原生 131/131、修复 29/29、集成 121/121、WPF 257 项、原型 5/5；明确 SkipBrowser。本机 Edge 的 GPU 子进程仍受系统 `0xC0000022` 拒绝访问影响，不把远端浏览器成功当成本机通过。
+- 该提交已于此前回合完成生产 App/Worker 同版本发布、16 个交付文件哈希核对和原目录切换；现有桌面快捷方式继续指向 `artifacts/preview-claim-recovery/AgentLauncher.App.exe`，目标目录已是该修复。ZIP 为 `artifacts/AgentLauncher-preview-c2da0e7.zip`，切换证据 `artifacts/preview-entry-switch-c2da0e7.json`。生产 Terminal 自动化 F12/Enter 检查 3/3，证据 `artifacts/production-pane-check/result-c2da0e7.json`；不等于独立人类验收。后续提交的生产包与入口必须再按其自身 SHA 的完整 CI 核对。
+- 用户随后要求释放本机内存再继续 S0.6，替代第 30 节的延期选择。旧监测从 `2026-11-12T17:42:52Z` 等至 `19:42:56Z`，两小时内未达到原定准入线，未启动负载，监测已停止。证据 `artifacts/soak-20261113/supervisor-ready.json` 与逐次采样。2026-11-13 `02:19:17Z` 本机可用物理内存为 **1,499,328,512 bytes**，仍低于 **3,758,096,384 bytes**；没有降低门槛或结束生产任务。
+- 临时长稳执行器整理为 `tests/AgentLauncher.Soak`，使用 .NET 8/BCL 和项目引用；`scripts/run-soak.ps1` 提供干净源码检查、顺序发布、真实余量等待、独立校准及三轮入口。取消动态 DLL 搜索，启动前核对加载 DLL 与 Worker 目录；新根、输出及 driver 路径拒绝复用、越界和重解析点；driver 结果不能覆盖已有记录。源码不依赖本机绝对路径、不安装外部 CLI，不进入生产包。
+- 修正执行器的假通过风险：双 ready 后仅用单调时钟计满 1800 秒；不能用 UTC 差值补齐；每次工具完成原子发布进度，活动超时或计数倒退立即失败；RPC EOF、残帧、无效 UTF-8、超限帧和断连均拒绝，未知请求不重放。通过结论只在 Job 成员归零、退出/回执匹配、日志排干及自有 monitor 停止后发布；清理错误影响退出码，不能仍返回成功。无法证明结束时保留 monitor 和原文件供核对。
+- 原生 harness 新增 10 项 `S0.6` 检查，初次定向结果 **141/141、0 失败**；包含参数和固定轮次、清理未核实、路径别名、单调活动、真实替身进程 RPC 断连及单次请求、UTF-8/残帧/超限帧、shell 字面引用。统一门禁现编译验收项目并执行这些检查。真实准入预检 `artifacts/soak-admission-tooling.json` 为 exit 3、admission-blocked、0 轮、eligible=false、cleanup.verified=true，没有启动代表性负载。完整门禁与最终 SHA 的 CI 仍以本轮最终报告为准。
+- 旧单任务短协议预检为 Omp 18.19.0、10.029 秒、6 轮工具循环/30 次工具、Job 峰值约 625 MiB、exit 0 及成员归零。它只验证早期协议可执行，报告 `artifacts/soak-20261113/single-driver-protocol-result.json` 的 mode 明确为 single-driver-protocol-probe；不能算作双任务校准或 S0.6 的任何一轮。
+- **S0.6 正式完成仍为 0/3，S5 未实现或启用。** 两小时真实中文交互 CLI、无障碍、干净环境分发及独立人工 F12 验收仍开放；原始历史退出同因证明、丢失句柄后的未知占用和无身份旧任务仍按原边界核对。新增验收工具及 CI 成功不关闭这些独立要求。
+- 本轮本机统一门禁 `artifacts/local-soak-tooling-20261113/runner.json` 于 `2026-11-13T02:26:00Z` 完成，**exit 0、654.39 秒**，原生 141/141、修复 29/29、集成 121/121、WPF 与原型 5/5 均通过；浏览器明确跳过。之后验收器的目录所有权、运行时/工具哈希、失败日志和 driver 入口保护经过顺序编译及 10/10 定向检查，生产程序集误用于验收时 exit 4 且未创建指定测试根。最终源码完整浏览器和其余 gate 仍由对应提交 CI 验证，证据保存在最终交付报告，不以旧 SHA 的成功代替。

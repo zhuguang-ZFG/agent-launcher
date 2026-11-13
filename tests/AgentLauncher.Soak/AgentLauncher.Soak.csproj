@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><AssemblyName>SoakRunner</AssemblyName><RootNamespace>SoakRunner</RootNamespace></PropertyGroup><ItemGroup><ProjectReference Include="../../src/AgentLauncher.Windows/AgentLauncher.Windows.csproj" /><InternalsVisibleTo Include="AgentLauncher.Tests" /></ItemGroup></Project>

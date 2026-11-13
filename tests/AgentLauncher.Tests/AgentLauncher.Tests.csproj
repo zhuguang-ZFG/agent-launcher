@@ -1,1 +1,1 @@
-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup><ItemGroup><ProjectReference Include="../../src/AgentLauncher.Windows/AgentLauncher.Windows.csproj" /></ItemGroup></Project>
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup><ItemGroup><ProjectReference Include="../../src/AgentLauncher.Windows/AgentLauncher.Windows.csproj" /><ProjectReference Include="../AgentLauncher.Soak/AgentLauncher.Soak.csproj" /></ItemGroup></Project>

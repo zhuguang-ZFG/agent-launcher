@@ -4,7 +4,7 @@ $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtime=[IO.Path]::GetFullPath($RuntimeDirectory)
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
-foreach($project in @('tests/AgentLauncher.Tests','src/AgentLauncher.Worker','src/AgentLauncher.App')){
+foreach($project in @('tests/AgentLauncher.Soak','tests/AgentLauncher.Tests','src/AgentLauncher.Worker','src/AgentLauncher.App')){
   $name=Split-Path $project -Leaf
   & dotnet publish (Join-Path $root "$project/$name.csproj") -c Release -p:DefineConstants=INTEGRATION_TESTS -o $runtime --nologo -m:1
   if($LASTEXITCODE -ne 0){throw "Test publish failed: $name"}
