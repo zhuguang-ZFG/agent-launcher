@@ -20,6 +20,7 @@ internal static class PackageChecks
                 Files = names.Concat(duplicate ? [names[0]] : Array.Empty<string>()).Select((name, index) => new { Name = traversal && index == 0 ? "../escape.exe" : name, Length = new FileInfo(Path.Combine(root, name)).Length, Sha256 = SoakRunner.JsonIo.Sha256File(Path.Combine(root, name)) })
             });
             var manifestPath = Path.Combine(root, "distribution.json"); var manifest = Manifest(); File.WriteAllText(manifestPath, manifest);
+            var lastOutput="";
             int Check(string? invalidRuntime = null, bool fake = false)
             {
                 var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe")) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -31,9 +32,10 @@ internal static class PackageChecks
                 var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
                 if (!process.WaitForExit(15000)) { process.Kill(entireProcessTree: true); process.WaitForExit(5000); throw new Exception("Package check timed out"); }
                 if (!Task.WaitAll([stdout, stderr], 5000)) throw new Exception("Package check output did not drain");
+                lastOutput=stdout.Result+stderr.Result;
                 return process.ExitCode;
             }
-            if (Check() != 0) throw new Exception("Valid package failed CheckOnly");
+            if (Check() != 0) throw new Exception("Valid package failed CheckOnly: "+lastOutput);
             var worker = Path.Combine(root, "AgentLauncher.Worker.dll"); var original = File.ReadAllBytes(worker); File.WriteAllText(worker, "different worker version");
             if (Check() == 0) throw new Exception("Mixed Worker was accepted"); File.WriteAllBytes(worker, original);
             var companion = Path.Combine(root, "AgentLauncher.Worker.runtimeconfig.json"); File.Delete(companion);
