@@ -94,7 +94,7 @@ internal static class Program
         // Queue only the spawn transaction; release it as soon as Started is durable, so Agents still run in parallel.
         using var startup=new Mutex(false,Store.RootJob+"-startup");var startupOwned=false;
         ProtectedProcess? child=null;Job? root=null;Job? pool=null;Job? job=null;JobMemoryWatch? memoryWatch=null;var resumeIntent=false;var claimCreated=false;int? memoryOffender=null;
-        JobMemoryEvidence? exitMemory=null;int? poolOffender=null;Guid? panePoolId=null;DateTimeOffset? poolNoticeAt=null;string poolNoticeDetail="";var poolCheck=Stopwatch.StartNew();
+        JobMemoryEvidence? exitMemory=null;int? poolOffender=null;Guid? panePoolId=null;DateTimeOffset? poolNoticeAt=null;string poolNoticeDetail="";string? memoryNotificationError=null;var poolCheck=Stopwatch.StartNew();
         try
         {
             var claim=Path.Combine(Store.Root,"attempts",id.ToString("N"),"claim");Directory.CreateDirectory(Path.GetDirectoryName(claim)!);
@@ -108,7 +108,14 @@ internal static class Program
             if(!grant.Ok||grant.Entries is not {Length:1})throw new IOException(grant.Message);
             var entry=grant.Entries[0];var plan=entry.Plan;
             root=new Job(Store.RootJob,openOnly:true);job=new Job(Store.JobName(id),openOnly:true);
-            memoryWatch=new JobMemoryWatch(job);
+            try
+            {
+#if INTEGRATION_TESTS
+                if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")=="MemoryWatchStart")throw new System.ComponentModel.Win32Exception(6,"Controlled notification initialization failure");
+#endif
+                memoryWatch=new JobMemoryWatch(job);
+            }
+            catch(System.ComponentModel.Win32Exception e){memoryNotificationError=$"Win32 {e.NativeErrorCode}: {e.Message}";}
             if(plan.PoolId is {} poolId){panePoolId=poolId;pool=new Job(Store.PoolName(poolId),openOnly:true);}
             if(PhysicalDirectory.Workspace(plan.Cwd).Key!=plan.Workspace.Key)throw new IOException("工作目录物理身份变化，已阻止启动。");
             if(interactive)TerminalAppearance.WritePaneHeading(plan);
@@ -146,11 +153,11 @@ internal static class Program
             if(pool!=null)try{Ipc.SendAsync(new("status",Guid.NewGuid())).GetAwaiter().GetResult();}catch(Exception e)when(e is IOException or OperationCanceledException or TimeoutException){poolNoticeDetail="共享池通知尚未核对；退出码不能单独证明内存超限。";}
             ObserveMemory(forcePool:true);var exit=child.Process.ExitCode;
             exitMemory=MemoryEvidence();var detail=ExitDiagnostics.Describe(exit,exitMemory);
-            if(pool is not null)detail+="共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence())+poolNoticeDetail;
+            if(pool is not null)detail+="共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail;
             Write("Exited",child.Process.Id,child.CreationTime,exit,"进程已退出。"+detail);
             if(interactive&&exit!=0)Console.WriteLine("\nAgent 异常退出。"+detail+"\n工作目录已保留；如仍有工具运行，将等待它们结束。");
             while(job!.Members().Length>0){Thread.Sleep(250);ObserveMemory();}
-            ObserveMemory(forcePool:true);exitMemory=MemoryEvidence();detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence())+poolNoticeDetail);
+            ObserveMemory(forcePool:true);exitMemory=MemoryEvidence();detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail);
             Write("Finished",child.Process.Id,child.CreationTime,exit,"全部受管进程已退出。"+detail);
 #if !INTEGRATION_TESTS
             HoldPane(interactive,exit,exitMemory?.LimitReached==true||poolOffender!=null);
@@ -158,12 +165,24 @@ internal static class Program
             return exit;
         }
         finally{memoryWatch?.Dispose();child?.Dispose();job?.Dispose();pool?.Dispose();root?.Dispose();}
-        JobMemoryEvidence? MemoryEvidence()=>job?.QueryMemory() is {} evidence?evidence with{LimitReached=memoryOffender!=null,OffendingProcessId=memoryOffender}:null;
+        JobMemoryEvidence? MemoryEvidence()=>job?.QueryMemory() is {} evidence?evidence with{LimitReached=memoryOffender!=null,OffendingProcessId=memoryOffender,NotificationError=memoryNotificationError}:null;
         JobMemoryEvidence? PoolEvidence()=>pool?.QueryMemory() is {} evidence?evidence with{LimitReached=poolOffender!=null,OffendingProcessId=poolOffender}:null;
         void ObserveMemory(bool forcePool=false)
         {
-            var pids=memoryWatch!.Drain();var changed=pids.Length>0;
-            if(changed){memoryOffender=pids[0];exitMemory=MemoryEvidence();}
+            int[] pids=[];var changed=false;
+            try
+            {
+#if INTEGRATION_TESTS
+                if(memoryWatch is not null&&Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")=="MemoryWatchDrain")throw new System.ComponentModel.Win32Exception(6,"Controlled notification read failure");
+#endif
+                pids=memoryWatch?.Drain()??[];
+            }
+            catch(System.ComponentModel.Win32Exception e)
+            {
+                memoryNotificationError=$"Win32 {e.NativeErrorCode}: {e.Message}";memoryWatch?.Dispose();memoryWatch=null;changed=true;
+            }
+            if(pids.Length>0){memoryOffender=pids[0];changed=true;}
+            if(changed)exitMemory=MemoryEvidence();
             if(panePoolId is {} poolId&&(forcePool||poolCheck.ElapsedMilliseconds>=1000))
             {
                 poolCheck.Restart();
@@ -180,7 +199,7 @@ internal static class Program
                 catch(Exception e)when(e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException){poolNoticeDetail="共享池通知不可读取，不能据此判断本窗格超限。";}
             }
             if(!changed)return;
-            var text=ExitDiagnostics.MemoryText(exitMemory)+(pool is null?"":"共享池："+ExitDiagnostics.MemoryText(PoolEvidence())+poolNoticeDetail);
+            var text=ExitDiagnostics.MemoryText(exitMemory)+(pool is null?"":"共享池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail);
             Write(child!.Process.HasExited?"Exited":"Started",child.Process.Id,child.CreationTime,child.Process.HasExited?child.Process.ExitCode:null,text);
             if(interactive)Console.Error.WriteLine("\n"+text);
         }
@@ -439,9 +458,9 @@ internal sealed class Monitor : IDisposable
                     var state=receipt?.Phase switch{"Started"=>"Started","Exited"=>"Exited",_=>"Unknown"};
                     if(e.State!=state){e.State=state;changed=true;}
                     e.Detail=receipt?.Phase=="Exited"?"Agent 已退出，工具仍运行。"+receipt.Detail:receipt?.Phase=="Started"?"已启动进程（不代表任务完成）":"结果未确认；占用保留";
-                    if(receipt?.PoolMemory?.LimitReached==true)e.Detail+="。共享池："+ExitDiagnostics.MemoryText(receipt.PoolMemory);
+                    if(receipt?.PoolMemory?.LimitReached==true)e.Detail+="。共享池："+ExitDiagnostics.MemoryText(receipt.PoolMemory,sharedPool:true);
                     if(e.Plan.PoolId is {} watchedPool&&poolWatchErrors.TryGetValue(watchedPool,out var watchError))e.Detail+="。共享池通知不可用："+watchError;
-                    if(receipt?.JobMemory?.LimitReached==true)e.Detail+="。"+ExitDiagnostics.MemoryText(receipt.JobMemory);
+                    if(receipt?.JobMemory is { } itemMemory&&(itemMemory.LimitReached||itemMemory.NotificationError is not null))e.Detail+="。"+ExitDiagnostics.MemoryText(itemMemory);
                     else if(receipt?.Phase=="Started"&&j?.QueryMemory() is {} memory&&ExitDiagnostics.NearLimit(memory))e.Detail+="。"+ExitDiagnostics.MemoryText(memory);
                 }
             }
@@ -659,6 +678,8 @@ internal sealed class Monitor : IDisposable
     // Fail-closed, user-confirmed release: settle only entries whose resource group provably no longer exists and whose receipt already proves the whole managed tree exited (Finished) or never ran (FailedBeforeStart). A dead recorded parent alone is not proof: jobs have no KILL_ON_JOB_CLOSE, so descendants may survive the handle loss and cannot be enumerated without it.
     private Response ReconcileRequests()
     {
+        if(ledgerBroken)return BuildStatus(null) with{Ok=false,Message=ledgerBrokenDetail};
+        var before=ledger.Entries.Select(entry=>(Entry:entry,entry.State,entry.Detail)).ToArray();
         var settled=0;var changed=false;var refusals=new List<(ControlEntry Entry,string Reason)>();
         foreach(var e in ledger.Entries.Where(e=>!Store.IsTerminal(e)&&e.State!="Pending").ToArray())
         {
@@ -690,10 +711,11 @@ internal sealed class Monitor : IDisposable
             catch(Exception ex)when(ex is not OutOfMemoryException){refusals.Add((e,"核对失败："+ex.Message));}
             finally{gate.ReleaseMutex();}
         }
-        if(changed)Save();
+        if(changed&&!SaveReconciliation(before))return BuildStatus(null) with{Ok=false,Message=ledgerBrokenDetail};
         Refresh(forceSample:true);
+        before=ledger.Entries.Select(entry=>(Entry:entry,entry.State,entry.Detail)).ToArray();
         foreach(var (entry,reason) in refusals)entry.Detail="核对释放被拒绝："+reason+"。";
-        if(refusals.Count>0)Save();
+        if(refusals.Count>0&&!SaveReconciliation(before))return BuildStatus(null) with{Ok=false,Message=ledgerBrokenDetail};
         var snapshot=BuildStatus(null);
         var ok=refusals.Count==0&&snapshot.Ok;
         var message=settled>0||refusals.Count>0
@@ -701,6 +723,17 @@ internal sealed class Monitor : IDisposable
             :"没有需要核对释放的占用。";
         if(!ok&&refusals.Count==0&&snapshot.AdmissionBlockedReason!=null)message+="当前仍阻塞："+snapshot.AdmissionBlockedReason;
         return snapshot with{Ok=ok,Message=message};
+    }
+    private bool SaveReconciliation((ControlEntry Entry,string State,string Detail)[] before)
+    {
+        try{Save();return true;}
+        catch(Exception e)when(e is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            ledger.Entries=before.Select(previous=>previous.Entry).ToList();
+            foreach(var previous in before){previous.Entry.State=previous.State;previous.Entry.Detail=previous.Detail;}
+            ledgerBroken=true;blocked=ledgerBrokenDetail="核对结果未写入，已停止启动与回收；原占用和证据保留，请修复记录目录后重新核对："+e.Message;
+            return false;
+        }
     }
     // PID reuse is not survival: the recorded start time (FILETIME UTC) must match exactly. When the start time cannot be read, treat the process as alive and refuse release. Only used to refine the refusal reason; a dead parent never proves the tree exited.
     private static bool ProcessAlive(int pid,long processTimeUtc)

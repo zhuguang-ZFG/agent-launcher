@@ -947,3 +947,13 @@ powershell -NoProfile -File scripts/test.ps1
 - 用户明确授权将项目开源。公开前扫描本地可达 74 个提交、484 个文件版本、14,662,335 bytes，未发现配置的凭据模式命中或敏感配置文件路径；扫描范围与局限保存在 `artifacts/publication-history-scan-2cb79a1.json`。随后将 `zhuguang-ZFG/agent-launcher` 改为 PUBLIC，并由 GitHub 读回确认；同一 CI 重跑进入 queued，最终成功仍待最终提交核对。
 - 用户选择 **Apache-2.0**。根目录 LICENSE 采用 Apache 官方 Version 2.0 完整文本，NOTICE 记录项目及贡献者署名；README 增加许可证入口，`scripts/build.ps1` 将 LICENSE / NOTICE 一并放入分发目录。没有新增 NuGet、CLI 或运行时依赖。
 - `scripts/run-soak.ps1` 的真实一分等待预检 `artifacts/soak-script-preflight-2cb79a1/` 正常顺序发布、连续采样，期限到仍不足准入，status=stopped、未启动校准或长稳负载。随后 `artifacts/soak-live-2cb79a1/` 为真实 120 分钟等待；源码变化会在下一次检查安全停止，最终提交应以全新证据目录重新启动，不能把旧监测说成始终运行。S0.6 仍须实际完成三轮后才更新结论。
+
+## 44. 通知降级、恢复写入与发布入口（2026-11-13，Asia/Shanghai）
+
+- 复审发现 `JobMemoryWatch` 的初始化/读取 Win32 错误会终止 pane runner 的正常生命周期观察。现在仅通知组件降级，继续用原 Job 等待全部后代退出；回执持久化 `NotificationError`，UI 和历史诊断说明通知不可用、硬上限仍生效。共享池峰值文案明确属于全池，不再写成单项用量。这是新的确定缺陷修复，不是历史 cmd 退出的同因证明。
+- `reconcile` 核对释放在 `Save` 失败后曾留下内存终态。现在写入失败恢复原状态/说明并冻结授权，后续 tick 和 begin 继续拒绝；不把无法证明结束的占用自动释放。新增真实文件共享冲突回归检查原磁盘字节、内存占用与后续拒绝。
+- 全局诊断原先固定写每项 2 GiB/CPU 35%，与自定义配置不符；现在分别记录配置策略和实测根 CPU。历史诊断增加内存及白名单运行器原生身份字段（时间、PID、类型、HResult），不复制原异常文本或堆栈，避免参数泄漏。
+- `build.ps1` 在独立目录顺序发布配套 App/Worker，显式生产常量、扫描测试标记、生成 `distribution.json`、附便携启动入口；发布检查通过后才切换目标，保留旧包。`Start-AgentLauncher.cmd` / `Launch.ps1 -CheckOnly` 检查配套文件 SHA-256、清单、.NET 8 Desktop Runtime x64，错误给出修复指引，不安装依赖。CI 增加生产包检查；这不冒充签名、安装器或干净用户环境的完整验收。
+- 初轮定向实测：原生 **142/142**（包含便携入口失败路径）、修复检查 **33/33**、新增进度读取回归 **11/11**，均 exit 0；证据 `artifacts/remediation-native.log`、`remediation-repair.log`、`remediation-soak-checks.log`。后续增加的历史诊断回归、最终完整门禁与交付以其自身源码版本的结果为准。
+- 新增独立 Windows 长稳 workflow。`0ffe14f` run `43358152784` 真实准入通过，20 秒校准完成；正式第一轮约 18 分钟时，验收器读取进度文件发生共享冲突并停止，两个 driver 随停止信号 exit 0 且 cleanup verified。该轮失败、正式仍 **0/3**，证据 `artifacts/soak-ci-0ffe14f/`；这是验收器缺陷，现仅对 Win32 32/33 做 200 ms 有界重试，持续锁定和损坏 JSON 仍失败，不重放请求或接受旧进度。
+- 本机 `soak-live-923062e` 在源码变化后于 `2026-11-13T03:18:20Z` 安全停止，无校准/正式负载。后续 CI 长稳必须重新完整跑 3 × 1800 秒；本机、人工中文 CLI/F12、系统 DPI/Narrator、签名/干净分发和 S5 不因本轮修复自动关闭。

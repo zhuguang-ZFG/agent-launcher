@@ -77,13 +77,26 @@ public static class TaskHistoryReader
         var receiptNotice = "";
         try { receipt = Store.Read<Receipt>(Store.ReceiptPath(item.AttemptId)); }
         catch (Exception e) when (e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException) { receiptNotice = "回执不可读取；不能由缺失或损坏的回执推断执行结果。"; }
+        var runnerNotice="";
+        RunnerEvidence? entered=null, failure=null;
+        try
+        {
+            var directory=Path.Combine(Store.Root,"attempts",item.AttemptId.ToString("N"));
+            entered=Store.Read<RunnerEvidence>(Path.Combine(directory,"runner-entered.json"));
+            failure=Store.Read<RunnerEvidence>(Path.Combine(directory,"runner-error.json"));
+        }
+        catch(Exception e)when(e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException){runnerNotice="运行器诊断不可读取；保留原文件供核对。";}
         return JsonSerializer.Serialize(new
         {
             item.AttemptId, item.TaskId, item.Name, TaskState = item.State, item.At,
             ProcessState = entry?.State ?? "没有可验证的启动身份记录，结果未知", LedgerNotice = ledgerNotice,
             ProcessDetail = entry?.Detail, Workspace = entry?.Plan.Cwd,
             ReceiptPhase = receipt?.Phase ?? "没有可读取的回执", ReceiptAt = receipt?.At, receipt?.ExitCode, ReceiptNotice = receiptNotice,
+            receipt?.JobMemory, receipt?.PoolMemory,
+            RunnerEntered=entered,RunnerFailure=failure,RunnerNotice=runnerNotice,
             Notice = "此预览不包含启动参数、会话 ID、环境变量或凭据；工作目录可能包含用户名或项目名。单独的回执不替代身份与全部进程退出证明。"
         }, new JsonSerializerOptions { WriteIndented = true });
     }
+    // Raw exception messages/stacks may include arguments or paths. Export only native identity fields.
+    private sealed record RunnerEvidence(DateTimeOffset At,int Pid,string? Type,int? HResult);
 }

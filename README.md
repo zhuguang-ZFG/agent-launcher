@@ -37,7 +37,9 @@ Windows 原生配置窗口 + Windows Terminal 分屏。默认只启用一个 Age
 - [完整验收要求](docs/ACCEPTANCE.md)
 - [HTML 交互示例](docs/prototype.html)（示例数据，与原生程序分开）
 
-构建：`powershell -NoProfile -File scripts/build.ps1`。
+构建：`powershell -NoProfile -File scripts/build.ps1`。发布先在新目录完成，再核对生产程序集无测试标记、文件哈希与运行时；已有包使用中会拒绝替换，成功替换时保留旧目录。
+
+完整解压发布包后双击 `Start-AgentLauncher.cmd`；配套 `Launch.ps1 -CheckOnly` 可单独检查文件版本与 .NET 8 Desktop Runtime x64。缺失文件、混用 App/Worker、运行时缺失均给出明确原因；不会自动安装依赖。直接启动 App.exe 仍可用，前置检查由上述入口提供。
 
 开发验证：`powershell -NoProfile -File scripts/test.ps1`。测试构建使用隔离临时目录、短生命周期进程，包含故障注入和模拟准入采样；会短暂打开双窗格及 16 窗格测试。Pi 版本检查使用临时配置目录，不写入用户配置。旧测试监控器占用默认构建目录时，可用 `-RuntimeDirectory artifacts/test-runtime-<唯一名称>` 指定新目录。该测试模式不编入 preview 生产配置。不要用测试目录的 exe 日常运行。
 

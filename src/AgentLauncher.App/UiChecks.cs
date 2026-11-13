@@ -212,6 +212,9 @@ public partial class MainWindow
         var redacted=DiagnosticText(false);var explicitPaths=DiagnosticText(true);
         Check("diagnostics excludes arguments and redacts paths by default",!redacted.Contains("DoNotExport")&&!redacted.Contains("SECRET_ARGUMENT_SENTINEL")&&!explicitPaths.Contains("SECRET_ARGUMENT_SENTINEL"));
         using(var diagnostic=System.Text.Json.JsonDocument.Parse(explicitPaths))Check("diagnostics includes paths only on explicit opt in",diagnostic.RootElement.GetProperty("Project").GetString()==config.Draft.Project);
+        var originalResource=config.Draft.Resource;config.Draft.Resource=new(){Mode="custom",JobMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.GiB,CpuRate=2500};
+        using(var diagnostic=System.Text.Json.JsonDocument.Parse(DiagnosticText(false)))Check("diagnostics reports configured protection rather than fixed defaults",diagnostic.RootElement.GetProperty("Protection").GetProperty("Configured").GetProperty("JobMemoryLimit").GetUInt64()==4*ResourcePolicy.GiB&&diagnostic.RootElement.GetProperty("Protection").GetProperty("Configured").GetProperty("CpuRate").GetInt32()==2500);
+        config.Draft.Resource=originalResource;
         config.Draft.Project=priorProject;
         foreach(var scale in new[]{125,150})
         {

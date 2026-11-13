@@ -123,6 +123,24 @@ internal static class SoakChecks
         {
             Assert(DriverRunner.Quote("a$HOME`cmd`'b") == "'a$HOME`cmd`'\"'\"'b'");
         });
+        test("S0.6 transient sharing violation retries reads without accepting stale or corrupt progress", () =>
+        {
+            var path=Path.Combine(temp,"sharing-progress.json");JsonIo.Write(path,new DriverProgress{ActivityCount=42});
+            var held=new ManualResetEventSlim();var blocker=Task.Run(()=>
+            {
+                using var stream=new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.None);
+                held.Set();Thread.Sleep(80);
+            });
+            if(!held.Wait(TimeSpan.FromSeconds(5)))throw new Exception("sharing fixture did not acquire file");
+            try{Assert(JsonIo.Read<DriverProgress>(path)?.ActivityCount==42);}finally{blocker.GetAwaiter().GetResult();held.Dispose();}
+            var denied=false;
+            using(var stream=new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.None))
+                try{JsonIo.Read<DriverProgress>(path);}catch(IOException){denied=true;}
+            Assert(denied);
+            File.WriteAllText(path,"{invalid");var corrupt=false;
+            try{JsonIo.Read<DriverProgress>(path);}catch(System.Text.Json.JsonException){corrupt=true;}
+            Assert(corrupt);
+        });
     }
 
     private static SoakResult Completed() => new()

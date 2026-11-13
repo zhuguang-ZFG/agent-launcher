@@ -13,7 +13,7 @@ public partial class MainWindow
     {
         return JsonSerializer.Serialize(new {
             Version=typeof(MainWindow).Assembly.GetName().Version?.ToString(),Runtime=Environment.Version.ToString(),At=DateTimeOffset.UtcNow,
-            Protection="每个 Agent 2 GiB；Git 准备 1 GiB；受管进程合计 CPU 35%",
+            Protection=new{Configured=config.Draft.Resource,CurrentRootCpuRate=status?.RootCpuRate,GitJobLimitBytes=ResourcePolicy.GitJobMemoryLimit},
             ConfigReadOnly=readOnly,Unsaved=saveError!=null,CommandCheckFailed=validationError.Length>0,
             Monitor=status==null?"unavailable":status.Ok?"healthy":"needs-reconciliation",Memory=status?.Memory,
             Sessions=status?.Entries?.GroupBy(e=>new{e.Plan.Kind,e.State}).Select(g=>new{g.Key.Kind,g.Key.State,Count=g.Count()}).ToArray(),

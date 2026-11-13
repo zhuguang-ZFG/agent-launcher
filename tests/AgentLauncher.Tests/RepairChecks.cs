@@ -106,6 +106,15 @@ internal static class RepairChecks
             }
             finally{if(!sibling.Process.HasExited){sibling.Process.Kill();sibling.Process.WaitForExit(5000);}}
         });
+        Test("UX08 history exports native runner evidence without exception text or arguments",()=>
+        {
+            var item=Item();var directory=Path.Combine(Store.Root,"attempts",item.Id.ToString("N"));
+            Store.Save(Path.Combine(directory,"outcome.json"),new ArchivedAttempt(1,item.Id,Store.Digest(item),new(){Plan=item,Digest=Store.Digest(item),State="FailedBeforeStart"}));
+            Store.Save(Path.Combine(directory,"runner-error.json"),new{At=DateTimeOffset.UtcNow,Pid=123,Type="System.ComponentModel.Win32Exception",HResult=unchecked((int)0x80070005),Error="SECRET_ARGUMENT_SENTINEL"});
+            Store.Save(Store.ReceiptPath(item.Id),new Receipt("FailedBeforeStart",0,0,null,"failed",DateTimeOffset.UtcNow,new(123,45,NotificationError:"Win32 6")));
+            var diagnostic=TaskHistoryReader.Diagnostic(new(item.Id,item.SourceSlotId,item.Name,"FailedBeforeStart",null,""));
+            Assert(diagnostic.Contains("HResult")&&diagnostic.Contains("Win32Exception")&&diagnostic.Contains("NotificationError")&&!diagnostic.Contains("SECRET_ARGUMENT_SENTINEL"),"runner evidence missing or raw exception leaked");
+        });
         Test("R11 terminal archive rejects swapped identity and never reads backup receipt",()=>
         {
             using var monitor=Monitor();var item=Item();var other=Item();var entry=new ControlEntry{Plan=other,Digest=Store.Digest(other),State="Settled"};
@@ -139,6 +148,28 @@ internal static class RepairChecks
             Assert(memory.GetProperty("LimitBytes").GetUInt64()==ResourcePolicy.GiB,"runner raised cap");
             Assert(receipt.RootElement.GetProperty("Detail").GetString()!.Contains("内核"),"no actionable cause on receipt");
             Store.Save(Store.FilePath("configuration.json"),new Configuration());
+        });
+        foreach(var fault in new[]{"MemoryWatchStart","MemoryWatchDrain"})
+        Test("R07 notification failure preserves protected lifecycle "+fault,()=>
+        {
+            var healthy=Ipc.EnsureMonitorAsync().GetAwaiter().GetResult();Assert(healthy.Ok,healthy.Message);
+            var item=Item() with{Command=new(Environment.ProcessPath!,["--hold","1200"],"exe")};
+            var reserved=Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item])).GetAwaiter().GetResult();Assert(reserved.Ok,reserved.Message);
+            var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
+            start.Environment["AGENT_LAUNCHER_FAIL_AT"]=fault;start.ArgumentList.Add("run");start.ArgumentList.Add(item.Id.ToString());
+            using var runner=Process.Start(start)!;runner.StandardInput.Close();Assert(runner.WaitForExit(10000),"notification fallback did not drain");
+            Assert(runner.ExitCode==0,"diagnostic failure interrupted a healthy child: "+runner.StandardError.ReadToEnd());
+            var receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id));
+            Assert(receipt is {Phase:"Finished",ExitCode:0,JobMemory.NotificationError:not null},"fallback lost complete lifecycle or notification failure evidence");
+            Assert(receipt!.JobMemory!.LimitBytes==ResourcePolicy.DefaultJobMemoryLimit&&!receipt.JobMemory.LimitReached,"notification failure changed cap or invented a refusal");
+            Assert(receipt.Detail.Contains("通知不可用")&&receipt.Detail.Contains("上限仍生效"),"missing notification fallback guidance");
+        });
+        Test("R07 shared memory guidance identifies the entire pool",()=>
+        {
+            var memory=new JobMemoryEvidence(2*ResourcePolicy.GiB,2*ResourcePolicy.GiB,true,123);
+            var text=ExitDiagnostics.MemoryText(memory,sharedPool:true);
+            Assert(text.Contains("共享池内所有项")&&text.Contains("池内并发")&&!text.Contains("该项及工具子进程"),"shared peak mislabeled as one pane");
+            Assert(ExitDiagnostics.MemoryText(memory with{LimitReached=false,NotificationError="notification unavailable"}).Contains("不能排除"),"missing event treated as evidence of no pressure");
         });
         Test("R07 undersized shared pool requires explicit admission warning",()=>
         {
@@ -194,6 +225,20 @@ internal static class RepairChecks
             var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};start.ArgumentList.Add("pane");start.ArgumentList.Add(id.ToString());
             using var process=Process.Start(start)!;process.StandardInput.Close();Assert(process.WaitForExit(10000)&&process.ExitCode!=0,"duplicate pane accepted");
             Assert(before.SequenceEqual(File.ReadAllBytes(path)),"duplicate pane overwrote its original owner's receipt");
+        });
+        Test("R14 reconcile publication failure retains occupancy and freezes later grants",()=>
+        {
+            var item=Item();var pending=Item();var entry=new ControlEntry{Plan=item,Digest=Store.Digest(item),State="Unknown",Detail="retained unknown"};
+            var book=new Ledger{BootId=Store.BootId(),Entries=[entry,new(){Plan=pending,Digest=Store.Digest(pending)}]};
+            using var monitor=Monitor(book);Call(monitor,"Save");var path=Get<string>(monitor,"ledgerPath");var bytes=File.ReadAllBytes(path);
+            Store.Save(Store.ReceiptPath(item.Id),new Receipt("Finished",0,0,0,"all descendants exited",DateTimeOffset.UtcNow));
+            Response response;
+            using(var reader=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read))response=(Response)Call(monitor,"Handle",new Request("reconcile",Guid.NewGuid()))!;
+            Assert(!response.Ok&&response.Message.Contains("未写入")&&entry.State=="Unknown"&&entry.Detail=="retained unknown","failed publication released occupancy or reported success");
+            Assert(bytes.SequenceEqual(File.ReadAllBytes(path))&&Get<bool>(monitor,"ledgerBroken"),"failed reconcile changed durable records or forgot the write error");
+            Call(monitor,"Refresh",false);var denied=false;
+            try{Call(monitor,"Handle",new Request("begin",Guid.NewGuid(),Attempt:pending.Id));}catch(IOException e){denied=e.Message.Contains("未写入");}
+            Assert(denied,"a later tick cleared the reconciliation persistence block");
         });
         Test("R12 Refresh disk failure remains fail-closed on the following tick",()=>
         {

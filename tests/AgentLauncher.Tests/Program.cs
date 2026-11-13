@@ -84,6 +84,7 @@ void Test(string name,Action action){try{action();passed.Add(name);Console.Write
 void Assert(bool value,string message){if(!value)throw new Exception(message);}
 SoakChecks.Register(Test,temp);
 if(args is ["--soak-checks"]){Console.WriteLine($"RESULT {passed.Count} passed, {failures.Count} failed. Artifacts: {temp}");return failures.Count==0?0:1;}
+PackageChecks.Register(Test,temp);
 Test("P01 rapid native sampling retains a valid CPU interval",()=>{
     var sampler=new Sampler();var first=sampler.Sample();
     Assert(double.IsNaN(first.CpuPercent),"first CPU reading fabricated usage");

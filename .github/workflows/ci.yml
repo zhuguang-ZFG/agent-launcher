@@ -24,6 +24,9 @@ jobs:
       - name: Full gate (model + integration + WPF + prototype + browser)
         shell: pwsh
         run: ./scripts/test.ps1
+      - name: Build production package and check portable entry
+        shell: powershell
+        run: ./scripts/build.ps1 -Output artifacts/ci-preview
       - name: Preserve gate diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -34,4 +37,5 @@ jobs:
             artifacts/ui/*.json
             artifacts/prototype-browser-results.json
             artifacts/prototype-browser-stderr.log
+            artifacts/ci-preview/distribution.json
           if-no-files-found: ignore
