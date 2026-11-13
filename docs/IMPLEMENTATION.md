@@ -976,3 +976,10 @@ powershell -NoProfile -File scripts/test.ps1
 - 新回归在旧 Worker 上 **34 通过 / 1 失败**，新 Worker 上 **35/35**；真实 Terminal 双窗格及 16 窗格通过。直接对照本机从首个 entered 到最后 Started 约 **5.5 秒 → 2.9 秒**，整个套件约 **23.4 秒 → 20.5 秒**（含初始化与清理）；不能把套件总耗时当成启动耗时。保持原 25 秒断言。证据 `pool-batch-red-repairs.log`、`pool-batch-final-repairs.log`、`pool-startup-baseline.json`、`pool-startup-batched.json`、`pool-batch-terminal.log`。
 - S5 独立 CI run `43370251803` 已完成真实双 SDK 会话，**13 通过 / 1 失败**，确认会话 A 技能补全泄露 B 描述；`IsolationPassed=false / EligibleForHost=false`。详见 [能力审计](OMP-HOST-AUDIT.md)。本机未安装 Bun，实验不含真实凭据或模型请求。按原计划任一串会话即阻断收益测试，保持宿主关闭，不能把审计 workflow 成功称为隔离通过。
 - 本节生产 Worker 已变化，旧 `87b7f64` 正在运行的 90 分钟长稳仍保留到自然收尾；其结果只属于旧版本。新 Worker 必须另跑完整三轮，最终交付以精确提交的完整门禁和长稳结果为准。
+
+## 47. 长稳进度文件的短暂缺失重试（2026-11-13，Asia/Shanghai）
+
+- 旧长稳 run `43362684117` 的第三轮在正式运行约两分钟时，观察器一次读取不到 Worker 1 的进度文件。该轮失败，正式结论仍为 **2/3**；两个 driver 随停止信号正常结束，exit 0、86 cycles / 430 activity，Job 成员归零且 cleanup verified。现有证据说明观察器失去一次读取，不证明进度文件为何短暂缺失，也不证明原始 CLI 崩溃事件同因。
+- `JsonIo.Read` 现在对 `FileNotFoundException` 最多重试 20 次、间隔 10 ms，与原有共享冲突窗口一致；不读取 `.bak`，窗口结束后持续缺失仍返回 null 并使活动观察失败。损坏 JSON、持续共享冲突、活动超时与退出核验保持 fail-closed。
+- 新回归覆盖旧进度文件删除后在重试窗口内出现的新进度值，以及持续缺失仍无结果；此前共享锁恢复、持续锁失败和损坏 JSON 检查继续通过。当前本机 `scripts/test.ps1 -SkipBrowser -RuntimeDirectory artifacts/test-runtime-soak-retry-04cac32` exit 0：原生 144/144、修复 35/35、集成 0 失败、WPF 258 项及原型 5/5 通过；浏览器因本机 Edge 权限限制跳过。此构建包含未提交源码变更，不能代替最终提交 SHA 的 CI。
+- 04cac32 的完整 CI run `43370925269` 已成功，但不含本次读取重试；该版本长稳 run `43370989701` 仍在执行。修复后的最终提交仍须重新完成完整 CI 与 3 × 1800 秒长稳，成功前不把 S0.6 记为完成。

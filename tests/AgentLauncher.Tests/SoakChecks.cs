@@ -141,6 +141,21 @@ internal static class SoakChecks
             try{JsonIo.Read<DriverProgress>(path);}catch(System.Text.Json.JsonException){corrupt=true;}
             Assert(corrupt);
         });
+        test("S0.6 transiently missing progress retries without stale data and persistent absence stays missing", () =>
+        {
+            var path=Path.Combine(temp,"transiently-missing-progress.json");
+            JsonIo.Write(path,new DriverProgress{ActivityCount=42});File.Delete(path);
+            using var started=new ManualResetEventSlim();
+            var reader=Task.Factory.StartNew(() => { started.Set(); return JsonIo.Read<DriverProgress>(path); },CancellationToken.None,TaskCreationOptions.LongRunning,TaskScheduler.Default);
+            if(!started.Wait(TimeSpan.FromSeconds(5)))throw new Exception("progress reader did not start");
+            Thread.Sleep(80);
+            Assert(!reader.IsCompleted);
+            JsonIo.Write(path,new DriverProgress{ActivityCount=43});
+            Assert(reader.Wait(TimeSpan.FromSeconds(5)) && reader.Result?.ActivityCount==43);
+            var missing=Path.Combine(temp,"persistently-missing-progress.json");var watch=System.Diagnostics.Stopwatch.StartNew();
+            Assert(JsonIo.Read<DriverProgress>(missing) is null);
+            Assert(watch.Elapsed<TimeSpan.FromSeconds(2));
+        });
     }
 
     private static SoakResult Completed() => new()

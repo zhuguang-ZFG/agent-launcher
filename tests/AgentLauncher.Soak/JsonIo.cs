@@ -72,6 +72,7 @@ internal static class JsonIo
                     if (stream.Length > 8L * 1024 * 1024) throw new InvalidDataException("记录超出大小边界。");
                     return JsonSerializer.Deserialize<T>(stream, Options) ?? throw new InvalidDataException("记录为空。");
                 }
+                catch (FileNotFoundException) when (attempt < 20) { Thread.Sleep(10); }
                 catch(IOException e)when(attempt<20&&(e.HResult&0xffff) is 32 or 33){Thread.Sleep(10);}
             }
         }

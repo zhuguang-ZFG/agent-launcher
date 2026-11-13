@@ -232,7 +232,7 @@ powershell -NoProfile -File scripts/run-soak.ps1 -OmpPath 'C:\path\omp.exe' -Omp
 
 该负载验证 Omp RPC 工具与 Launcher 生命周期，不涉及模型推理；Omp 启动可能刷新公共模型目录。它不代替两小时真实中文交互 CLI、生产 F12 的人工交互、无障碍、干净环境分发或 S5 多会话隔离/收益验收。失败请求不重放，无法证明退出时保留占用与文件。
 
-手动触发 `.github/workflows/soak.yml` 可在隔离 Windows x64 CI 主机执行同一验收。固定 Omp 18.19.0 官方二进制及 SHA-256；无凭据、真实采样与原门槛，归档全部证据。CI 主机结果须注明环境，不能视作本机长稳通过。进度文件读取仅对 Win32 32/33 做有界重试；持续冲突、损坏 JSON、活动停滞仍失败，绝不使用旧备份冒充实时进度。
+手动触发 `.github/workflows/soak.yml` 可在隔离 Windows x64 CI 主机执行同一验收。固定 Omp 18.19.0 官方二进制及 SHA-256；无凭据、真实采样与原门槛，归档全部证据。CI 主机结果须注明环境，不能视作本机长稳通过。进度文件读取对 Win32 32/33 共享冲突及 `FileNotFoundException` 最多重试 20 次、每次间隔 10 ms；持续冲突、持续缺失、损坏 JSON、活动停滞仍失败，绝不使用旧备份冒充实时进度。
 
 ## 12. 恢复、通知与便携发布追加回归
 
