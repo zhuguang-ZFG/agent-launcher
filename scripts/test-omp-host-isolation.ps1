@@ -26,8 +26,9 @@ try{
     $installExit=$LASTEXITCODE
 }finally{$ErrorActionPreference=$previousErrorPreference}
 if($installExit -ne 0){throw 'Isolated SDK dependency installation failed'}
-$lock=Get-Content -LiteralPath (Join-Path $prefix 'package-lock.json') -Raw|ConvertFrom-Json
-$sdk=$lock.packages.'node_modules/@oh-my-pi/pi-coding-agent'
+$identity=& node.exe (Join-Path $workspace 'tests/omp-host/lock-identity.cjs') (Join-Path $prefix 'package-lock.json')
+if($LASTEXITCODE -ne 0){throw 'Could not read installed SDK identity'}
+$sdk=$identity|ConvertFrom-Json
 if($sdk.version -ne '18.19.0' -or $sdk.integrity -ne 'sha512-NYElWsH+J5Lo9pUitIOQNcWFipu+VzZgZ32z8dz+kA3Z/43483FEhhU6iEm6xjueYLX8p1CU8j7+2pwj5r9dgA=='){throw 'Pinned SDK integrity mismatch'}
 Copy-Item -LiteralPath (Join-Path $prefix 'package-lock.json') -Destination $evidence
 $probe=Join-Path $prefix 'isolation.mjs'
