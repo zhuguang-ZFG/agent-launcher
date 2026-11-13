@@ -1,5 +1,7 @@
 # 多 Agent 启动器 · 技术预览 v0.6
 
+Copyright 2026 Agent Launcher contributors。项目按 [Apache License 2.0](LICENSE) 开源，署名见 [NOTICE](NOTICE)。
+
 Windows 原生配置窗口 + Windows Terminal 分屏。默认只启用一个 Agent；同项目多项使用独立 Git worktree，或明确选用现有目录/共享目录。
 
 本机现有入口为 `artifacts/preview-claim-recovery/AgentLauncher.App.exe`，版本与对应 CI 记录见包内 `verification.json`；分发包按提交号保存为 `artifacts/AgentLauncher-preview-<提交号>.zip`。请保留同目录所有 DLL、Worker 和 runtimeconfig 文件。其他电脑需要 .NET 8 Desktop Runtime x64、Windows Terminal、所选 CLI；自动 worktree 需要 Git。此包不是自包含安装包，也不是已经完成长时负载验证的稳定版。

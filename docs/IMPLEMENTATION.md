@@ -940,3 +940,10 @@ powershell -NoProfile -File scripts/test.ps1
 - 旧单任务短协议预检为 Omp 18.19.0、10.029 秒、6 轮工具循环/30 次工具、Job 峰值约 625 MiB、exit 0 及成员归零。它只验证早期协议可执行，报告 `artifacts/soak-20261113/single-driver-protocol-result.json` 的 mode 明确为 single-driver-protocol-probe；不能算作双任务校准或 S0.6 的任何一轮。
 - **S0.6 正式完成仍为 0/3，S5 未实现或启用。** 两小时真实中文交互 CLI、无障碍、干净环境分发及独立人工 F12 验收仍开放；原始历史退出同因证明、丢失句柄后的未知占用和无身份旧任务仍按原边界核对。新增验收工具及 CI 成功不关闭这些独立要求。
 - 本轮本机统一门禁 `artifacts/local-soak-tooling-20261113/runner.json` 于 `2026-11-13T02:26:00Z` 完成，**exit 0、654.39 秒**，原生 141/141、修复 29/29、集成 121/121、WPF 与原型 5/5 均通过；浏览器明确跳过。之后验收器的目录所有权、运行时/工具哈希、失败日志和 driver 入口保护经过顺序编译及 10/10 定向检查，生产程序集误用于验收时 exit 4 且未创建指定测试根。最终源码完整浏览器和其余 gate 仍由对应提交 CI 验证，证据保存在最终交付报告，不以旧 SHA 的成功代替。
+
+## 43. 公开仓库与 Apache-2.0（2026-11-13，Asia/Shanghai）
+
+- `2cb79a1e1001d8746064dbbd53b13889d231cf12` 已推送。首次 CI run `43352642306` 在分配 runner 前失败，check run `131647141256` 注释为账户近期付款失败或支出额度不足，步骤数量为 0；这不是源码测试失败，也不能称为 CI 成功。平台证据 `artifacts/ci-2cb79a1-platform-blocker.json`。
+- 用户明确授权将项目开源。公开前扫描本地可达 74 个提交、484 个文件版本、14,662,335 bytes，未发现配置的凭据模式命中或敏感配置文件路径；扫描范围与局限保存在 `artifacts/publication-history-scan-2cb79a1.json`。随后将 `zhuguang-ZFG/agent-launcher` 改为 PUBLIC，并由 GitHub 读回确认；同一 CI 重跑进入 queued，最终成功仍待最终提交核对。
+- 用户选择 **Apache-2.0**。根目录 LICENSE 采用 Apache 官方 Version 2.0 完整文本，NOTICE 记录项目及贡献者署名；README 增加许可证入口，`scripts/build.ps1` 将 LICENSE / NOTICE 一并放入分发目录。没有新增 NuGet、CLI 或运行时依赖。
+- `scripts/run-soak.ps1` 的真实一分等待预检 `artifacts/soak-script-preflight-2cb79a1/` 正常顺序发布、连续采样，期限到仍不足准入，status=stopped、未启动校准或长稳负载。随后 `artifacts/soak-live-2cb79a1/` 为真实 120 分钟等待；源码变化会在下一次检查安全停止，最终提交应以全新证据目录重新启动，不能把旧监测说成始终运行。S0.6 仍须实际完成三轮后才更新结论。
