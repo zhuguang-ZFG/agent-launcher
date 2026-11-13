@@ -27,6 +27,9 @@ jobs:
       - name: Build production package and check portable entry
         shell: powershell
         run: ./scripts/build.ps1 -Output artifacts/ci-preview
+      - name: Check production F12 and Enter in real Terminal
+        shell: powershell
+        run: ./scripts/test-production-pane.ps1 -PackageDirectory artifacts/ci-preview
       - name: Preserve gate diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -38,4 +41,5 @@ jobs:
             artifacts/prototype-browser-results.json
             artifacts/prototype-browser-stderr.log
             artifacts/ci-preview/distribution.json
+            artifacts/production-pane-*/result.json
           if-no-files-found: ignore
