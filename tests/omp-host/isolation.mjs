@@ -86,9 +86,16 @@ try {
     a.eventBus.emit("audit", "A"); b.eventBus.emit("audit", "B");
     await Promise.resolve(); offA(); offB();
     check("S5-A06 event channels", eventsA.join() === "A" && eventsB.join() === "B", [eventsA, eventsB]);
+    const completions = await Promise.all([a, b].map(async scope => ({
+        scope,
+        values: await skillProtocol.complete("", { skills: scope.session.skills }),
+    })));
+    for (const { scope, values } of completions)
+        check(`S5-A07 skill completions ${scope.label}`, values.length === 1 && values[0].description === scope.marker, values);
+    const activeCompletions = await skillProtocol.complete();
+    check("S5-A11 unscoped completion preserves the active-session fallback",
+        activeCompletions.length === 1 && activeCompletions[0].description === b.marker, activeCompletions);
     for (const scope of [a, b]) {
-        const completions = await skillProtocol.complete("", { skills: scope.session.skills });
-        check(`S5-A07 skill completions ${scope.label}`, completions.length === 1 && completions[0].description === scope.marker, completions);
         const rules = await new RuleProtocolHandler().complete("", { rules: scope.rules });
         check(`S5-A08 rule completions ${scope.label}`, rules.some(item => item.description === scope.marker) && !rules.some(item => item.description === (scope === a ? b.marker : a.marker)), rules);
         const read = await scope.session.getToolByName("read").execute(`skill-${scope.label}`, { path: "skill://scope" });
