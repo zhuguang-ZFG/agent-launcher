@@ -17,8 +17,15 @@ if((& $bun --version).Trim() -ne '1.4.4'){throw 'Unexpected Bun version'}
 $prefix=Join-Path $temporary 'sdk'
 New-Item -ItemType Directory -Path $prefix|Out-Null
 '{"private":true,"dependencies":{"@oh-my-pi/pi-coding-agent":"18.19.0"}}'|Set-Content -LiteralPath (Join-Path $prefix 'package.json') -Encoding ASCII
-& npm.cmd install --prefix $prefix --ignore-scripts --no-audit --no-fund *> (Join-Path $evidence 'install.log')
-if($LASTEXITCODE -ne 0){throw 'Isolated SDK dependency installation failed'}
+$previousErrorPreference=$ErrorActionPreference
+try{
+    # Windows PowerShell treats native stderr warnings as ErrorRecords. Preserve
+    # their text, then use npm's actual exit code to decide installation success.
+    $ErrorActionPreference='Continue'
+    & npm.cmd install --prefix $prefix --ignore-scripts --no-audit --no-fund *> (Join-Path $evidence 'install.log')
+    $installExit=$LASTEXITCODE
+}finally{$ErrorActionPreference=$previousErrorPreference}
+if($installExit -ne 0){throw 'Isolated SDK dependency installation failed'}
 $lock=Get-Content -LiteralPath (Join-Path $prefix 'package-lock.json') -Raw|ConvertFrom-Json
 $sdk=$lock.packages.'node_modules/@oh-my-pi/pi-coding-agent'
 if($sdk.version -ne '18.19.0' -or $sdk.integrity -ne 'sha512-NYElWsH+J5Lo9pUitIOQNcWFipu+VzZgZ32z8dz+kA3Z/43483FEhhU6iEm6xjueYLX8p1CU8j7+2pwj5r9dgA=='){throw 'Pinned SDK integrity mismatch'}
