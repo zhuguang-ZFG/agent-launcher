@@ -1,0 +1,29 @@
+name: Omp host isolation audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Audit pinned SDK in disposable environment
+        shell: powershell
+        run: ./scripts/test-omp-host-isolation.ps1
+      - name: Preserve audit outcome including unsupported capabilities
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omp-host-isolation-${{ github.sha }}
+          path: artifacts/omp-host-isolation
+          if-no-files-found: error
