@@ -1,0 +1,43 @@
+name: stability
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Prepare pinned model-free Omp tool
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $toolDirectory = Join-Path $env:RUNNER_TEMP 'launcher-soak-tools'
+          New-Item -ItemType Directory -Path $toolDirectory | Out-Null
+          $tool = Join-Path $toolDirectory 'omp.exe'
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/can1357/oh-my-pi/releases/download/v18.19.0/omp-windows-x64.exe' -OutFile $tool
+          $expected = '6d5ad734bb6fafef49278670ca74fce838e333fa20fc08ffc65570581f501b0d'
+          if ((Get-FileHash -LiteralPath $tool -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Omp release SHA256 mismatch' }
+          "LAUNCHER_SOAK_OMP=$tool" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Calibration and three complete 30 minute rounds
+        shell: powershell
+        run: ./scripts/run-soak.ps1 -OmpPath $env:LAUNCHER_SOAK_OMP -OmpVersion '18.19.0' -WaitMinutes 5 -EvidenceDirectory (Join-Path $pwd 'artifacts/soak-ci')
+      - name: Preserve all stability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stability-evidence-${{ github.sha }}
+          path: artifacts/soak-ci
+          if-no-files-found: warn
