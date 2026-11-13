@@ -35,6 +35,9 @@ async function makeSession(label, cwd) {
     const skillPath = path.join(cwd, "SKILL.md");
     await writeFile(skillPath, `---\nname: scope\ndescription: ${marker}\n---\n${marker}\n`);
     await writeFile(path.join(cwd, "scope.txt"), marker);
+    const rules = [{ name: "scope", description: marker, path: path.join(cwd, "RULE.md"), content: marker, alwaysApply: true,
+        _source: { provider: "omp", providerName: "audit", path: cwd, level: "project" } }];
+    await writeFile(rules[0].path, marker);
     const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
     authStores.push(authStorage);
     const eventBus = new EventBus();
@@ -48,14 +51,13 @@ async function makeSession(label, cwd) {
         agentId: label, agentDisplayName: label, bindProcessState: false,
         disableExtensionDiscovery: true, extensions: [],
         skills: [{ name: "scope", description: marker, filePath: skillPath, baseDir: cwd, source: "project" }],
-        rules: [{ name: "scope", description: marker, path: path.join(cwd, "RULE.md"), content: marker, alwaysApply: true,
-            _source: { provider: "omp", providerName: "audit", path: cwd, level: "project" } }],
+        rules,
         contextFiles: [], promptTemplates: [], slashCommands: [], preloadedCustomToolPaths: [],
         enableMCP: false, enableLsp: false, enableIrc: false, skipPythonPreflight: true,
         toolNames: ["read"], restrictToolNames: true,
     });
     sessions.push(session);
-    return { label, marker, cwd, session, eventBus, registry, manager };
+    return { label, marker, cwd, session, eventBus, registry, manager, rules };
 }
 try {
     const repo = path.join(root, "repo");
@@ -87,11 +89,14 @@ try {
     for (const scope of [a, b]) {
         const completions = await skillProtocol.complete("", { skills: scope.session.skills });
         check(`S5-A07 skill completions ${scope.label}`, completions.length === 1 && completions[0].description === scope.marker, completions);
-        const rules = await new RuleProtocolHandler().complete("", { rules: scope.session.activeRules });
+        const rules = await new RuleProtocolHandler().complete("", { rules: scope.rules });
         check(`S5-A08 rule completions ${scope.label}`, rules.some(item => item.description === scope.marker) && !rules.some(item => item.description === (scope === a ? b.marker : a.marker)), rules);
         const read = await scope.session.getToolByName("read").execute(`skill-${scope.label}`, { path: "skill://scope" });
         const text = read.content.filter(block => block.type === "text").map(block => block.text).join("\n");
         check(`S5-A09 skill reads ${scope.label}`, text.includes(scope.marker) && !text.includes(scope === a ? b.marker : a.marker), { OwnMarker: text.includes(scope.marker), ForeignMarker: text.includes(scope === a ? b.marker : a.marker) });
+        const readRule = await scope.session.getToolByName("read").execute(`rule-${scope.label}`, { path: "rule://scope" });
+        const ruleText = readRule.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+        check(`S5-A10 rule reads ${scope.label}`, ruleText.includes(scope.marker) && !ruleText.includes(scope === a ? b.marker : a.marker), { OwnMarker: ruleText.includes(scope.marker), ForeignMarker: ruleText.includes(scope === a ? b.marker : a.marker) });
     }
     // Keep the tool fixture honest: no model request, no provider key, no host enabled.
     assert.equal(await readFile(path.join(worktrees[0], "scope.txt"), "utf8"), "scope-A");
