@@ -453,7 +453,7 @@ public partial class MainWindow
         await RefreshAsync();
         cancellationToken.ThrowIfCancellationRequested();
         if (status?.Ok != true || status.Memory is null) { QueueStatusText.Text = "监控状态不可用，队列暂不启动。"; return; }
-        if (status.AdmissionBlockedReason is { Length: > 0 } blocked) { QueueStatusText.Text = "队列暂停：" + blocked; return; }
+        if (status.AdmissionHardBlockedReason is { Length: > 0 } blocked) { QueueStatusText.Text = "队列暂停：" + blocked; return; }
         if (book.Queue.Count == 0)
         {
             QueueStatusText.Text = "队列为空。";
@@ -471,6 +471,12 @@ public partial class MainWindow
         var entry = book.Queue.Single(candidate => candidate.Id == decision.Next.EntryId);
         var task = book.Tasks.Single(candidate => candidate.Id == entry.TaskId);
         if (task.Revision != entry.TaskRevision) { await HoldEntryAsync(entry, "任务已被修改，请重新入队。"); return; }
+        // The latch is global, but it only stops the entry whose own frozen settings ask for a conservative policy; a
+        // practical/custom entry proceeds to prepare and is re-authorized (or refused) by the monitor's reserve.
+        if (status.AdmissionPressure && string.Equals(entry.Resource.Mode, "conservative", StringComparison.Ordinal))
+        { QueueStatusText.Text = "队列暂停：" + PressureMessage; return; }
+        // The monitor's reserve is still the authoritative cap; this only keeps an at-cap tick from preparing a worktree it must release.
+        if (ConcurrencyBlocked(1)) { await HoldEntryAsync(entry, ConcurrencyLimitMessage); return; }
 
         // A durable monitor claim is execution authority for this queue item. A claimed item with no recorded task run
         // must never be prepared again; this is a read-only inspection of the existing ledger, not a new authorization.
@@ -592,8 +598,10 @@ public partial class MainWindow
         cancellationToken.ThrowIfCancellationRequested();
         await RefreshAsync();
         cancellationToken.ThrowIfCancellationRequested();
-        if (status?.Ok != true || status.Memory is null || status.AdmissionBlockedReason is { Length: > 0 })
-        { await HoldEntryAsync(entry, status?.AdmissionBlockedReason ?? "准备后监控状态不可用，等待重新核验。"); return; }
+        if (status?.Ok != true || status.Memory is null || status.AdmissionHardBlockedReason is { Length: > 0 })
+        { await HoldEntryAsync(entry, status?.AdmissionHardBlockedReason ?? "准备后监控状态不可用，等待重新核验。"); return; }
+        if (status.AdmissionPressure && string.Equals(entry.Resource.Mode, "conservative", StringComparison.Ordinal))
+        { await HoldEntryAsync(entry, PressureMessage); return; }
         reserved = ResourcePolicy.ReservedFor(status);
         admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, [ResourcePolicy.BudgetOf(plan, plan.PoolId is null ? null : policy.PoolMemoryLimit)]);
         if (admission.Kind == AdmissionKind.Deny) { await HoldEntryAsync(entry, "资源不足：" + admission.Reason); return; }

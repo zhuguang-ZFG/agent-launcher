@@ -353,25 +353,28 @@ public partial class MainWindow : Window
     {
         var count=config.Draft.Slots.Count(s=>s.Enabled);
         var admission=DecideAdmission(config.Draft,status?.Memory,status?.Entries,budgets:status?.Budgets);
-        var admissionBlockedReason=status?.AdmissionBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
+        var admissionBlockedReason=status?.AdmissionHardBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
+        var admissionPressureBlocked=status?.AdmissionPressure==true&&LaunchesConservatively;
         var explicitDirectoryMissing=config.Draft.Slots.Any(s=>s.Enabled&&s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory));
         var missing=explicitDirectoryMissing||config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
         var concurrencyBlocked=ConcurrencyBlocked(count);
         LaunchButton.Content=busy?"正在处理…":previewOnly?$"检查资源并启动 {count} 个 Agent":$"启动 {count} 个 Agent";
-        LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&(admission.Launchable||IsPreviewStale)&&!admissionBlocked&&!concurrencyBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
+        LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&(admission.Launchable||IsPreviewStale)&&!admissionBlocked&&!admissionPressureBlocked&&!concurrencyBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
         var hint=LaunchHintState(admission);LaunchHint.Text=hint.Text;LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,hint.Key);
         ReconcileButton.Visibility=status?.ReconcileOffered==true&&!busy?Visibility.Visible:Visibility.Collapsed;
         if(status?.Entries?.Any(e=>!Store.IsTerminal(e))==true)SessionExpander.IsExpanded=true;
         UpdateQuickQueueButton();
         UpdateMultipaneSummary();UpdateSimpleStatus();UpdatePollingInterval();
     }
-    // Text and foreground resource key for LaunchHint. Blocking states get WarningInk, running states Muted,
-    // and a launchable configuration Ink; the branch order is the same as the previous single-expression chain.
+    // Text and foreground resource key for LaunchHint. Blocking states get WarningInk, running states Muted, a launchable
+    // configuration Ink, and a practical-mode advisory stays WarningInk because the monitor may still refuse the plan.
+    // The branch order is the same as the previous single-expression chain.
     private (string Text,string Key) LaunchHintState(AdmissionDecision? admission=null)
     {
         admission??=DecideAdmission(config.Draft,status?.Memory,status?.Entries,budgets:status?.Budgets);
-        var admissionBlockedReason=status?.AdmissionBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
+        var admissionBlockedReason=status?.AdmissionHardBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
+        var admissionPressureBlocked=status?.AdmissionPressure==true&&LaunchesConservatively;
         var explicitDirectoryMissing=config.Draft.Slots.Any(s=>s.Enabled&&s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory));
         var missing=explicitDirectoryMissing||config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
@@ -389,12 +392,13 @@ public partial class MainWindow : Window
             missing?("先选择项目文件夹","Muted"):count==0?("先勾选至少一个 Agent","Muted"):
             concurrencyBlocked?(ConcurrencyLimitMessage,"WarningInk"):
             admissionBlocked?(admissionBlockedReason!,"WarningInk"):
+            admissionPressureBlocked?(PressureMessage,"WarningInk"):
             admission.Kind==AdmissionKind.Deny&&!IsPreviewStale?(admission.Reason,"WarningInk"):
             !SaveHealthy?saveError!=null?("配置尚未保存："+saveError,"WarningInk"):("正在保存配置…","Muted"):
             validationError.Length>0?(validationError,"WarningInk"):
             status?.Ok!=true?("正在等待后台检查就绪，暂时不能启动","Muted"):
             commandsChecking?("正在检查命令和目录","Muted"):
-            LaunchButton.IsEnabled?(previewOnly?"本机预览不是启动授权；点击后由监控器重新核验":admission.Advisory?admission.Reason:"检查全部通过，可以启动",previewOnly?"Ink":"WarningInk"):("本次配置已提交，暂不能再次启动","Muted");
+            LaunchButton.IsEnabled?(previewOnly?"本机预览不是启动授权；点击后由监控器重新核验":admission.Advisory?admission.Reason:"检查全部通过，可以启动",previewOnly?"Ink":admission.Advisory?"WarningInk":"Ink"):("本次配置已提交，暂不能再次启动","Muted");
     }
     private static string GiB(ulong value)=>(value/(double)ResourcePolicy.GiB).ToString("F1");
     // Keeps the leading and trailing parts of a long project title so the parent folder hint and the leaf name both stay visible;
@@ -610,7 +614,9 @@ public partial class MainWindow : Window
             var draft=config.Draft.Copy();
             var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));await RefreshAsync();
             if(status?.Ok!=true)throw new IOException(status?.Message??"监控状态不可用");
-            var admissionBlocked=status?.AdmissionBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
+            var admissionBlocked=status?.AdmissionHardBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
+            // A pressure latch only stops a conservative launch; practical/custom launches stay advisory and are re-authorized by the monitor.
+            if(status?.AdmissionPressure==true&&LaunchesConservatively)throw new IOException(PressureMessage);
             var admission=DecideAdmission(draft,status?.Memory??throw new IOException("资源不可用"),status?.Entries,includeGitPreparation:true,budgets:status?.Budgets);if(admission.Kind==AdmissionKind.Deny)throw new IOException(admission.Reason);
             ProgressText.Text="正在核对命令和工作目录…";
             // Active agent workspaces are the monitor's own reserve precondition; checking them here keeps an occupied destination from leaving a worktree and branch behind.
