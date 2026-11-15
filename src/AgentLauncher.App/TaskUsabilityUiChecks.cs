@@ -39,14 +39,16 @@ public partial class MainWindow
             var book = new TaskBook { MaxRunning = 3 };
             var first = TaskBookOps.Create(book, "UX 前项", Store.Root, "custom", new AgentProfile { Executable = fixture }, "修复中文输入", ["验证中文", "保留记录"], "shared", null, 100);
             var second = TaskBookOps.Create(book, "UX 后项", Store.Root, "custom", new AgentProfile { Executable = fixture }, "", [], "shared",
-                new ResourceSettings { Mode = "custom", JobMemoryLimit = 8 * ResourcePolicy.GiB, PlanningBytes = 8 * ResourcePolicy.GiB, PhysicalFloorOverride = 8 * ResourcePolicy.GiB }, 0);
+                new ResourceSettings { Mode = "conservative", JobMemoryLimit = 8 * ResourcePolicy.GiB, PlanningBytes = 8 * ResourcePolicy.GiB, PhysicalFloorOverride = 8 * ResourcePolicy.GiB }, 0);
             var head = TaskBookOps.Enqueue(book, first.Id, command, new string('A', 64));
             var tail = TaskBookOps.Enqueue(book, second.Id, command, AgentProbe.Fingerprint(command));
             book.LastDispatchTaskIds = [second.Id];
             Store.Save(taskStore.FilePath, book);
             Store.Save(Store.FilePath("control.json"), new Ledger { BootId = Store.BootId() });
+            TaskExpander.IsExpanded = false;
             await LoadTasksAsync(); RenderTasks();
             check("UX03 reopen surfaces paused queue with persisted batch scope", !queueEnabled && QueueResumeBanner.Visibility == Visibility.Visible && QueueResumeText.Text.Contains("上次批次") && queueScopeTaskIds?.SetEquals([second.Id]) == true);
+            check("UX03 old queue stays collapsed while its resume action remains visible", !TaskExpander.IsExpanded && !Within(QueueResumeBanner, TaskExpander));
             var orderLabels = QueueList.Children.OfType<StackPanel>().Select(row => row.Children.OfType<TextBlock>().First().Text).ToArray();
             check("UX07 queue labels rank only current scope and mark unrelated work outside it", orderLabels[0].Contains("范围外") && orderLabels[1].StartsWith("第 1 项", StringComparison.Ordinal));
             QueueResumeBanner.BringIntoView();

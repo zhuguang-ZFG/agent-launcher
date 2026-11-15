@@ -20,6 +20,9 @@ public partial class MainWindow
     private string taskLoadError = "";
     private bool queueEnabled;
     private bool queuePumping;
+    // Workspaces dialog is open (may run an explicit cleanup). While set, the queue pump must not dispatch:
+    // cleanup checks occupancy against the monitor, and a launch landing mid-flow would invalidate them (advisory).
+    private bool workspaceCleanupActive;
     private bool queuePausedByRecovery;
     private bool renderingTasks;
     private bool queueEditing;
@@ -101,10 +104,9 @@ public partial class MainWindow
         {
             QueueResumeBanner.Visibility = Visibility.Visible;
             var selected = book.Queue.Count(entry => InQueueScope(entry.TaskId));
-            QueueResumeText.Text = queueScopeTaskIds is null ? $"有 {book.Queue.Count} 项等待，队列当前暂停。点「继续执行」执行全部；已暂缓项需单独恢复。"
-                : $"上次批次还有 {selected} 项等待，其他 {book.Queue.Count - selected} 项保持暂停。点「继续执行」仅继续上次批次；也可明确执行整个队列。";
+            QueueResumeText.Text = queueScopeTaskIds is null ? $"上次队列有 {book.Queue.Count} 项等待。继续上次队列会执行这些项；本次勾选项用下方启动按钮。"
+                : $"上次批次还有 {selected} 项等待，其他 {book.Queue.Count - selected} 项保持暂停。本次勾选项用下方启动按钮。";
             QueueResumeButton.IsEnabled = selected > 0;
-            TaskExpander.IsExpanded = true;
         }
         if (queueEnabled && queueScopeTaskIds is not null) QueueStatusText.Text = "仅执行本批次 · 并发 1；其他等待项保持原状。" + (hold is null ? "" : " " + hold.Detail);
         var search = TaskSearch.Text.Trim();
@@ -357,7 +359,7 @@ public partial class MainWindow
 
     private Task PumpQueueAsync()
     {
-        if (!queueEnabled || closeRequested || taskBook is null || taskLoadError.Length > 0 || queuePumping || queueEditing || readOnly) return Task.CompletedTask;
+        if (!queueEnabled || closeRequested || taskBook is null || taskLoadError.Length > 0 || queuePumping || queueEditing || readOnly || workspaceCleanupActive) return Task.CompletedTask;
         if (busy || launchFinalizing || launchCancellation is not null || !cancelTask.IsCompleted || submittedAttempts.Length > 0) return Task.CompletedTask;
         if (PauseEmptyQueue()) return Task.CompletedTask;
         queuePumping = true;
@@ -538,10 +540,9 @@ public partial class MainWindow
             policy.PoolMode == ResourcePolicy.PoolShared ? policy.PoolMemoryLimit : null);
         BudgetItem[] requested = forceIsolated
             ? [pendingBudget, new(Guid.Empty, "git", policy.GitPlanningBytes, policy.GitJobMemoryLimit)] : [pendingBudget];
-        var reserved = status.Entries?.Where(candidate => !Store.IsTerminal(candidate)).Select(candidate => ResourcePolicy.BudgetOf(candidate.Plan, candidate.PoolMemoryLimit)).ToArray() ?? [];
+        var reserved = ResourcePolicy.ReservedFor(status);
         var admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, requested);
         if (admission.Kind == AdmissionKind.Deny) { await HoldEntryAsync(entry, "资源不足：" + admission.Reason); return; }
-        if (admission.Kind == AdmissionKind.RequireWaiver) { await HoldEntryAsync(entry, "需要一次性资源确认；队列不会自动确认，请暂停并人工核对。"); return; }
 
         string terminal;
         try
@@ -572,7 +573,7 @@ public partial class MainWindow
             var preparer = new WorkspacePreparer(entry.QuickLaunch?.WorktreeRoot ?? config.WorktreeDirectory);
             var activeWorkspaces = status.Entries?.Where(candidate => !Store.IsTerminal(candidate) && candidate.Plan.Kind == "agent").Select(candidate => candidate.Plan.Workspace).ToArray() ?? [];
             planned = (await Task.Run(() => preparer.PrepareAsync(draft, text => Dispatcher.Invoke(() => QueueStatusText.Text = text),
-                _ => Task.FromResult(false), cancellationToken, activeWorkspaces, null, forceIsolated, entry.QuickLaunch?.WorkspaceKey))).ToArray();
+                _ => Task.FromResult(false), cancellationToken, activeWorkspaces, forceIsolated, entry.QuickLaunch?.WorkspaceKey))).ToArray();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception e) when (e is IOException or OperationCanceledException or InvalidDataException)
@@ -593,13 +594,12 @@ public partial class MainWindow
         cancellationToken.ThrowIfCancellationRequested();
         if (status?.Ok != true || status.Memory is null || status.AdmissionBlockedReason is { Length: > 0 })
         { await HoldEntryAsync(entry, status?.AdmissionBlockedReason ?? "准备后监控状态不可用，等待重新核验。"); return; }
-        reserved = status.Entries?.Where(candidate => !Store.IsTerminal(candidate)).Select(candidate => ResourcePolicy.BudgetOf(candidate.Plan, candidate.PoolMemoryLimit)).ToArray() ?? [];
+        reserved = ResourcePolicy.ReservedFor(status);
         admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, [ResourcePolicy.BudgetOf(plan, plan.PoolId is null ? null : policy.PoolMemoryLimit)]);
         if (admission.Kind == AdmissionKind.Deny) { await HoldEntryAsync(entry, "资源不足：" + admission.Reason); return; }
-        if (admission.Kind == AdmissionKind.RequireWaiver) { await HoldEntryAsync(entry, "需要一次性资源确认；队列不会自动确认，请暂停并人工核对。"); return; }
 
         Response reserve;
-        try { reserve = await Ipc.ReserveWithCleanupAsync([plan], cancellationToken, null, policy, null, ResourcePolicy.PolicyHash(policy), ResourcePolicy.PlanDigest([plan]), null, null, entry.Id); }
+        try { reserve = await Ipc.ReserveWithCleanupAsync([plan], cancellationToken, null, policy, null, ResourcePolicy.PolicyHash(policy), ResourcePolicy.PlanDigest([plan]), null, entry.Id); }
         catch (Exception e) when (e is IOException or TimeoutException)
         {
             queueEnabled = false;

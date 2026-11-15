@@ -1,0 +1,135 @@
+#if INTEGRATION_TESTS
+using System.Text.Json;
+using System.Windows;
+using AgentLauncher.Core;
+using AgentLauncher.Windows;
+
+namespace AgentLauncher.App;
+
+public partial class MainWindow
+{
+    private async Task RunSimpleUiChecksAsync(Action<string, bool> check, string? screenshotFolder = null)
+    {
+        await saveTask;await commandCheckTask;
+        var previous = config;var previousStatus = status;var previousReadOnly = readOnly;
+        var previousTimer = timer.IsEnabled;timer.Stop();var previousExpanded = SessionExpander.IsExpanded;
+        var tasksBefore = JsonSerializer.Serialize(taskBook, Store.Json);
+        try
+        {
+            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "omp", Enabled = true }, new() { AgentId = "qoder", Enabled = true }] } };
+            var sample = new MemorySnapshot(16 * ResourcePolicy.GiB, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 5, DateTimeOffset.UtcNow);
+            status = new(true, "simple-ui", [], sample);readOnly = false;Render();
+            await commandCheckTask;
+            check("ACC-U04 advanced configuration starts collapsed", !ConfigurationToolsExpander.IsExpanded && !LaunchOptionsExpander.IsExpanded);
+            check("ACC-U04 low Omp and Qoder budgets have a direct repair action", LongTaskNotice.Visibility == Visibility.Visible && LongTaskButton.IsEnabled);
+            var oldResource = config.Draft.Resource;var oldRevision = config.Draft.Revision;
+            readOnly = true;UpdateSimpleStatus();
+            check("ACC-U04 read-only cannot apply long-task settings", !LongTaskButton.IsEnabled && !ApplyLongTaskResources(sample) && config.Draft.Revision == oldRevision);
+            readOnly = false;
+            check("ACC-U04 one-click profile changes only future draft budgets", ApplyLongTaskResources(sample) && config.Draft.Resource.JobMemoryLimit == 4 * ResourcePolicy.GiB && oldResource.JobMemoryLimit == 2 * ResourcePolicy.GiB && JsonSerializer.Serialize(taskBook, Store.Json) == tasksBefore);
+            await saveTask;await commandCheckTask;
+            check("ACC-U04 applied profile persists and hides low-limit advice", SaveHealthy && Store.Read<Configuration>(configPath)!.Draft.Resource.JobMemoryLimit == 4 * ResourcePolicy.GiB && LongTaskNotice.Visibility == Visibility.Collapsed);
+            var firstSlot = config.Draft.Slots[0];var secondBefore = JsonSerializer.Serialize(config.Draft.Slots[1], Store.Json);
+            var projectBefore = config.Draft.Project;
+            firstSlot.RequiresDirectory = true;
+            check("F04 direct folder selection preserves other agents and the default project", SetSlotDirectory(firstSlot.Id, Store.Root) && !config.Draft.Slots[0].RequiresDirectory && config.Draft.Project == projectBefore && JsonSerializer.Serialize(config.Draft.Slots[1], Store.Json) == secondBefore);
+            await saveTask;await commandCheckTask;
+            check("F04 direct folder is saved and visible without probing CLI presets", Store.Read<Configuration>(configPath)!.Draft.Slots[0].Directory == Store.Root && ProjectGuide.Text.Contains("各自") && ReviewFind<System.Windows.Controls.Button>(SlotList).Any(button => System.Windows.Automation.AutomationProperties.GetName(button) == "第 1 项工作目录"));
+            readOnly = true;
+            check("F04 direct folder action respects read-only configuration", !SetSlotDirectory(firstSlot.Id, "") && config.Draft.Slots[0].Directory == Store.Root);
+            readOnly = false;
+            check("F04 explicit inherit action clears the per-agent folder", SetSlotDirectory(firstSlot.Id, "") && config.Draft.Slots[0].Directory == "");
+            await saveTask;await commandCheckTask;
+            LaunchOptionsExpander.IsExpanded = true;ConfigurationToolsExpander.IsExpanded = true;UpdateLayout();
+            check("ACC-U04 advanced controls remain reachable", SummaryPanel.IsVisible && DirectoryMode.IsVisible && ScalePresets.IsVisible && Templates.IsVisible);
+            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("qoder.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "qoder");
+            var entry = new ControlEntry { Plan = plan, State = "Started", Detail = "已启动进程；" + ToolRecovery.BlockedMarker + "整机余量不足" };
+            status = new(true, "guard-ui", [entry], sample);RenderSessionsNow();
+            check("ACC-U05 a denied live tool offers a copy-only recovery action", ReviewFind<System.Windows.Controls.Button>(Sessions).Any(button => Equals(button.Content, "复制继续提示")));
+            if (screenshotFolder is not null)
+            {
+                LaunchOptionsExpander.IsExpanded = false;ConfigurationToolsExpander.IsExpanded = false;
+                SessionExpander.IsExpanded = true;UpdateLayout();ContentScroll.ScrollToEnd();
+                await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Render);UpdateLayout();
+                var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(Sessions);
+                var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)(Sessions.ActualWidth * dpi.DpiScaleX), (int)(Sessions.ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, System.Windows.Media.PixelFormats.Pbgra32);
+                var visual = new System.Windows.Media.DrawingVisual();
+                using (var drawing = visual.RenderOpen())
+                {
+                    var area = new Rect(0, 0, Sessions.ActualWidth, Sessions.ActualHeight);
+                    drawing.DrawRectangle((System.Windows.Media.Brush)FindResource("Page"), null, area);
+                    drawing.DrawRectangle(new System.Windows.Media.VisualBrush(Sessions), null, area);
+                }
+                bitmap.Render(visual);var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+                using var output = System.IO.File.Create(System.IO.Path.Combine(screenshotFolder, "memory-recovery.png"));encoder.Save(output);
+            }
+            entry.Detail = "已启动进程；最近一次工具已通过内存检查";RenderSessionsNow();
+            check("ACC-U05 recovered tools remove the stale retry action", !ReviewFind<System.Windows.Controls.Button>(Sessions).Any(button => Equals(button.Content, "复制继续提示")));
+            entry.Detail = ToolRecovery.BlockedMarker + "余量不足";entry.State = "Settled";RenderSessionsNow();
+            check("ACC-U05 exited sessions never suggest retrying in a live terminal", !ReviewFind<System.Windows.Controls.Button>(Sessions).Any(button => Equals(button.Content, "复制继续提示")));
+            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "custom", Enabled = true, Profiles = new() { ["custom"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe") } } }] } };
+            status = new(true, "low-memory-ui", [], sample with { Available = ResourcePolicy.GiB, At = DateTimeOffset.UtcNow });
+            previewOnly = false;
+            Render();QueueSave();await saveTask;await commandCheckTask;UpdateLaunch();
+            check("ACC-U06 practical low memory keeps launch available with an advisory hint", LaunchButton.IsEnabled && LaunchButton.Visibility == Visibility.Visible && QueueQuickButton.IsEnabled && Equals(QueueQuickButton.Content, "按资源依次启动") && LaunchHint.Text.Contains("可用内存") && LaunchHint.Text.Contains("实用模式不拦截") && !LaunchHint.Text.Contains("等待资源后启动"));
+            config.Draft.Resource = new() { Mode = "conservative" };UpdateLaunch();
+            check("ACC-U06 conservative low memory still blocks launch and offers the waiting queue", !LaunchButton.IsEnabled && LaunchButton.Visibility == Visibility.Visible && QueueQuickButton.IsEnabled && Equals(QueueQuickButton.Content, "等待资源后启动") && LaunchHint.Text.Contains("可用内存") && LaunchHint.Text.Contains("等待资源"));
+            config.Draft.Resource = new ResourceSettings();
+            status = new(true, "recovered-memory-ui", [], sample with { At = DateTimeOffset.UtcNow });UpdateLaunch();
+            check("ACC-U06 recovered memory restores immediate launch", LaunchButton.IsEnabled && LaunchButton.Visibility == Visibility.Visible && Equals(QueueQuickButton.Content, "按资源依次启动"));
+            if (screenshotFolder is not null)
+            {
+                SessionExpander.IsExpanded = false;TaskExpander.IsExpanded = false;ContentScroll.ScrollToTop();UpdateLayout();
+                await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Render);
+                var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(this);
+                var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)(ActualWidth * dpi.DpiScaleX), (int)(ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, System.Windows.Media.PixelFormats.Pbgra32);
+                bitmap.Render(this);var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+                using var output = System.IO.File.Create(System.IO.Path.Combine(screenshotFolder, "simple-start.png"));encoder.Save(output);
+            }
+            await RunDirectStartCheckAsync(check);
+        }
+        finally
+        {
+            await saveTask;await commandCheckTask;
+            LaunchOptionsExpander.IsExpanded = false;ConfigurationToolsExpander.IsExpanded = false;
+            SessionExpander.IsExpanded = previousExpanded;
+            config = previous;status = previousStatus;readOnly = previousReadOnly;Render();QueueSave();await saveTask;await commandCheckTask;
+            if (previousTimer) timer.Start();
+        }
+    }
+
+    private async Task RunDirectStartCheckAsync(Action<string, bool> check)
+    {
+        var previousSample = Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE");
+        var queueBefore = JsonSerializer.Serialize(taskBook, Store.Json);
+        var output = System.IO.Path.Combine(Store.Root, "direct-start.json");
+        var directory = System.IO.Path.Combine(Store.Root, "direct-project-中文");System.IO.Directory.CreateDirectory(directory);
+        ReviewKillMonitor();
+        Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE", "1");
+        try
+        {
+            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "custom", Enabled = true, Directory = directory, Profiles = new() { ["custom"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.Tests.exe"), Arguments = ["--echo", output, "中文 with spaces"] } } }] } };
+            Render();QueueSave();await saveTask;await commandCheckTask;await RefreshAsync();UpdateLaunch();
+            check("ACC-U07 direct launch is ready with an explicit folder", LaunchButton.IsEnabled);
+            LaunchButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            await launchTask;
+            ControlEntry? started = null;
+            for (var i = 0; i < 100; i++)
+            {
+                await RefreshAsync();started = status?.Entries?.SingleOrDefault(entry => entry.Plan.SourceSlotId == config.Draft.Slots[0].Id);
+                if (started is not null && Store.IsTerminal(started)) break;
+                await Task.Delay(100);
+            }
+            check("ACC-U07 launch button reaches a real Terminal child and exit receipt", started is not null && Store.IsTerminal(started) && Store.Read<Receipt>(Store.ReceiptPath(started.Plan.Id)) is { Phase: "Finished", ExitCode: 0 } && System.IO.File.Exists(output));
+            using var result = JsonDocument.Parse(System.IO.File.ReadAllText(output));
+            check("ACC-U07 child uses the visible per-agent folder and exact arguments", PhysicalDirectory.Resolve(result.RootElement.GetProperty("Cwd").GetString()!).Key == PhysicalDirectory.Resolve(directory).Key && result.RootElement.GetProperty("Args").EnumerateArray().Select(value => value.GetString()).SequenceEqual(["中文 with spaces"]));
+            check("ACC-U07 direct launch leaves old queued tasks untouched", JsonSerializer.Serialize(taskBook, Store.Json) == queueBefore);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE", previousSample);
+            ReviewKillMonitor();
+        }
+    }
+}
+#endif

@@ -15,7 +15,7 @@ public partial class MainWindow
 {
     private async Task RunUiChecksAsync(string folder)
     {
-        System.IO.Directory.CreateDirectory(folder);var checks=new List<string>();var progressAt=DateTime.UtcNow;
+        System.IO.Directory.CreateDirectory(folder);var checks=new List<string>();
         // The harness owns an isolated, possibly non-existent test root. The app's preview-first startup no longer writes
         // monitor state there, so create it before the first configuration write (a missing root surfaces as a silent UI-only error).
         System.IO.Directory.CreateDirectory(Store.Root);
@@ -23,11 +23,8 @@ public partial class MainWindow
         {
             if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}
             checks.Add(name);
-            if(DateTime.UtcNow-progressAt>=TimeSpan.FromMilliseconds(500)||name=="UI checks do not launch agents")
-            {
-                progressAt=DateTime.UtcNow;
-                System.IO.File.WriteAllText(System.IO.Path.Combine(folder,"ui-progress.json"),System.Text.Json.JsonSerializer.Serialize(new{LastPassed=name,Count=checks.Count,At=DateTimeOffset.UtcNow}));
-            }
+            // Record every boundary so a later layout stall is attributed to the actual last completed check.
+            System.IO.File.WriteAllText(System.IO.Path.Combine(folder,"ui-progress.json"),System.Text.Json.JsonSerializer.Serialize(new{LastPassed=name,Count=checks.Count,At=DateTimeOffset.UtcNow}));
         }
         IEnumerable<T> Find<T>(DependencyObject root) where T:DependencyObject
         {
@@ -160,7 +157,7 @@ public partial class MainWindow
             {
                 // A Render callback can run before the native WM_SIZE message. Drain input and layout before measuring.
                 await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
-                var ready=Math.Abs(ActualWidth-Width)<1&&Math.Abs(ActualHeight-Height)<1&&WorkGrid.IsMeasureValid&&WorkGrid.IsArrangeValid&&ConfigurationPanel.IsArrangeValid&&SummaryPanel.IsArrangeValid;
+                var ready=Math.Abs(ActualWidth-Width)<1&&Math.Abs(ActualHeight-Height)<1&&WorkGrid.IsMeasureValid&&WorkGrid.IsArrangeValid&&ConfigurationPanel.IsArrangeValid;
                 settled=ready?settled+1:0;
                 if(settled>=2)return;
                 await Task.Delay(25);
@@ -172,9 +169,8 @@ public partial class MainWindow
         {
             config.Theme=variant.Item1;ApplyTheme();await ResizeForCheckAsync(variant.Item2,variant.Item3);
             var point=LaunchButton.TranslatePoint(new Point(),this);Check($"launch visible {variant}",point.Y>=0&&point.Y+LaunchButton.ActualHeight<=ActualHeight&&point.X>=0&&point.X+LaunchButton.ActualWidth<=ActualWidth);
-            var narrow=variant.Item2<900;
             Store.Save(System.IO.Path.Combine(folder,$"layout-{variant.Item1}-{variant.Item2}.json"),new{RequestedWidth=variant.Item2,RequestedHeight=variant.Item3,Width,ActualWidth,Height,ActualHeight,Scale=UiScale.Value,WorkWidth=WorkGrid.ActualWidth,ConfigWidth=ConfigurationPanel.ActualWidth,SummaryWidth=SummaryPanel.ActualWidth,ConfigMargin=ConfigurationPanel.Margin.ToString(),SummaryMargin=SummaryPanel.Margin.ToString(),SummaryColumn=Grid.GetColumn(SummaryPanel),SummaryRow=Grid.GetRow(SummaryPanel),ColumnWidth=SummaryColumn.Width.ToString(),Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});
-            Check($"panels fill width {variant}",narrow?Math.Abs(ConfigurationPanel.ActualWidth-WorkGrid.ActualWidth)<2&&Math.Abs(SummaryPanel.ActualWidth-WorkGrid.ActualWidth)<2&&Grid.GetColumn(SummaryPanel)==0&&Grid.GetRow(SummaryPanel)==1:Math.Abs(SummaryPanel.ActualWidth-320)<2&&ConfigurationPanel.ActualWidth<WorkGrid.ActualWidth&&Grid.GetColumn(SummaryPanel)==1&&Grid.GetRow(SummaryPanel)==0);
+            Check($"primary configuration fills width without a resource sidebar {variant}",Math.Abs(ConfigurationPanel.ActualWidth-WorkGrid.ActualWidth)<2&&SummaryColumn.Width.Value==0&&!LaunchOptionsExpander.IsExpanded&&!SummaryPanel.IsVisible);
             Check($"project accessible name {variant}",AutomationProperties.GetName(ProjectPath).Length>0);
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-{variant.Item1}-{variant.Item2}.png"));encoder.Save(file);
@@ -264,8 +260,9 @@ public partial class MainWindow
         ReviewUiChecks.Run(Check);
         await RunReviewUiChecksAsync(Check);
         await RunMultipaneChecksAsync(Check);
+        await RunSimpleUiChecksAsync(Check,folder);
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
-        Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX,Resource=ResourceText.Text});Close();
+        Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});Close();
     }
 }
 #endif

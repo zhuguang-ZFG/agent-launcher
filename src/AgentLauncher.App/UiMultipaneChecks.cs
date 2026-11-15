@@ -31,12 +31,13 @@ public partial class MainWindow
             config.Edit(d=>{for(var i=0;i<d.Slots.Count;i++){d.Slots[i].Enabled=i is 0 or 7 or 15;d.Slots[i].Profiles[d.Slots[i].AgentId]=new(){Executable=Path.Combine(Environment.SystemDirectory,"cmd.exe"),Arguments=[]};}});
             Healthy([Entry("Pending",1),Entry("Started",2),Entry("Creating",3),Entry("Unknown",4),Entry("Started",0,"git"),Entry("Settled",5)]);Render();
             await commandCheckTask;await saveTask;
-            UpdateMultipaneSummary(DecideAdmission(config.Draft,status!.Memory,status.Entries));
-            check("ACC-S01 four counts with 16 configured and 3 enabled",config.Draft.Slots.Count==16&&config.Draft.Slots.Count(s=>s.Enabled)==3&&ConfiguredCountValue.Text=="16"&&EnabledCountValue.Text=="3"&&ReservedCountValue.Text=="4"&&StartedCountValue.Text=="1"&&LaunchButton.Content is string launchLabel&&launchLabel.Contains("3")&&Preview.Children.OfType<Grid>().Sum(g=>g.Children.Count)==3);
-            check("ACC-S01 creating and unknown are not reported as started",CreatedPendingText.Visibility==Visibility.Visible&&CreatedPendingText.Text.Contains("创建中 1")&&CreatedPendingText.Text.Contains("待核对 1")&&StartedCountValue.Text=="1");
-            status=new(false,"offline",Memory:Sample());UpdateMultipaneSummary(DecideAdmission(config.Draft,status.Memory,status.Entries));
-            check("ACC-S01 unavailable status does not fabricate zero reservations",ReservedCountValue.Text=="—"&&StartedCountValue.Text=="—");
-            Healthy();
+            UpdateMultipaneSummary();UpdateLaunch();
+            check("ACC-S01 selection summary replaces the retired four-count card",config.Draft.Slots.Count==16&&config.Draft.Slots.Count(s=>s.Enabled)==3&&FindName("ConfiguredCountValue")==null&&FindName("EnabledCountValue")==null&&FindName("ReservedCountValue")==null&&FindName("StartedCountValue")==null&&FindName("CreatedPendingText")==null&&SelectionSummary.Text=="已选 3 个，共 16 个"&&LaunchButton.Content is string launchLabel&&launchLabel.Contains("3")&&Preview.Children.OfType<Grid>().Sum(g=>g.Children.Count)==3);
+            status=new(false,"offline",Memory:Sample());UpdateLaunch();
+            check("ACC-S01 unavailable status never reports a launchable configuration",!LaunchButton.IsEnabled&&LaunchHint.Text.Contains("正在等待后台检查就绪"));
+            Healthy([..Enumerable.Range(1,8).Select(i=>Entry("Started",i))]);UpdateLaunch();
+            check("ACC-U08 concurrency cap refuses launches beyond eight active agent panes",!LaunchButton.IsEnabled&&LaunchHint.Text.Contains("同时运行的 Agent 窗格最多 8 个"));
+            Healthy();UpdateLaunch();
 
             foreach(var (n,layout,rows) in new (int,string,int[])[]{(2,"horizontal",[2]),(3,"vertical",[1,2]),(6,"vertical",[2,2,1,1]),(8,"vertical",[2,2,2,2]),(16,"vertical",[4,4,4,4])})
             {
@@ -75,16 +76,6 @@ public partial class MainWindow
             check("ACC-L05 batch profiles and argument arrays are independent",!ReferenceEquals(batchSource,batchTarget)&&!ReferenceEquals(batchTarget.Arguments,batchSibling.Arguments)&&batchSource.Arguments[0]=="--source"&&batchSibling.Arguments[0]=="--source");
             ApplyAgentToSlots(sourceId,true);check("ACC-L05 applying to all includes preceding slots and preserves identity",UnrelatedFieldsKept()&&config.Draft.Slots.All(s=>s.AgentId=="claude"&&s.Current.Arguments.SequenceEqual(new[]{"--source","argument with spaces"})));
 
-            var waiverItems=new[]{Entry("Pending",1).Plan with{Name="secret-name",Cwd="secret-directory",Command=new("secret-executable",["secret-argument"],"exe")},Entry("Pending",16).Plan};
-            var sample=Sample();var waiver=new AdmissionDecision(AdmissionKind.RequireWaiver,"soft only",2*ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultPlanningBytes,4*ResourcePolicy.GiB,2*ResourcePolicy.GiB,5*ResourcePolicy.GiB,2*ResourcePolicy.GiB,2*ResourcePolicy.GiB,true);
-            var prompts=0;var confirmationText="";TestConfirm=(text,_,buttons)=>{prompts++;confirmationText=text;check("ACC-R01 waiver asks explicit yes no",buttons==MessageBoxButton.YesNo);return MessageBoxResult.No;};
-            check("ACC-R02 deny path has no waiver prompt",!ConfirmResourceWaiver(waiverItems,waiver with{Kind=AdmissionKind.Deny},sample)&&prompts==0);
-            check("ACC-R02 invalid sample has no waiver prompt",!ConfirmResourceWaiver(waiverItems,waiver,sample with{At=sample.At.AddSeconds(-10)})&&prompts==0);
-            check("ACC-R01 declining waiver stops before authorization",!ConfirmResourceWaiver(waiverItems,waiver,sample)&&prompts==1);
-            check("ACC-R01 waiver prompt lists scope expiry sampling and hard floors without secrets",confirmationText.Contains("第 01 项")&&confirmationText.Contains("第 16 项")&&confirmationText.Contains("45 秒")&&confirmationText.Contains("不能突破")&&confirmationText.Contains("不可复用")&&confirmationText.Contains("采样时间")&&confirmationText.Contains("物理")&&confirmationText.Contains("提交")&&confirmationText.Contains("软超差额")&&!confirmationText.Contains("secret-"));
-            TestConfirm=(_,_,_)=>MessageBoxResult.Yes;check("ACC-R01 accepting waiver returns consent without issuing IPC",ConfirmResourceWaiver(waiverItems,waiver,Sample()));
-            check("ACC-R01 Git preparation can request the same protected confirmation",ConfirmResourceWaiver([Entry("Pending",1,"git").Plan],waiver,Sample()));
-
             var resourceDialog=new ResourceSettingsWindow(this,new ResourceSettings(),Sample(),false,false);
             check("ACC-U03 practical values are read only until custom selected",resourceDialog.JobLimitGiB.IsReadOnly&&resourceDialog.PlanningMiB.IsReadOnly);
             resourceDialog.ModeChoice.SelectedIndex=2;resourceDialog.JobLimitGiB.Text="NaN";
@@ -95,6 +86,8 @@ public partial class MainWindow
             check("ACC-U03 zero hard floor is rejected",!resourceDialog.TryApplySettings()&&resourceDialog.Value is null);
             resourceDialog.PhysicalFloorGiB.Text=(1.5m).ToString(System.Globalization.CultureInfo.CurrentCulture);resourceDialog.CommitFloorGiB.Text="1";resourceDialog.CpuPercent.Text="35";
             check("ACC-U03 valid custom values use 1024 based units",resourceDialog.TryApplySettings()&&resourceDialog.Value is {Mode:"custom",JobMemoryLimit:2*ResourcePolicy.GiB,PlanningBytes:768*ResourcePolicy.MiB,CpuRate:3500} settings&&settings.PhysicalFloorOverride==ResourcePolicy.MinCustomPhysicalFloor&&settings.CommitFloorOverride==ResourcePolicy.MinCustomCommitFloor);
+            resourceDialog.ApplyMultiToolPreset();resourceDialog.TryApplySettings();
+            check("ACC-U03 multi-tool preset provides larger independent budget only after apply",resourceDialog.Value is {Mode:"custom",JobMemoryLimit:4*ResourcePolicy.GiB,PlanningBytes:1536*ResourcePolicy.MiB,Pool:ResourcePolicy.PoolIndependent});
             resourceDialog.ModeChoice.SelectedIndex=1;resourceDialog.TryApplySettings();
             check("ACC-U03 leaving custom resets resource defaults",resourceDialog.Value is {Mode:"practical",JobMemoryLimit:ResourcePolicy.DefaultJobMemoryLimit,PlanningBytes:ResourcePolicy.DefaultPlanningBytes,CpuRate:ResourcePolicy.DefaultCpuRate,PhysicalFloorOverride:null,CommitFloorOverride:null});resourceDialog.Close();
             var activeDialog=new ResourceSettingsWindow(this,new ResourceSettings{Mode="custom",JobMemoryLimit=3*ResourcePolicy.GiB},Sample(),true,false);

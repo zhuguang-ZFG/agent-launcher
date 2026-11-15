@@ -21,7 +21,7 @@ public partial class MainWindow
         var marker = Path.Combine(project, "unexpected-agent.txt");
         var node = Commands.FindExe("node.exe") ?? throw new IOException("Node fixture is required.");
         var args = new[] { "-e", $"require('node:fs').writeFileSync({JsonSerializer.Serialize(marker)}, 'started')", "", "中文; & literal" };
-        var resource = new ResourceSettings { Mode = "custom", JobMemoryLimit = 8 * ResourcePolicy.GiB, PlanningBytes = 8 * ResourcePolicy.GiB,
+        var resource = new ResourceSettings { Mode = "conservative", JobMemoryLimit = 8 * ResourcePolicy.GiB, PlanningBytes = 8 * ResourcePolicy.GiB,
             PhysicalFloorOverride = 8 * ResourcePolicy.GiB, Pool = ResourcePolicy.PoolShared, PoolMemoryLimit = 8 * ResourcePolicy.GiB };
         config = new Configuration
         {
@@ -165,7 +165,7 @@ public partial class MainWindow
                 firstEntry.DirectoryMode == "shared", firstEntry.Command with { Arguments = [.. firstEntry.Command.Arguments] }, policy.JobMemoryLimit,
                 PlanningBytes: policy.PlanningBytes, ResourceMode: policy.Mode, SourceSlotId: firstEntry.TaskId, AgentId: firstEntry.AgentId);
             var reserve = await Ipc.ReserveWithCleanupAsync([claimed], default, null, policy, null, ResourcePolicy.PolicyHash(policy),
-                ResourcePolicy.PlanDigest([claimed]), null, null, firstEntry.Id);
+                ResourcePolicy.PlanDigest([claimed]), null, firstEntry.Id);
             check("QQ-C08 reserve before StartRun records the durable queue claim", reserve.Ok);
             var revoke = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: claimed.Id));
             check("QQ-C08 revoke confirms the unstarted attempt while the durable claim survives",
@@ -216,7 +216,7 @@ public partial class MainWindow
                 recoveredIntent.DirectoryMode == "shared", recoveredIntent.Command with { Arguments = [.. recoveredIntent.Command.Arguments] }, recoveryPolicy.JobMemoryLimit,
                 PlanningBytes: recoveryPolicy.PlanningBytes, ResourceMode: recoveryPolicy.Mode, SourceSlotId: recoveredIntent.TaskId, AgentId: recoveredIntent.AgentId);
             var accepted = await Ipc.ReserveWithCleanupAsync([recoveryPlan], default, null, recoveryPolicy, null, ResourcePolicy.PolicyHash(recoveryPolicy),
-                ResourcePolicy.PlanDigest([recoveryPlan]), null, null, recoveredIntent.Id);
+                ResourcePolicy.PlanDigest([recoveryPlan]), null, recoveredIntent.Id);
             check("QQ-C15 the monitor accepts the explicitly re-enqueued item past the old claim", accepted.Ok);
             var released = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: recoveryPlan.Id));
             check("QQ-C15 the recovery probe is revoked", released.Ok);

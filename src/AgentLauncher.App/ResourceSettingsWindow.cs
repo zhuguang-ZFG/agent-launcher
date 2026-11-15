@@ -47,7 +47,7 @@ public sealed class ResourceSettingsWindow : Window
         var modeLabel=new Label{Content="资源模式",Target=ModeChoice,Padding=new(0)};AutomationProperties.SetName(ModeChoice,"资源模式");
         ModeChoice.Items.Add(new ComboBoxItem{Content="保守",Tag="conservative"});ModeChoice.Items.Add(new ComboBoxItem{Content="实用（默认）",Tag="practical"});ModeChoice.Items.Add(new ComboBoxItem{Content="自定义",Tag="custom"});
         panel.Children.Add(modeLabel);panel.Children.Add(ModeChoice);
-        panel.Children.Add(new TextBlock{Text="保守按软预算严格准入；实用按规划估算准入（默认）；自定义可调整下方资源数值。",Style=(Style)FindResource("Caption"),Margin=new(0,0,0,12)});
+        panel.Children.Add(new TextBlock{Text="保守按软预算严格准入；实用允许确认软预算超额；自定义可调整下方数值。所有模式均为任务后续增长预留提交额度，额度不足时等待。",Style=(Style)FindResource("Caption"),Margin=new(0,0,0,12)});
         var poolLabel=new Label{Content="内存并行方式",Target=PoolChoice,Padding=new(0)};AutomationProperties.SetName(PoolChoice,"内存并行方式");
         PoolChoice.Items.Add(new ComboBoxItem{Content="独立（每项各自上限）",Tag=ResourcePolicy.PoolIndependent});
         PoolChoice.Items.Add(new ComboBoxItem{Content="共享（同一池额度只计一次）",Tag=ResourcePolicy.PoolShared});
@@ -60,6 +60,12 @@ public sealed class ResourceSettingsWindow : Window
         Field(JobLimitGiB,$"每项 Job 内存上限（GiB；1～{GiB(maxJob)}）");
         Field(PoolLimitGiB,$"共享池内存上限（GiB；至少等于每项 Job 上限，最大 8 GiB）");
         panel.Children.Add(new TextBlock{Text="该上限由 Agent、MCP、浏览器和编译等全部工具子进程共享。多工具任务可为新批次提高上限，同时减少并行项；规划估算应反映实际工作负载。",Style=(Style)FindResource("Caption"),Margin=new(0,0,0,12)});
+        panel.Children.Add(new TextBlock{Text="Omp 新启动项会在工具执行前检查本项、共享池及整机内存；余量不足时暂停新增工具，并将每会话子任务并发限制为最多 2（已有更低值保留）。正在执行的单个工具仍受硬上限保护。",Style=(Style)FindResource("Caption"),Margin=new(0,0,0,12)});
+        var presetBlock=PresetBlock();
+        var multiToolPreset=new Button{Content="填入多工具任务预设：独立上限 4 GiB",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,0,0,12),IsEnabled=presetBlock.Reason is null};
+        // A disabled button never shows a tooltip on its own, so the reason must be enabled explicitly and exposed to automation.
+        if(presetBlock.Reason is {} presetReason){multiToolPreset.ToolTip=presetReason;ToolTipService.SetShowOnDisabled(multiToolPreset,true);AutomationProperties.SetHelpText(multiToolPreset,presetReason);}
+        multiToolPreset.Click+=(_,_)=>ApplyMultiToolPreset();panel.Children.Add(multiToolPreset);
         Field(PlanningMiB,"每项规划估算（MiB；至少 256，不能超过该项 Job 上限）");
         Field(PhysicalFloorGiB,$"物理临界余量（GiB；1.5～{GiB(maxPhysical)}；留空自动，当前默认 {GiB(ResourcePolicy.DefaultPhysicalFloor(sample.Total))}）");
         Field(CommitFloorGiB,$"提交临界余量（GiB；1～{GiB(maxCommit)}；留空自动，当前默认 {GiB(ResourcePolicy.DefaultCommitFloor(sample.CommitLimit))}）");
@@ -68,7 +74,7 @@ public sealed class ResourceSettingsWindow : Window
         panel.Children.Add(new TextBlock{Text="运行中仍可能分配失败、CLI 退出或系统变卡。根 CPU 封顶是节流而非保证整机空闲；配置变更不会热改正在运行的 Job。切换离开自定义模式后，资源数值重置为默认值。",Margin=new(0,0,0,8)});
         var details=new Expander{IsExpanded=false,Margin=new(0,0,0,8)};details.SetResourceReference(Control.ForegroundProperty,"Ink");
         details.Header=new TextBlock{Text="单位与技术说明",FontWeight=FontWeights.SemiBold};
-        details.Content=new TextBlock{Text="所有单位均为 1024 进制：1 GiB = 1024 MiB，1 MiB = 1024 × 1024 字节。规划估算不是实测占用；Job 上限是提交上限，不是当前占用。",Margin=new(0,4,0,0)};
+        details.Content=new TextBlock{Text="所有单位均为 1024 进制：1 GiB = 1024 MiB，1 MiB = 1024 × 1024 字节。预计值不是实测占用；上限是承诺线，不是当前占用。",Margin=new(0,4,0,0)};
         panel.Children.Add(details);
         root.Children.Add(new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled});Content=root;
         LoadValues(initial);PoolChoice.SelectedValue=ResourcePolicy.PoolModeOf(initial);ModeChoice.SelectedValue=initial.Mode;ModeChoice.IsEnabled=!readOnly;apply.IsEnabled=!readOnly;
@@ -86,6 +92,13 @@ public sealed class ResourceSettingsWindow : Window
             border.SetResourceReference(Border.BackgroundProperty,"Raised");border.SetResourceReference(Border.BorderBrushProperty,"InputLine");
             border.BorderThickness=new(1);border.CornerRadius=new(6);return border;
         }
+    }
+    // One decision feeds the button state, its tooltip and the apply feedback, so the disable reason cannot drift from the early return.
+    private (string? Reason,string Message) PresetBlock()
+    {
+        if(readOnly)return ("只读：当前资源设置只读，预设不可用。","当前资源设置只读，未填入预设。");
+        if(sample.Total<4*ResourcePolicy.GiB)return ("本机内存不足 4 GiB，预设不可用。","本机内存不足 4 GiB，无法填入多工具任务预设；数值保持不变。");
+        return (null,"");
     }
     private string SelectedMode=>(ModeChoice.SelectedItem as ComboBoxItem)?.Tag as string??initial.Mode;
     private string SelectedPool=>(PoolChoice.SelectedItem as ComboBoxItem)?.Tag as string??ResourcePolicy.PoolIndependent;
@@ -141,6 +154,15 @@ public sealed class ResourceSettingsWindow : Window
             ResourcePolicy.ValidateSettings(next,sample.Total,sample.CommitLimit);Value=next;ValidationMessage.Text="";return true;
         }
         catch(InvalidDataException error){ValidationMessage.Text=error.Message;return false;}
+    }
+    internal void ApplyMultiToolPreset()
+    {
+        var (reason,message)=PresetBlock();
+        if(reason is not null){ValidationMessage.Text=message;return;}
+        ModeChoice.SelectedValue="custom";PoolChoice.SelectedValue=ResourcePolicy.PoolIndependent;
+        JobLimitGiB.Text=(LongTaskResources.MemoryLimit/ResourcePolicy.GiB).ToString(CultureInfo.CurrentCulture);PlanningMiB.Text=(LongTaskResources.Planning/ResourcePolicy.MiB).ToString(CultureInfo.CurrentCulture);UpdateEditable();
+        ValidationMessage.Text="";
+        fieldStatus.Text="已填入下一批的数值，点击“应用到新批次”后生效。需要更多提交额度，允许同时运行的任务数会减少；已有任务和已排队计划保持原额度。";
     }
     private static ulong ReadBytes(string text,ulong unit,string label)
     {

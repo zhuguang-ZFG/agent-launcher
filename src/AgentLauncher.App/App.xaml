@@ -11,6 +11,8 @@
   <SolidColorBrush x:Key="Line" Color="#DEE0E4"/>
   <SolidColorBrush x:Key="InputLine" Color="#969BA4"/>
   <SolidColorBrush x:Key="Accent" Color="#245BC4"/>
+  <SolidColorBrush x:Key="AccentSoft" Color="#3D6FD1"/>
+  <SolidColorBrush x:Key="AccentPressed" Color="#1C46A0"/>
   <SolidColorBrush x:Key="AccentInk" Color="#FFFFFF"/>
   <SolidColorBrush x:Key="Selected" Color="#EDF2FC"/>
   <SolidColorBrush x:Key="WarningSurface" Color="#FFF5E5"/>
@@ -37,6 +39,13 @@
   <Style TargetType="Label"><Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="Padding" Value="0,0,0,8"/></Style>
   <Style x:Key="Heading" TargetType="TextBlock"><Setter Property="FontSize" Value="16"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
   <Style x:Key="Caption" TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="Foreground" Value="{DynamicResource Muted}"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
+  <Style x:Key="Card" TargetType="Border">
+   <Setter Property="Background" Value="{DynamicResource Surface}"/>
+   <Setter Property="BorderBrush" Value="{DynamicResource Line}"/>
+   <Setter Property="BorderThickness" Value="1"/>
+   <Setter Property="CornerRadius" Value="10"/>
+   <Setter Property="Padding" Value="16"/>
+  </Style>
   <Style TargetType="Button">
    <Setter Property="MinHeight" Value="36"/><Setter Property="Padding" Value="12,6"/>
    <Setter Property="Background" Value="{DynamicResource Surface}"/><Setter Property="Foreground" Value="{DynamicResource Ink}"/>
@@ -61,6 +70,20 @@
   <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
    <Setter Property="Background" Value="{DynamicResource Accent}"/><Setter Property="Foreground" Value="{DynamicResource AccentInk}"/>
    <Setter Property="BorderBrush" Value="{DynamicResource Accent}"/><Setter Property="MinHeight" Value="44"/><Setter Property="Padding" Value="24,8"/><Setter Property="FontWeight" Value="SemiBold"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border x:Name="Chrome" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+     <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" RecognizesAccessKey="True"/>
+    </Border>
+    <ControlTemplate.Triggers>
+     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Chrome" Property="Opacity" Value="0.78"/></Trigger>
+     <Trigger Property="IsPressed" Value="True"><Setter TargetName="Chrome" Property="Opacity" Value="0.62"/></Trigger>
+     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+    </ControlTemplate.Triggers>
+   </ControlTemplate></Setter.Value></Setter>
+   <Style.Triggers>
+    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource AccentSoft}"/><Setter Property="BorderBrush" Value="{DynamicResource AccentSoft}"/></Trigger>
+    <Trigger Property="IsPressed" Value="True"><Setter Property="Background" Value="{DynamicResource AccentPressed}"/><Setter Property="BorderBrush" Value="{DynamicResource AccentPressed}"/></Trigger>
+   </Style.Triggers>
   </Style>
   <Style TargetType="TextBox">
    <Setter Property="MinHeight" Value="36"/><Setter Property="Padding" Value="10,7"/>

@@ -55,6 +55,16 @@ public partial class MainWindow
         await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
         check("ACC-B05 queue starts paused and only runs when asked", queueEnabled && QueueToggleButton.Content as string == "暂停队列");
         var attemptsBefore = taskStore.Load().Attempts.Count;
+        // Advisory 2026-11-13: while the workspaces dialog is open (may run an explicit cleanup), the pump must not
+        // dispatch — cleanup verifies occupancy against the monitor and a launch landing mid-flow invalidates it.
+        workspaceCleanupActive = true;
+        try
+        {
+            await PumpQueueAsync();
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("ACC-WC03 workspaces dialog blocks queue dispatch", !queuePumping && taskStore.Load().Queue.Count == 1 && taskStore.Load().Attempts.Count == attemptsBefore);
+        }
+        finally { workspaceCleanupActive = false; }
         var detail = "";
         for (var i = 0; i < 300; i++)
         {
@@ -188,8 +198,11 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
                 check($"ACC-B08 shim dispatch {index + 1} reaches review", TaskBookOps.LastRun(taskStore.Load(), taskId)?.State == "Review");
             }
             var executions = File.ReadAllLines(output).Select(line => JsonSerializer.Deserialize<JsonElement>(line)).ToArray();
+            // The memory guard contract injects --extension <packaged omp-memory-guard.mjs> ahead of raw arguments for Omp plans.
             check("ACC-B08 shim children receive raw arguments once with their working directory intact", executions.Length == 2
-                && executions.All(execution => execution.GetProperty("args").EnumerateArray().Select(value => value.GetString()).SequenceEqual(arguments)
+                && executions.All(execution => execution.GetProperty("args").EnumerateArray().Select(value => value.GetString()).ToArray() is { Length: > 2 } received
+                    && received[0] == "--extension" && Path.GetFileName(received[1]) == OmpMemoryGuard.ExtensionFile && File.Exists(received[1])
+                    && received.Skip(2).SequenceEqual(arguments)
                     && PhysicalDirectory.Resolve(execution.GetProperty("cwd").GetString()!).Key == PhysicalDirectory.Resolve(root).Key));
             check("ACC-B08 repeat dispatch keeps the prepared workspace but renews batch and attempt identities",
                 runs[0].WorkspaceKey == runs[1].WorkspaceKey && runs[0].BatchId != runs[1].BatchId && runs[0].AttemptId != runs[1].AttemptId);
@@ -239,7 +252,9 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             await ReconcileTaskRunsAsync();
             executions = File.ReadAllLines(output).Select(line => JsonSerializer.Deserialize<JsonElement>(line)).ToArray();
             check("ACC-B10 resumed shim preserves raw argv and one literal session value", executions.Length == 3
-                && executions[2].GetProperty("args").EnumerateArray().Select(value => value.GetString()).SequenceEqual([.. arguments, "--resume", session]));
+                && executions[2].GetProperty("args").EnumerateArray().Select(value => value.GetString()).ToArray() is { Length: > 2 } resumedArgs
+                && resumedArgs[0] == "--extension" && Path.GetFileName(resumedArgs[1]) == OmpMemoryGuard.ExtensionFile
+                && resumedArgs.Skip(2).SequenceEqual([.. arguments, "--resume", session]));
             var frozenResume = Commands.Resolve("omp", new AgentProfile { Executable = shim, Arguments = [.. arguments, "--resume", session] });
             var occupiedAttempt = Guid.NewGuid();
             check("ACC-B09 queued resume and later occupied session are saved", await UpdateTasksAsync(book =>
