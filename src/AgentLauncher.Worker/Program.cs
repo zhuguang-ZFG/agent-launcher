@@ -587,9 +587,12 @@ internal sealed class Monitor : IDisposable
         {
             var items=request.Items??[];
             if(request.Operation=="reserve-task"&&ReplayTaskClaim(request,items) is {} replay)return replay;
-            if(AdmissionBlockedReason() is {} earlyReason)throw new IOException(earlyReason);
+            // Pressure depends on the entry's frozen mode, so it is never an early gate: the global configuration mode must not
+            // decide a queue reservation whose snapshot was frozen as practical. Everything else still precedes the binding.
+            if(AdmissionHardReason() is {} earlyReason)throw new IOException(earlyReason);
             var binding=request.Operation=="reserve-task"?BindTaskAuthority(request,items):BindAuthority(request,items);
-            if(AdmissionBlockedReason() is {} reason)throw new IOException(reason);
+            if(pressure&&binding.Policy.Mode=="conservative")throw new IOException("资源压力尚未连续恢复，稍后重新检查。");
+            if(AdmissionHardReason() is {} reason)throw new IOException(reason);
             if(items.Length is <1 or >ResourcePolicy.MaxSlots||items.Select(i=>i.Id).Distinct().Count()!=items.Length)throw new IOException("启动项数量或 ID 无效。");
             var previous=ledger.Entries.Where(e=>items.Any(i=>i.Id==e.Plan.Id)).ToArray();
             if(previous.Length>0){if(request.Operation!="reserve-task"&&previous.Length==items.Length&&previous.All(e=>e.Digest==Store.Digest(items.Single(i=>i.Id==e.Plan.Id))))return new(true,"请求已记录",previous,sample,epoch);throw new IOException("启动 ID 已使用。");}
@@ -670,6 +673,9 @@ internal sealed class Monitor : IDisposable
         if(request.Operation=="begin")
         {
             if(entry.State!="Pending")throw new IOException("授权已撤销或被领取，不能重复启动。");
+            // A ledger written before the 8-pane cap can still hold more Pending agent entries. Refuse the grant without
+            // consuming it so every extra entry stays revocable; Git preparation is not an Agent pane and is not counted.
+            if(ledger.Entries.Count(e=>!Store.IsTerminal(e)&&(e.Plan.Kind is null or "agent"))>ResourcePolicy.MaxConcurrentAgents)throw new IOException($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个；请先结束或撤销部分 Agent 后再启动。");
             if(UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!Ipc.EntryRepresentable(e)).ToArray()) is {} reason)throw new IOException(reason);
             if(blocked!=null)throw new IOException(blocked);
             var policy=PolicyFromEntry(entry);
@@ -705,10 +711,13 @@ internal sealed class Monitor : IDisposable
         foreach(var entry in terminal){var size=StatusEntry(entry).Bytes;if(bytes+size>768*1024)break;kept.Add(entry);bytes+=size;}
         kept.Reverse();var omittedReason=UnrepresentableReason(withheld);
         var budgets=blocked==null&&active.Length>0?ActiveBudgets().ToArray():null;
+        var hard=AdmissionHardReason();
         var reason=omittedReason??AdmissionBlockedReason();
-        var signature=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new{Epoch=epoch,Blocked=blocked,Reason=reason,RootCpuRate=rootCpuRate,ReconcileOffered=reconcileOffered,Active=active.Select(e=>StatusEntry(e).Signature),History=kept.Select(e=>StatusEntry(e).Signature),Pools=ledger.Pools.Select(p=>new{p.Id,p.MemoryLimit})},Store.Json)));
+        // A raw pressure flip must change the signature even when the composed reason text does not (global practical mode),
+        // otherwise a paged client reusing the previous signature would skip the frame that carries it.
+        var signature=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new{Epoch=epoch,Blocked=blocked,Reason=reason,Hard=hard,Pressure=pressure,RootCpuRate=rootCpuRate,ReconcileOffered=reconcileOffered,Active=active.Select(e=>StatusEntry(e).Signature),History=kept.Select(e=>StatusEntry(e).Signature),Pools=ledger.Pools.Select(p=>new{p.Id,p.MemoryLimit})},Store.Json)));
         var unchanged=request?.StatusEpoch==epoch&&request.StatusSignature==signature;
-        return new(blocked==null&&withheld.Length==0&&AuthorityBlockedReason()==null,reason??"监控器已核对",unchanged?null:active.Where(entry=>!withheld.Contains(entry)).Concat(kept).ToArray(),sample,epoch,reason,Unchanged:unchanged,StatusSignature:signature,RootCpuRate:rootCpuRate,ReconcileOffered:reconcileOffered,Pools:ledger.Pools.Count==0?null:ledger.Pools.ToArray(),Budgets:budgets);
+        return new(blocked==null&&withheld.Length==0&&AuthorityBlockedReason()==null,reason??"监控器已核对",unchanged?null:active.Where(entry=>!withheld.Contains(entry)).Concat(kept).ToArray(),sample,epoch,reason,Unchanged:unchanged,StatusSignature:signature,RootCpuRate:rootCpuRate,ReconcileOffered:reconcileOffered,Pools:ledger.Pools.Count==0?null:ledger.Pools.ToArray(),Budgets:budgets,AdmissionHardBlockedReason:hard,AdmissionPressure:pressure);
     }
     // Fail-closed, user-confirmed release: settle only entries whose resource group provably no longer exists and whose receipt already proves the whole managed tree exited (Finished) or never ran (FailedBeforeStart). A dead recorded parent alone is not proof: jobs have no KILL_ON_JOB_CLOSE, so descendants may survive the handle loss and cannot be enumerated without it.
     private Response ReconcileRequests()
@@ -887,13 +896,17 @@ internal sealed class Monitor : IDisposable
         try{LoadAuthority();return null;}
         catch(Exception e)when(e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){return e.Message;}
     }
-    private string? AdmissionBlockedReason()
+    private string? AdmissionBlockedReason()=>AdmissionReason(includePressure:true);
+    // Pressure is a reading evaluated against the caller's frozen mode, so the reserve gates ask for the reason without it.
+    // A default parameter would have changed this method's arity; reflection callers in the existing checks pass no arguments.
+    private string? AdmissionHardReason()=>AdmissionReason(includePressure:false);
+    private string? AdmissionReason(bool includePressure)
     {
         string? authority;bool conservative;
         try{var (settings,_)=LoadAuthority();authority=null;conservative=settings.Mode=="conservative";}
         // Pressure is a reading, not an authority: only conservative mode refuses on it, and an unreadable policy stays fail-closed.
         catch(Exception e)when(e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){authority=e.Message;conservative=true;}
-        return authority??UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!StatusEntry(e).Representable).ToArray())??blocked??rootCpuReason??(pressure&&conservative?"资源压力尚未连续恢复，稍后重新检查。":null);
+        return authority??UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!StatusEntry(e).Representable).ToArray())??blocked??rootCpuReason??(includePressure&&pressure&&conservative?"资源压力尚未连续恢复，稍后重新检查。":null);
     }
     public void Dispose(){foreach(var watch in poolWatches.Values)watch.Dispose();poolWatches.Clear();poolWatchErrors.Clear();foreach(var j in jobs.Values)j.Dispose();jobs.Clear();foreach(var j in pools.Values)j.Dispose();pools.Clear();receiptCache.Clear();statusEntryCache.Clear();root?.Dispose();}
     private List<BudgetItem> ActiveBudgets()
