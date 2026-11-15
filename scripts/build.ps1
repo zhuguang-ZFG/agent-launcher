@@ -26,7 +26,7 @@ Extract this entire package, then double-click Start-AgentLauncher.cmd.
 Launch.ps1 -CheckOnly checks companion file hashes and .NET 8 Desktop Runtime x64.
 The check does not install dependencies or change saved configuration.
 Windows Terminal and the selected CLI are user-installed. Git is required for worktrees.
-Keep App, Worker, DLLs, JSON files, LICENSE and NOTICE from the same package together.
+Keep App, Worker, DLLs, JSON files, omp-memory-guard.mjs, LICENSE and NOTICE from the same package together.
 distribution.json records the source commit, source state and file hashes.
 To remove this portable package, close its App and wait for all managed tasks to finish,
 then remove the extracted directory. User state and worktrees are retained separately.

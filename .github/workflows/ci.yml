@@ -24,6 +24,18 @@ jobs:
       - name: Full gate (model + integration + WPF + prototype + browser)
         shell: pwsh
         run: ./scripts/test.ps1
+      - name: Real Omp pre-tool memory backpressure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tool = Join-Path $env:RUNNER_TEMP 'omp-memory-guard.exe'
+          Invoke-WebRequest 'https://github.com/can1357/oh-my-pi/releases/download/v18.20.0/omp-windows-x64.exe' -OutFile $tool
+          $expected = '1b6c7bda8241bc7d948495539f90ec47e6f30d1fec72b6ee097a67a1fc8d8e48'
+          if ((Get-FileHash -LiteralPath $tool -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Omp release SHA256 mismatch' }
+          node scripts/test-omp-memory-guard.mjs $tool
+          if ($LASTEXITCODE -ne 0) { throw 'Real Omp guard check failed' }
+          node scripts/test-omp-memory-guard.mjs $tool sub
+          if ($LASTEXITCODE -ne 0) { throw 'Real Omp child guard check failed' }
       - name: Build production package and check portable entry
         shell: powershell
         run: ./scripts/build.ps1 -Output artifacts/ci-preview
@@ -42,4 +54,5 @@ jobs:
             artifacts/prototype-browser-stderr.log
             artifacts/ci-preview/distribution.json
             artifacts/production-pane-*/result.json
+            artifacts/omp-memory-guard-*/
           if-no-files-found: ignore

@@ -13,7 +13,7 @@ try {
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or (Get-Item -LiteralPath $manifestPath).Length -gt 1MB) { throw '发布清单缺失或无效，请重新完整解压同一版本的发布包。' }
     $manifest = Get-Content -LiteralPath $manifestPath -Encoding UTF8 -Raw | ConvertFrom-Json
     if ($manifest.SchemaVersion -ne 1 -or $manifest.Architecture -ne 'x64' -or $manifest.TargetFramework -ne 'net8.0-windows') { throw '此发布包的版本或体系结构不支持，请重新下载 Windows x64 包。' }
-    $required = @('AgentLauncher.App.exe','AgentLauncher.App.dll','AgentLauncher.App.deps.json','AgentLauncher.App.runtimeconfig.json','AgentLauncher.Worker.exe','AgentLauncher.Worker.dll','AgentLauncher.Worker.deps.json','AgentLauncher.Worker.runtimeconfig.json','AgentLauncher.Core.dll','AgentLauncher.Windows.dll','LICENSE','NOTICE','Launch.ps1','Start-AgentLauncher.cmd')
+    $required = @('AgentLauncher.App.exe','AgentLauncher.App.dll','AgentLauncher.App.deps.json','AgentLauncher.App.runtimeconfig.json','AgentLauncher.Worker.exe','AgentLauncher.Worker.dll','AgentLauncher.Worker.deps.json','AgentLauncher.Worker.runtimeconfig.json','AgentLauncher.Core.dll','AgentLauncher.Windows.dll','omp-memory-guard.mjs','LICENSE','NOTICE','Launch.ps1','Start-AgentLauncher.cmd')
     $seen = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $files = @($manifest.Files)
     if ($files.Count -lt $required.Count -or $files.Count -gt 128) { throw '发布文件清单不完整，请重新解压。' }

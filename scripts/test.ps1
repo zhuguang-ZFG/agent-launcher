@@ -50,6 +50,8 @@ try {
   }
   & node --test (Join-Path $root 'tests/prototype.test.cjs')
   if($LASTEXITCODE -ne 0){throw 'Prototype model tests failed'}
+  & node --test (Join-Path $root 'tests/omp-memory-guard.test.mjs')
+  if($LASTEXITCODE -ne 0){throw 'Omp memory guard protocol checks failed'}
   if(-not $SkipBrowser){& node (Join-Path $root 'scripts/test-browser.mjs');if($LASTEXITCODE -ne 0){throw 'Browser tests failed'}}
 } finally {
   $env:PI_CODING_AGENT_DIR=$previousPiAgentDir
