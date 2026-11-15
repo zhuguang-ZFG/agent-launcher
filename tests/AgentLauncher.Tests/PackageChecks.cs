@@ -11,7 +11,7 @@ internal static class PackageChecks
             while (repository is not null && !File.Exists(Path.Combine(repository.FullName, "scripts", "launch-preview.ps1"))) repository = repository.Parent;
             if (repository is null) throw new Exception("Cannot locate package launcher source");
             var root = Path.Combine(temp, "package-check-中文"); Directory.CreateDirectory(root);
-            var names = new[] { "AgentLauncher.App.exe", "AgentLauncher.App.dll", "AgentLauncher.App.deps.json", "AgentLauncher.App.runtimeconfig.json", "AgentLauncher.Worker.exe", "AgentLauncher.Worker.dll", "AgentLauncher.Worker.deps.json", "AgentLauncher.Worker.runtimeconfig.json", "AgentLauncher.Core.dll", "AgentLauncher.Windows.dll", "LICENSE", "NOTICE", "Launch.ps1", "Start-AgentLauncher.cmd" };
+            var names = new[] { "AgentLauncher.App.exe", "AgentLauncher.App.dll", "AgentLauncher.App.deps.json", "AgentLauncher.App.runtimeconfig.json", "AgentLauncher.Worker.exe", "AgentLauncher.Worker.dll", "AgentLauncher.Worker.deps.json", "AgentLauncher.Worker.runtimeconfig.json", "AgentLauncher.Core.dll", "AgentLauncher.Windows.dll", "omp-memory-guard.mjs", "LICENSE", "NOTICE", "Launch.ps1", "Start-AgentLauncher.cmd" };
             foreach (var name in names) File.WriteAllText(Path.Combine(root, name), "package fixture only; CheckOnly must never execute this file");
             File.Copy(Path.Combine(repository.FullName, "scripts", "launch-preview.ps1"), Path.Combine(root, "Launch.ps1"), overwrite: true);
             string Manifest(bool duplicate = false, bool traversal = false) => JsonSerializer.Serialize(new
@@ -43,6 +43,8 @@ internal static class PackageChecks
             if (Check() == 0) throw new Exception("Mixed Worker was accepted"); File.WriteAllBytes(worker, original);
             var companion = Path.Combine(root, "AgentLauncher.Worker.runtimeconfig.json"); File.Delete(companion);
             if (Check() == 0) throw new Exception("Missing companion was accepted"); File.WriteAllText(companion, "package fixture only; CheckOnly must never execute this file");
+            var guard = Path.Combine(root, "omp-memory-guard.mjs"); var guardBytes = File.ReadAllBytes(guard);File.Delete(guard);
+            if (Check() == 0) throw new Exception("Missing Omp guard was accepted");File.WriteAllBytes(guard, guardBytes);
             File.WriteAllText(manifestPath, Manifest(duplicate: true)); if (Check() == 0) throw new Exception("Duplicate manifest entry was accepted");
             File.WriteAllText(manifestPath, Manifest(traversal: true)); if (Check() == 0) throw new Exception("Manifest traversal was accepted");
             File.WriteAllText(manifestPath, manifest);

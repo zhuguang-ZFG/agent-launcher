@@ -274,21 +274,28 @@ internal static class ResourcePolicyChecks
                 throw new Exception("invalid sample not hard-denied");
         });
 
-        Test("ACC-R02 hard floor cannot be waived", () =>
+        Test("ACC-R02 hard floors stay advisory in practical and deny in conservative", () =>
         {
             var d = ResourcePolicy.Evaluate(Ok(avail: 3 * ResourcePolicy.GiB / 2), policy, [], [Agent(0)]);
-            if (d.Kind != AdmissionKind.Deny || !d.Reason.Contains("内存")) throw new Exception(d.Reason);
+            if (d.Kind != AdmissionKind.Allow || !d.Advisory || !d.Reason.Contains("实用模式不拦截")) throw new Exception("physical floor: " + d.Kind + " " + d.Reason);
             var cpu = ResourcePolicy.Evaluate(Ok(cpu: 80), policy, [], [Agent(0)]);
-            if (cpu.Kind != AdmissionKind.Deny) throw new Exception("CPU 80 was not hard-denied");
+            if (cpu.Kind != AdmissionKind.Allow || !cpu.Advisory || !cpu.Reason.Contains("实用模式不拦截")) throw new Exception("CPU 80: " + cpu.Kind + " " + cpu.Reason);
             var commit = ResourcePolicy.Evaluate(Ok(commitAvail: ResourcePolicy.GiB / 2), policy, [], [Agent(0)]);
-            if (commit.Kind != AdmissionKind.Deny) throw new Exception("commit floor was waived");
+            if (commit.Kind != AdmissionKind.Allow || !commit.Advisory || !commit.Reason.Contains("实用模式不拦截")) throw new Exception("commit floor: " + commit.Kind + " " + commit.Reason);
+            var cons = policy with { Mode = "conservative" };
+            var consPhysical = ResourcePolicy.Evaluate(Ok(avail: 3 * ResourcePolicy.GiB / 2), cons, [], [Agent(0)]);
+            if (consPhysical.Kind != AdmissionKind.Deny || consPhysical.Advisory) throw new Exception("conservative physical floor: " + consPhysical.Reason);
+            var consCpu = ResourcePolicy.Evaluate(Ok(cpu: 80), cons, [], [Agent(0)]);
+            if (consCpu.Kind != AdmissionKind.Deny || consCpu.Advisory) throw new Exception("conservative CPU: " + consCpu.Reason);
+            var consCommit = ResourcePolicy.Evaluate(Ok(commitAvail: ResourcePolicy.GiB / 2), cons, [], [Agent(0)]);
+            if (consCommit.Kind != AdmissionKind.Deny || consCommit.Advisory) throw new Exception("conservative commit floor: " + consCommit.Reason);
         });
 
-        Test("ACC-R01 practical soft overage requires waiver when hard checks pass", () =>
+        Test("ACC-R01 practical soft overage is admitted with an advisory", () =>
         {
             var many = Enumerable.Range(0, 8).Select(i => Agent(i)).ToArray();
             var d = ResourcePolicy.Evaluate(Ok(avail: 12 * ResourcePolicy.GiB, commitAvail: 24 * ResourcePolicy.GiB), policy, [], many);
-            if (d.Kind != AdmissionKind.RequireWaiver) throw new Exception("expected waiver, got " + d.Kind + " " + d.Reason);
+            if (d.Kind != AdmissionKind.Allow || !d.Advisory || !d.Reason.Contains("软预算") || !d.Reason.Contains("实用模式不拦截")) throw new Exception("expected practical advisory, got " + d.Kind + " " + d.Reason);
             if (d.CapSumRequested != 8 * policy.JobMemoryLimit) throw new Exception("soft cap used planning bytes");
         });
 
@@ -297,7 +304,26 @@ internal static class ResourcePolicyChecks
             var cons = policy with { Mode = "conservative" };
             var many = Enumerable.Range(0, 8).Select(i => Agent(i)).ToArray();
             var d = ResourcePolicy.Evaluate(Ok(avail: 12 * ResourcePolicy.GiB, commitAvail: 24 * ResourcePolicy.GiB), cons, [], many);
-            if (d.Kind != AdmissionKind.Deny) throw new Exception("conservative allowed overage");
+            if (d.Kind != AdmissionKind.Deny || d.Advisory) throw new Exception("conservative allowed overage: " + d.Reason);
+        });
+
+        Test("ACC-R02 cap-sum overflow denies in both modes", () =>
+        {
+            var overflowItems = new[] { new BudgetItem(Guid.NewGuid(), "agent", policy.PlanningBytes, ulong.MaxValue / 2 + 1), new BudgetItem(Guid.NewGuid(), "agent", policy.PlanningBytes, ulong.MaxValue / 2 + 1) };
+            var practicalOverflow = ResourcePolicy.Evaluate(Ok(), policy, [], overflowItems);
+            if (practicalOverflow.Kind != AdmissionKind.Deny || practicalOverflow.Advisory || !practicalOverflow.Reason.Contains("加总溢出")) throw new Exception("practical overflow: " + practicalOverflow.Reason);
+            var conservativeOverflow = ResourcePolicy.Evaluate(Ok(), policy with { Mode = "conservative" }, [], overflowItems);
+            if (conservativeOverflow.Kind != AdmissionKind.Deny || conservativeOverflow.Advisory) throw new Exception("conservative overflow: " + conservativeOverflow.Reason);
+        });
+
+        Test("ACC-R01 waiver protocol members are removed from the contract", () =>
+        {
+            if (typeof(Request).GetProperty("WaiverId") is not null || typeof(Request).GetProperty("Confirmed") is not null)
+                throw new Exception("Request still carries a waiver member");
+            if (typeof(Response).GetProperty("WaiverId") is not null || typeof(Response).GetProperty("WaiverExpiresAt") is not null)
+                throw new Exception("Response still carries a waiver member");
+            if (typeof(AdmissionKind).GetEnumNames().Contains("RequireWaiver"))
+                throw new Exception("AdmissionKind still exposes RequireWaiver");
         });
 
         Test("ACC-R04 legacy reserved item uses 768 MiB planning and Plan.Budget cap", () =>
@@ -326,14 +352,14 @@ internal static class ResourcePolicyChecks
             if (ResourcePolicy.DefaultJobMemoryLimit != 2 * ResourcePolicy.GiB) throw new Exception("job default changed");
         });
 
-        Test("ACC-R01 custom soft overage requires waiver and two agents stay allow", () =>
+        Test("ACC-R01 custom soft overage stays advisory while two agents stay allow", () =>
         {
             var custom = policy with { Mode = "custom" };
             var many = Enumerable.Range(0, 8).Select(i => Agent(i)).ToArray();
             var over = ResourcePolicy.Evaluate(Ok(avail: 12 * ResourcePolicy.GiB, commitAvail: 24 * ResourcePolicy.GiB), custom, [], many);
-            if (over.Kind != AdmissionKind.RequireWaiver) throw new Exception("custom should require waiver, got " + over.Kind);
+            if (over.Kind != AdmissionKind.Allow || !over.Advisory) throw new Exception("custom soft overage should be advisory, got " + over.Kind + " " + over.Reason);
             var two = ResourcePolicy.Evaluate(Ok(avail: 12 * ResourcePolicy.GiB, commitAvail: 24 * ResourcePolicy.GiB), policy, [], [Agent(0), Agent(1)]);
-            if (two.Kind != AdmissionKind.Allow) throw new Exception("two agents under soft cap were not allowed: " + two.Kind + " " + two.Reason);
+            if (two.Kind != AdmissionKind.Allow || two.Advisory) throw new Exception("two agents under soft cap were not cleanly allowed: " + two.Kind + " " + two.Reason);
             if (two.CapSumRequested != 2 * policy.JobMemoryLimit) throw new Exception("two-agent cap sum");
         });
 
@@ -379,7 +405,7 @@ internal static class ResourcePolicyChecks
             var perItem = independent with { JobMemoryLimit = jobLimit };
             var summed = ResourcePolicy.Evaluate(Ok(), perItem, [], items.Select(i => i with { PoolId = null }).ToArray());
             var pooled = ResourcePolicy.Evaluate(Ok(), shared, [], items);
-            if (summed.Kind != AdmissionKind.RequireWaiver) throw new Exception("independent caps did not exceed the soft budget: " + summed.Kind);
+            if (summed.Kind != AdmissionKind.Allow || !summed.Advisory || !summed.Reason.Contains("实用模式不拦截")) throw new Exception("independent caps did not produce a practical advisory: " + summed.Kind + " " + summed.Reason);
             if (pooled.Kind != AdmissionKind.Allow) throw new Exception("shared pool summed per-item caps: " + pooled.Kind + " " + pooled.Reason);
             if (pooled.CapSumRequested != jobLimit) throw new Exception("shared pool charged more than one pool limit");
         });
@@ -560,63 +586,6 @@ internal static class ResourcePolicyChecks
         });
     }
 
-    public static void RunWaivers(Action<string, Action> Test)
-    {
-        var total = 16 * ResourcePolicy.GiB;
-        var policy = new ResourcePolicySnapshot("practical", ResourcePolicy.DefaultJobMemoryLimit, ResourcePolicy.DefaultPlanningBytes,
-            ResourcePolicy.DefaultPhysicalFloor(total), ResourcePolicy.DefaultCommitFloor(32 * ResourcePolicy.GiB),
-            ResourcePolicy.DefaultCpuRate, ResourcePolicy.GitJobMemoryLimit, ResourcePolicy.DefaultGitPlanningBytes);
-        var now = new DateTimeOffset(2026, 11, 10, 13, 34, 0, TimeSpan.Zero);
-        var clock = now;
-        var table = new WaiverTable(() => clock);
-        var slots = new Guid[] { Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"), Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1") };
-        string Hash() => ResourcePolicy.PolicyHash(policy);
-        var digest = "plan-digest-one";
-        var require = new AdmissionDecision(AdmissionKind.RequireWaiver, "soft", 8 * policy.PlanningBytes, 0, 8 * policy.JobMemoryLimit, 0, ResourcePolicy.SoftCap(total), policy.PhysicalFloor, policy.CommitFloor, true);
-        var deny = require with { Kind = AdmissionKind.Deny, Reason = "硬保护" };
-        var allow = require with { Kind = AdmissionKind.Allow, Reason = "资源充足" };
-
-        Test("ACC-R01 waiver issues only for RequireWaiver and is single-use", () =>
-        {
-            var denied = table.Issue(deny, 1, Hash(), digest, slots, now);
-            if (denied.WaiverId != null) throw new Exception("hard deny issued a waiver");
-            var allowed = table.Issue(allow, 1, Hash(), digest, slots, now);
-            if (allowed.WaiverId != null) throw new Exception("allow issued a waiver");
-            var issued = table.Issue(require, 1, Hash(), digest, slots, now);
-            if (issued.WaiverId is not { } id || issued.WaiverExpiresAt != now.AddSeconds(ResourcePolicy.WaiverTtlSeconds)) throw new Exception("issue did not return a 45s waiver");
-            if (!table.Consume(id, 1, Hash(), digest, slots)) throw new Exception("first consume failed");
-            if (table.Consume(id, 1, Hash(), digest, slots)) throw new Exception("waiver was reused");
-        });
-
-        Test("ACC-R01 expired or rebound waiver cannot be consumed", () =>
-        {
-            clock = now;
-            var issued = table.Issue(require, 4, Hash(), digest, slots, now);
-            var id = issued.WaiverId ?? throw new Exception("missing waiver");
-            if (table.Consume(id, 5, Hash(), digest, slots)) throw new Exception("revision change consumed");
-            var issued2 = table.Issue(require, 4, Hash(), digest, slots, now);
-            var id2 = issued2.WaiverId ?? throw new Exception("missing waiver");
-            if (table.Consume(id2, 4, "deadbeef", digest, slots)) throw new Exception("policy hash change consumed");
-            var issued3 = table.Issue(require, 4, Hash(), digest, slots, now);
-            var id3 = issued3.WaiverId ?? throw new Exception("missing waiver");
-            if (table.Consume(id3, 4, Hash(), "other-plan", slots)) throw new Exception("plan digest change consumed");
-            var issued4 = table.Issue(require, 4, Hash(), digest, slots, now);
-            var id4 = issued4.WaiverId ?? throw new Exception("missing waiver");
-            clock = now.AddSeconds(46);
-            if (table.Consume(id4, 4, Hash(), digest, slots)) throw new Exception("expired waiver consumed");
-            if (ResourcePolicy.WaiverTtlSeconds != 45) throw new Exception("product TTL changed");
-        });
-
-        Test("ACC-R02 Issue does not accept a client confirmed flag", () =>
-        {
-            if (typeof(Request).GetProperty("Confirmed") != null || typeof(WaiverTable).GetMethod("Issue")!.GetParameters().Any(p => p.Name == "confirmed"))
-                throw new Exception("client confirmed flag exists");
-            var hash = Hash();
-            if (ResourcePolicy.PolicyHash(policy) != hash) throw new Exception("PolicyHash is not stable");
-            if (ResourcePolicy.PolicyHash(policy with { CpuRate = 4000 }) == hash) throw new Exception("PolicyHash ignored cpu");
-        });
-    }
-
     public static void RunAuthorityFixes(Action<string, Action> Test)
     {
         var total = 16 * ResourcePolicy.GiB;
@@ -665,9 +634,9 @@ internal static class ResourcePolicyChecks
             var settings = new ResourceSettings();
             ResourcePolicy.ValidateSettings(settings, large, commit);
             var snapshot = ResourcePolicy.SnapshotFor(settings, large, commit);
-            if (snapshot.PhysicalFloor != ResourcePolicy.DefaultPhysicalFloor(large) || snapshot.PhysicalFloor != 16 * ResourcePolicy.GiB)
+            if (snapshot.PhysicalFloor != ResourcePolicy.DefaultPhysicalFloor(large) || snapshot.PhysicalFloor != large / 12)
                 throw new Exception("default physical floor was changed: " + snapshot.PhysicalFloor);
-            if (snapshot.CommitFloor != ResourcePolicy.DefaultCommitFloor(commit) || snapshot.CommitFloor != 20 * ResourcePolicy.GiB)
+            if (snapshot.CommitFloor != ResourcePolicy.DefaultCommitFloor(commit) || snapshot.CommitFloor != commit / 24)
                 throw new Exception("default commit floor was changed: " + snapshot.CommitFloor);
             var decision = ResourcePolicy.Evaluate(new MemorySnapshot(large, 64 * ResourcePolicy.GiB, commit, 200 * ResourcePolicy.GiB, 10, DateTimeOffset.UtcNow), snapshot, [], [new BudgetItem(Guid.NewGuid(), "agent", ResourcePolicy.DefaultPlanningBytes, ResourcePolicy.DefaultJobMemoryLimit)]);
             if (decision.Kind == AdmissionKind.Deny && decision.Reason.Contains("临界余量"))
@@ -726,24 +695,6 @@ internal static class ResourcePolicyChecks
                 throw new Exception("Git fixed budget changed with custom policy");
         });
 
-        Test("ACC-R01 waiver binds ordered stable slots and full configuration identity", () =>
-        {
-            var clock = DateTimeOffset.UtcNow;
-            var table = new WaiverTable(() => clock);
-            var require = new AdmissionDecision(AdmissionKind.RequireWaiver, "soft", 0, 0, 0, 0, ResourcePolicy.SoftCap(total), policy.PhysicalFloor, policy.CommitFloor, true);
-            var slots = new[] { Guid.NewGuid(), Guid.NewGuid() };
-            var grant = table.Issue(require, 3, "policy", "plan", slots, clock, "configuration-a");
-            if (grant.WaiverId is not { } first || table.Consume(first, 3, "policy", "plan", slots.Reverse().ToArray(), "configuration-a"))
-                throw new Exception("waiver accepted reordered source slots");
-            grant = table.Issue(require, 3, "policy", "plan", slots, clock, "configuration-a");
-            if (grant.WaiverId is not { } second || table.Consume(second, 3, "policy", "plan", slots, "configuration-b"))
-                throw new Exception("waiver survived a same-revision configuration change");
-            grant = table.Issue(require, 3, "policy", "plan", slots, clock, "configuration-a");
-            table.InvalidateMismatched(3, "policy", "configuration-b");
-            if (table.Count != 0 || grant.WaiverId is not { } third || table.Consume(third, 3, "policy", "plan", slots, "configuration-a"))
-                throw new Exception("changed authority did not invalidate grants");
-        });
-
         Test("ACC-R05 begin hard-only check ignores conservative soft overage from later batches", () =>
         {
             var conservative = policy with { Mode = "conservative" };
@@ -790,24 +741,5 @@ internal static class ResourcePolicyChecks
             if (invalid.HighStreak == 3 || invalid.Pressure) throw new Exception("invalid sample counted toward pressure");
         });
 
-        Test("waiver table prunes expired grants and enforces a capacity bound", () =>
-        {
-            var clock = new DateTimeOffset(2026, 11, 10, 14, 0, 0, TimeSpan.Zero);
-            var table = new WaiverTable(() => clock);
-            var require = new AdmissionDecision(AdmissionKind.RequireWaiver, "soft", 0, 0, 0, 0, ResourcePolicy.SoftCap(total), policy.PhysicalFloor, policy.CommitFloor, true);
-            for (var i = 0; i < WaiverTable.MaxActive; i++)
-            {
-                var issued = table.Issue(require, 1, "hash", "digest-" + i, [Guid.NewGuid()], clock);
-                if (issued.WaiverId is null) throw new Exception("issue failed before capacity");
-            }
-            var overflow = table.Issue(require, 1, "hash", "overflow", [Guid.NewGuid()], clock);
-            if (overflow.WaiverId is not null) throw new Exception("capacity was not enforced");
-            if (table.Count != WaiverTable.MaxActive) throw new Exception("count drifted");
-            clock = clock.AddSeconds(46);
-            table.PruneExpired();
-            if (table.Count != 0) throw new Exception("expired grants were not pruned: " + table.Count);
-            var again = table.Issue(require, 1, "hash", "after-prune", [Guid.NewGuid()], clock);
-            if (again.WaiverId is null) throw new Exception("issue failed after prune");
-        });
     }
 }

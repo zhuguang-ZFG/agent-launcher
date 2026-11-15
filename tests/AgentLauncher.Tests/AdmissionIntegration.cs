@@ -24,6 +24,7 @@ internal static class AdmissionIntegration
         LaunchItem Item(string name,int position=1) => new(Guid.NewGuid(), Guid.NewGuid(), position, name, cwd, PhysicalDirectory.Workspace(cwd), true,
             new(Environment.ProcessPath!, ["--hold", "1"], "exe"), ResourcePolicy.DefaultJobMemoryLimit, "agent",
             PlanningBytes: ResourcePolicy.DefaultPlanningBytes, ResourceMode: "practical",SourceSlotId:authoritySlots[position-1].Id,AgentId:authoritySlots[position-1].AgentId);
+        LaunchItem GitItem(string name,int position=1) => Item(name,position) with { Kind="git", Budget=ResourcePolicy.GitJobMemoryLimit, PlanningBytes=null };
 
         var total = 16 * ResourcePolicy.GiB;
         var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), total, 32 * ResourcePolicy.GiB);
@@ -47,7 +48,7 @@ internal static class AdmissionIntegration
         var initial = await Ipc.EnsureMonitorAsync();
         Assert(initial.Ok, initial.Message);
 
-        await Test("ACC-R01 one agent allows reserve without waiver", async () =>
+        await Test("ACC-R01 one agent allows reserve", async () =>
         {
             var item = Item("one");
             var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [item], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([item]), DraftRevision: 3));
@@ -56,105 +57,77 @@ internal static class AdmissionIntegration
             Assert(revoke.Ok, revoke.Message);
         });
 
-        await Test("ACC-R01 three agents require a single-use bound waiver to reserve", async () =>
+        await Test("ACC-R01 practical soft overage reserves with advisory instead of blocking", async () =>
         {
             var items = Enumerable.Range(0, 3).Select(i => Item("soft-" + i,i+1)).ToArray();
             var hash = ResourcePolicy.PolicyHash(policy);
             var digest = ResourcePolicy.PlanDigest(items);
-            var slots = items.Select(i => i.SourceSlotId!.Value).ToArray();
-            var blocked = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(!blocked.Ok && blocked.Message.Contains("确认授权"), "soft overage reserved without waiver: " + blocked.Message);
-            var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(issued.Ok && issued.WaiverId is { } && issued.WaiverExpiresAt is { }, issued.Message);
-            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, WaiverId: issued.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(reserved.Ok, reserved.Message);
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
+            Assert(reserved.Ok, "practical soft overage was blocked: " + reserved.Message);
             foreach (var entry in reserved.Entries ?? [])
             {
                 await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: entry.Plan.Id));
             }
-            var items2 = Enumerable.Range(0, 3).Select(i => Item("reuse-" + i,i+1)).ToArray();
-            var replay = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items2, WaiverId: issued.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest(items2), DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(!replay.Ok, "reused waiver accepted");
         });
 
-        await Test("ACC-R01 rebound revision or plan digest cannot consume a waiver", async () =>
+        await Test("ACC-R02 conservative physical floor denies reserve", async () =>
         {
-            var items = Enumerable.Range(0, 3).Select(i => Item("bind-" + i,i+1)).ToArray();
-            var hash = ResourcePolicy.PolicyHash(policy);
-            var digest = ResourcePolicy.PlanDigest(items);
-            var slots = items.Select(i => i.SourceSlotId!.Value).ToArray();
-            var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(issued.Ok && issued.WaiverId is { }, issued.Message);
-            var rebound = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, WaiverId: issued.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 12, EnabledSlotIds: slots));
-            Assert(!rebound.Ok, "revision mismatch consumed waiver");
-            var issued2 = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            var changedPlan = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, WaiverId: issued2.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: "other", DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(!changedPlan.Ok, "plan digest mismatch consumed waiver");
-        });
-
-        await Test("ACC-R02 hard deny does not issue a waiver", async () =>
-        {
-            var tightSettings = new ResourceSettings { Mode = "custom", PhysicalFloorOverride = 8 * ResourcePolicy.GiB };
+            var tightSettings = new ResourceSettings { Mode = "conservative", PhysicalFloorOverride = 8 * ResourcePolicy.GiB };
             SaveAuthority(tightSettings,enabledCount:8);
             var tight = ResourcePolicy.SnapshotFor(tightSettings, total, 32 * ResourcePolicy.GiB);
             var items = Enumerable.Range(0, 8).Select(i => Item("hard-" + i,i+1)).ToArray();
-            var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: tight, PolicyHash: ResourcePolicy.PolicyHash(tight), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3, EnabledSlotIds: items.Select(i => i.SourceSlotId!.Value).ToArray()));
-            Assert(!issued.Ok && issued.WaiverId is null, "hard deny issued a waiver: " + issued.Message);
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: tight, PolicyHash: ResourcePolicy.PolicyHash(tight), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3));
+            Assert(!reserved.Ok && reserved.Message.Contains("可用内存"), "conservative floor was not enforced: " + reserved.Message);
             SaveAuthority();
         });
 
-        await Test("ACC-R06 conservative soft overage is rejected without a waiver path", async () =>
+        await Test("ACC-R06 conservative soft overage is rejected", async () =>
         {
             SaveAuthority(new ResourceSettings { Mode = "conservative" });
             var cons = ResourcePolicy.SnapshotFor(new ResourceSettings { Mode = "conservative" }, total, 32 * ResourcePolicy.GiB);
             var items = Enumerable.Range(0, 3).Select(i => Item("cons-" + i,i+1)).ToArray();
-            var hash = ResourcePolicy.PolicyHash(cons);
-            var digest = ResourcePolicy.PlanDigest(items);
-            var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: cons, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: items.Select(i => i.SourceSlotId!.Value).ToArray()));
-            Assert(!issued.Ok && issued.WaiverId is null, "conservative issued a waiver");
-            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: cons, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
-            Assert(!reserved.Ok && !reserved.Message.Contains("确认授权"), "conservative asked for a waiver: " + reserved.Message);
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: cons, PolicyHash: ResourcePolicy.PolicyHash(cons), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3));
+            Assert(!reserved.Ok && reserved.Message.Contains("总预算") && !reserved.Message.Contains("实用模式不拦截"), "conservative soft overage was allowed: " + reserved.Message);
             SaveAuthority();
         });
 
-        await Test("reserve accepts 16 items and rejects 17", async () =>
+        await Test("R21 concurrency cap allows 8 agents, rejects the 9th, and does not count git", async () =>
         {
             SaveAuthority(enabledCount:16);
-            var many = Enumerable.Range(0, 16).Select(i => Item("n16-" + i,i+1)).ToArray();
+            var eight = Enumerable.Range(0, 8).Select(i => Item("cap-" + i,i+1)).ToArray();
             var hash = ResourcePolicy.PolicyHash(policy);
-            var digest = ResourcePolicy.PlanDigest(many);
-            var slots = many.Select(i => i.SourceSlotId!.Value).ToArray();
-            var sixteen = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), many, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(!sixteen.Ok && !sixteen.Message.Contains("数量"), "16-item batch rejected as invalid count: " + sixteen.Message);
-            var seventeen = many.Concat([Item("n17")]).ToArray();
-            var overflow = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), seventeen, Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest(seventeen), DraftRevision: 3));
-            Assert(!overflow.Ok && overflow.Message.Contains("数量"), "17 items accepted: " + overflow.Message);
+            var digest = ResourcePolicy.PlanDigest(eight);
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), eight, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
+            Assert(reserved.Ok, "8-agent batch was rejected: " + reserved.Message);
+            var replay = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), eight, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
+            Assert(replay.Ok && replay.Message == "请求已记录", "exact replay was not idempotent: " + replay.Message);
+            var ninth = Item("cap-9",9);
+            var overflow = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [ninth], Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest([ninth]), DraftRevision: 3));
+            Assert(!overflow.Ok && overflow.Message.Contains($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个"), "9th agent was accepted: " + overflow.Message);
+            var git = GitItem("cap-git",10);
+            var gitReserve = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [git], Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest([git]), DraftRevision: 3));
+            Assert(gitReserve.Ok, "git preparation was blocked by the agent concurrency cap: " + gitReserve.Message);
+            foreach (var item in eight.Concat([git]))
+            {
+                await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: item.Id));
+            }
+            var seventeen = Enumerable.Range(0, 17).Select(i => Item("n17-" + i,i+1)).ToArray();
+            var overflowCount = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), seventeen, Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest(seventeen), DraftRevision: 3));
+            Assert(!overflowCount.Ok && overflowCount.Message.Contains("数量"), "17 items accepted: " + overflowCount.Message);
             SaveAuthority();
         });
-
 
         await Test("ACC-R01 monitor rejects self-reported labels that swap command, directory, Shared, or Workspace", async () =>
         {
             SaveAuthority();
-            var items = Enumerable.Range(0, 3).Select(i => Item("auth-" + i,i+1)).ToArray();
-            var hash = ResourcePolicy.PolicyHash(policy);
-            var digest = ResourcePolicy.PlanDigest(items);
-            var slots = items.Select(i => i.SourceSlotId!.Value).ToArray();
-            var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(issued.Ok && issued.WaiverId is { }, issued.Message);
             async Task AssertSwapRejected(string label, Func<LaunchItem, LaunchItem> mutate)
             {
                 var planned = Enumerable.Range(0, 3).Select(i => Item("swap-" + label + "-" + i,i+1)).ToArray();
-                var plannedHash = ResourcePolicy.PolicyHash(policy);
-                var plannedDigest = ResourcePolicy.PlanDigest(planned);
-                var plannedSlots = planned.Select(i => i.SourceSlotId!.Value).ToArray();
-                var grant = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), planned, Policy: policy, PolicyHash: plannedHash, PlanDigest: plannedDigest, DraftRevision: 3, EnabledSlotIds: plannedSlots));
-                Assert(grant.Ok && grant.WaiverId is { }, label + " issue failed: " + grant.Message);
+                var hash = ResourcePolicy.PolicyHash(policy);
+                var digest = ResourcePolicy.PlanDigest(planned);
                 var mutated = planned.Select(mutate).ToArray();
-                var stolen = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), mutated, WaiverId: grant.WaiverId, Policy: policy, PolicyHash: plannedHash, PlanDigest: plannedDigest, DraftRevision: 3, EnabledSlotIds: plannedSlots));
-                Assert(!stolen.Ok, "self-reported digest allowed a " + label + " swap: " + stolen.Message);
-                var retry = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), planned, WaiverId: grant.WaiverId, Policy: policy, PolicyHash: plannedHash, PlanDigest: plannedDigest, DraftRevision: 3, EnabledSlotIds: plannedSlots));
-                Assert(!retry.Ok, "token survived a failed " + label + " swap");
+                var stolen = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), mutated, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
+                Assert(!stolen.Ok && stolen.Message.Contains("计划摘要"), "self-reported digest allowed a " + label + " swap: " + stolen.Message);
             }
             await AssertSwapRejected("command", item => item with { Command = item.Command with { Arguments = ["--hold", "2"] } });
             await AssertSwapRejected("shared", item => item with { Shared = false });
@@ -164,21 +137,16 @@ internal static class AdmissionIntegration
             await AssertSwapRejected("directory", item => item with { Cwd = other, Workspace = otherWorkspace });
         });
 
-        await Test("ACC-R01 configuration change invalidates a previously issued waiver", async () =>
+        await Test("ACC-R01 stale draft revision is rejected", async () =>
         {
-            SaveAuthority(revision: 6);
+            SaveAuthority(revision: 7);
             var items = Enumerable.Range(0, 3).Select(i => Item("rev-" + i,i+1)).ToArray();
-            var hash = ResourcePolicy.PolicyHash(policy);
-            var digest = ResourcePolicy.PlanDigest(items);
-            var slots = items.Select(i => i.SourceSlotId!.Value).ToArray();
-            var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 6, EnabledSlotIds: slots));
-            Assert(issued.Ok && issued.WaiverId is { }, issued.Message);
-            SaveAuthority(resource: new ResourceSettings { Mode = "custom", PlanningBytes=ResourcePolicy.GiB }, revision: 7);
-            var reused = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, WaiverId: issued.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 6, EnabledSlotIds: slots));
-            Assert(!reused.Ok, "stale revision/policy token was accepted: " + reused.Message);
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 6));
+            Assert(!reserved.Ok && reserved.Message.Contains("草稿修订号"), "stale revision was accepted: " + reserved.Message);
+            SaveAuthority();
         });
 
-        await Test("ACC-R01 failed reserve with a token cannot reuse it after a directory conflict", async () =>
+        await Test("ACC-R01 failed reserve can retry after the directory conflict is revoked", async () =>
         {
             SaveAuthority();
             var blocker = Item("blocker") with { Shared = false };
@@ -187,27 +155,24 @@ internal static class AdmissionIntegration
             try
             {
                 var items = Enumerable.Range(0, 3).Select(i => Item("conflict-" + i,i+1) with { Shared = false }).ToArray();
-                var hash = ResourcePolicy.PolicyHash(policy);
-                var digest = ResourcePolicy.PlanDigest(items);
-                var slots = items.Select(i => i.SourceSlotId!.Value).ToArray();
-                var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-                Assert(issued.Ok && issued.WaiverId is { }, issued.Message);
-                var conflict = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, WaiverId: issued.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
+                var conflict = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3));
                 Assert(!conflict.Ok && conflict.Message.Contains("占用"), "expected directory conflict, got " + conflict.Message);
                 await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: blocker.Id));
-                var replay = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, WaiverId: issued.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-                Assert(!replay.Ok, "token was reused after a failed conflicting reserve: " + replay.Message);
+                var retry = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3));
+                Assert(retry.Ok, "retry after revoke failed: " + retry.Message);
+                foreach (var item in items) { try { await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: item.Id)); } catch { } }
             }
             finally { await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: blocker.Id)); }
         });
 
         await Test("ACC-R02 client Policy cannot override authoritative floors", async () =>
         {
-            SaveAuthority(enabledCount:8);
-            var tight = policy with { PhysicalFloor = 8 * ResourcePolicy.GiB };
-            var items = Enumerable.Range(0, 8).Select(i => Item("client-floor-" + i,i+1)).ToArray();
-            var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: tight, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3, EnabledSlotIds: items.Select(i => i.SourceSlotId!.Value).ToArray()));
-            Assert(issued.WaiverId is { }, "monitor used the client tight floor instead of authoritative defaults: " + issued.Message);
+            SaveAuthority(new ResourceSettings { Mode = "conservative" });
+            var cons = ResourcePolicy.SnapshotFor(new ResourceSettings { Mode = "conservative" }, total, 32 * ResourcePolicy.GiB);
+            var items = Enumerable.Range(0, 3).Select(i => Item("client-floor-" + i,i+1)).ToArray();
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(cons), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3));
+            Assert(!reserved.Ok && !reserved.Message.Contains("实用模式不拦截"), "monitor used the client practical policy instead of authoritative conservative: " + reserved.Message);
+            SaveAuthority();
         });
 
         await Test("ACC-C02 explicit illegal planning is rejected and does not enter the ledger", async () =>
@@ -220,28 +185,22 @@ internal static class AdmissionIntegration
             Assert(status.Entries is null || status.Entries.All(e => e.Plan.Id != item.Id), "illegal item entered the ledger");
         });
 
-        await Test("ACC-R05 begin of an earlier conservative batch is not soft-denied by a later practical waiver batch", async () =>
+        await Test("ACC-R05 begin of an earlier conservative batch is not soft-denied by a later practical advisory batch", async () =>
         {
             SaveAuthority(new ResourceSettings { Mode = "conservative" }, revision: 8);
             var first = Enumerable.Range(0, 2).Select(i => Item("early-" + i,i+1)).ToArray();
             var consPolicy = ResourcePolicy.SnapshotFor(new ResourceSettings { Mode = "conservative" }, total, 32 * ResourcePolicy.GiB);
-            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), first, Policy: consPolicy, PolicyHash: ResourcePolicy.PolicyHash(consPolicy), PlanDigest: ResourcePolicy.PlanDigest(first), DraftRevision: 8, EnabledSlotIds: first.Select(i => i.SourceSlotId!.Value).ToArray()));
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), first, Policy: consPolicy, PolicyHash: ResourcePolicy.PolicyHash(consPolicy), PlanDigest: ResourcePolicy.PlanDigest(first), DraftRevision: 8));
             Assert(reserved.Ok, reserved.Message);
             LaunchItem[] later = [];
             try
             {
                 SaveAuthority(revision: 9);
                 later = Enumerable.Range(0, 3).Select(i => Item("later-" + i,i+1)).ToArray();
-                var hash = ResourcePolicy.PolicyHash(policy);
-                var digest = ResourcePolicy.PlanDigest(later);
-                var slots = later.Select(i => i.SourceSlotId!.Value).ToArray();
-                var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), later, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 9, EnabledSlotIds: slots));
-                Assert(issued.Ok && issued.WaiverId is { }, issued.Message);
-                var second = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), later, WaiverId: issued.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 9, EnabledSlotIds: slots));
-                Assert(second.Ok, second.Message);
+                var second = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), later, Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest(later), DraftRevision: 9));
+                Assert(second.Ok, "practical advisory batch was blocked: " + second.Message);
                 var began = await Ipc.SendAsync(new("begin", Guid.NewGuid(), Attempt: first[0].Id));
                 Assert(began.Ok, "conservative begin soft-denied after later practical reserve: " + began.Message);
-                var status = await Ipc.SendAsync(new("status", Guid.NewGuid()));
             }
             finally
             {
@@ -259,15 +218,12 @@ internal static class AdmissionIntegration
             await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: item.Id));
         });
 
-        await Test("ACC-R01 monitor restart drops in-memory waivers", async () =>
+        await Test("monitor restart preserves the persisted ledger", async () =>
         {
             SaveAuthority();
             var items = Enumerable.Range(0, 3).Select(i => Item("restart-" + i,i+1)).ToArray();
-            var hash = ResourcePolicy.PolicyHash(policy);
-            var digest = ResourcePolicy.PlanDigest(items);
-            var slots = items.Select(i => i.SourceSlotId!.Value).ToArray();
-            var issued = await Ipc.SendAsync(new("waiver", Guid.NewGuid(), items, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(issued.Ok && issued.WaiverId is { }, issued.Message);
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3));
+            Assert(reserved.Ok, reserved.Message);
             var pidPath = Store.FilePath("monitor-pid.json");
             var pid = Store.Read<int>(pidPath);
             using (var process = System.Diagnostics.Process.GetProcessById(pid))
@@ -277,40 +233,10 @@ internal static class AdmissionIntegration
             }
             var restarted = await Ipc.EnsureMonitorAsync();
             Assert(restarted.Ok, restarted.Message);
-            var reused = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, WaiverId: issued.WaiverId, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3, EnabledSlotIds: slots));
-            Assert(!reused.Ok, "waiver survived monitor restart: " + reused.Message);
-        });
-
-        await Test("ACC-R01 forged stable slots and same-revision edits invalidate authorization",async()=>
-        {
-            SaveAuthority();var items=Enumerable.Range(0,3).Select(i=>Item("stable-"+i,i+1)).ToArray();var slots=items.Select(i=>i.SourceSlotId!.Value).ToArray();
-            var forged=items.ToArray();forged[0]=forged[0] with{SourceSlotId=Guid.NewGuid()};
-            var denied=await Ipc.SendAsync(new("waiver",Guid.NewGuid(),forged,EnabledSlotIds:slots));
-            Assert(!denied.Ok&&denied.WaiverId==null,"forged stable slot issued a grant");
-            denied=await Ipc.SendAsync(new("waiver",Guid.NewGuid(),items,EnabledSlotIds:slots.Reverse().ToArray()));
-            Assert(!denied.Ok&&denied.WaiverId==null,"reordered enabled set issued a grant");
-            var issued=await Ipc.SendAsync(new("waiver",Guid.NewGuid(),items,EnabledSlotIds:slots));Assert(issued.WaiverId!=null,issued.Message);
-            var edited=Authority();edited.Draft.Slots[0].Note="changed without revision";Store.Save(Store.FilePath("configuration.json"),edited);
-            var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items,WaiverId:issued.WaiverId,EnabledSlotIds:slots));
-            Assert(!reserved.Ok,"same-revision authority edit retained the old grant");SaveAuthority();
-        });
-        await Test("ACC-R01 Git preparation soft overage requires explicit one-time consent",async()=>
-        {
-            SaveAuthority();var items=Enumerable.Range(0,3).Select(i=>Item("git-active-"+i,i+1)).ToArray();var slots=items.Select(i=>i.SourceSlotId!.Value).ToArray();
-            var issued=await Ipc.SendAsync(new("waiver",Guid.NewGuid(),items,EnabledSlotIds:slots));Assert(issued.WaiverId!=null,issued.Message);
-            var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items,WaiverId:issued.WaiverId,EnabledSlotIds:slots));Assert(reserved.Ok,reserved.Message);
-            try
-            {
-                var rejected=false;try{await ControlledCommand.RunAsync(new(Environment.ProcessPath!,["--hold","1"],"exe"),cwd);}catch(IOException){rejected=true;}
-                Assert(rejected,"Git soft overage ran without consent");var confirmations=0;
-                var command=await ControlledCommand.RunAsync(new(Environment.ProcessPath!,["--hold","1"],"exe"),cwd,authorize:async plans=>
-                {
-                    confirmations++;var grant=await Ipc.SendAsync(new("waiver",Guid.NewGuid(),plans,EnabledSlotIds:slots));
-                    Assert(grant.Ok&&grant.WaiverId!=null,grant.Message);return grant.WaiverId;
-                });
-                Assert(command.Code==0&&confirmations==1,"confirmed Git preparation did not execute exactly once");
-            }
-            finally{foreach(var item in items)await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));}
+            var status = await Ipc.SendAsync(new("status", Guid.NewGuid()));
+            var survived = status.Entries ?? [];
+            Assert(items.All(i => survived.Any(e => e.Plan.Id == i.Id)), "ledger entries were lost across monitor restart");
+            foreach (var item in items) { try { await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: item.Id)); } catch { } }
         });
 
         Store.Save(Path.Combine(Store.Root, "admission-integration-results.json"), evidence);

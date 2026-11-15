@@ -50,7 +50,7 @@ internal static class ObserverRunner
                 result.ProtocolNotes.Add("RPC flags: --mode rpc --no-session --no-title --no-extensions --no-skills --no-rules --no-context-files --no-lsp --no-pty --no-ui.");
                 result.ProtocolNotes.Add("Only bash RPC commands are sent by the runner. An auth:none model sentinel targets loopback port 1; no prompt, login, inference, extension, or UI command is sent. OMP startup may refresh public model catalogs.");
                 result.ProtocolNotes.Add("The provided RPC documentation does not enumerate BashResult data fields; each workload iteration requires a marker file with a fresh nonce, in addition to reply success.");
-                result.ProtocolNotes.Add("A single reserve request contains exactly two independent items. No busy retry, waiver, or automatic approval is used.");
+                result.ProtocolNotes.Add("A single reserve request contains exactly two independent items. No busy retry or automatic approval is used.");
                 if (!string.Equals(genericPreflight.Decision, "Allow", StringComparison.Ordinal))
                     throw new AdmissionDeniedException(genericPreflight.Reason);
                 if (options.AdmissionOnly)

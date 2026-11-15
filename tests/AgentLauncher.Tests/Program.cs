@@ -14,12 +14,62 @@ if(args.Length>=2&&args[0]=="--mode"&&args[1]=="rpc"&&Environment.GetEnvironment
     return 8;
 }
 if(args is ["--repair-checks"]) return RepairChecks.Run();
+if(args is ["--live-startup",var startupAgent]) return await LiveStartupChecks.RunAsync(startupAgent);
 if(args is ["--integration"]) return await Integration.RunAsync();
 if(args is ["--terminal-batch-checks"]) return await Integration.RunAsync(terminalOnly:true);
 if(args is ["--parallel-batch-checks"]) return await Integration.RunAsync(terminalOnly:true,directBatch:true);
 if(args is ["--startup-queue-checks"]) return await Integration.RunAsync(startupOnly:true);
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
+if(args is ["--allocate-hold",var holdMib,var holdMs]) return MemoryFixture.AllocateHold(int.Parse(holdMib),int.Parse(holdMs));
+if(args is ["--memory-cycle",var memoryPrefix]) return MemoryFixture.Cycle(memoryPrefix);
+if(args is ["--qoder-live",var liveCli,var liveWorker,var liveRoot]) return await QoderLiveChecks.RunAsync(liveCli,liveWorker,liveRoot);
+if(args is ["--qoder-resume-check",var resumeCli,var resumeWorker,var resumeRoot]) return await QoderLiveChecks.ResumeAsync(resumeCli,resumeWorker,resumeRoot);
+if(args is ["--qoder-live-session",var sessionCli,var sessionWorker,var sessionRoot]) return await QoderLiveChecks.RunAsync(sessionCli,sessionWorker,sessionRoot,true);
+if(args is ["--qoder-live-child",var childCli,var childWorker,var childRoot]) return await QoderLiveChecks.RunAsync(childCli,childWorker,childRoot,childOnly:true);
+if(args is ["--live-memory-child",var liveSpec]) return await LiveMemorySoak.Child(liveSpec);
+if(args is ["--live-memory-hold",var livePrefix]) return LiveMemorySoak.Hold(livePrefix);
+if(args is ["--live-memory-soak",var liveAgent,var soakCli,var soakWorker,var soakNode,var soakRepo,var soakRoot]) return await LiveMemorySoak.Run(liveAgent,soakCli,soakWorker,soakNode,soakRepo,soakRoot);
+if(args is ["--qoder-deny-fixture"]){Console.WriteLine("{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Existing user hook denies this write. Stop.\"}}");return 0;}
+if(args is ["--guard-environment",var guardOutput])
+{
+    File.WriteAllText(guardOutput,JsonSerializer.Serialize(new{Pipe=Environment.GetEnvironmentVariable(OmpMemoryGuard.PipeEnvironment),Unicode=Environment.GetEnvironmentVariable("LAUNCHER_MEMORY_UNICODE"),Inherited=Environment.GetEnvironmentVariable("LAUNCHER_MEMORY_INHERITED")}));return 0;
+}
+if(args is ["--qoder-plugin-fixture",var qoderWorker,var qoderStorage])
+{
+    if(!Path.IsPathFullyQualified(qoderStorage)||!qoderStorage.Contains("AgentLauncher-tests-",StringComparison.Ordinal))throw new IOException("Qoder fixture requires an isolated test directory.");
+    QoderMemoryGuard.Prepare(qoderWorker,qoderStorage);Console.WriteLine(QoderMemoryGuard.DirectoryFor(qoderWorker,qoderStorage));return 0;
+}
+if(args is ["--plugin-dir",var qoderPlugin,"--qoder-runner-fixture",var qoderReady,var qoderRelease])
+{
+    using var hooks=JsonDocument.Parse(File.ReadAllText(Path.Combine(qoderPlugin,"hooks","hooks.json")));
+    async Task<string> Hook(string eventName)
+    {
+        var entry=hooks.RootElement.GetProperty("hooks").GetProperty(eventName)[0].GetProperty("hooks")[0];
+        var start=new ProcessStartInfo(entry.GetProperty("command").GetString()!){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
+        foreach(var argument in entry.GetProperty("args").EnumerateArray())start.ArgumentList.Add(argument.GetString()!);
+        using var hook=Process.Start(start)!;
+        await hook.StandardInput.WriteAsync(JsonSerializer.Serialize(new{hook_event_name=eventName,tool_name="Bash"}));hook.StandardInput.Close();
+        var output=hook.StandardOutput.ReadToEndAsync();var error=hook.StandardError.ReadToEndAsync();
+        try{await hook.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));}
+        catch{if(!hook.HasExited)hook.Kill(true);throw;}
+        if(hook.ExitCode!=0||await error!="")throw new IOException("Qoder hook fixture failed");
+        return await output;
+    }
+    var hello=await Hook("SessionStart");var decision=await Hook("PreToolUse");
+    File.WriteAllText(qoderReady,JsonSerializer.Serialize(new{Hello=hello,Decision=decision}));
+    var watch=Stopwatch.StartNew();var checkIndex=1;
+    while(!File.Exists(qoderRelease))
+    {
+        if(watch.Elapsed>TimeSpan.FromSeconds(30))return 3;
+        if(File.Exists(qoderReady+".check"+checkIndex))
+        {
+            File.WriteAllText(qoderReady+".result"+checkIndex,await Hook("PreToolUse"));checkIndex++;
+        }
+        await Task.Delay(25);
+    }
+    return 0;
+}
 if(args.Length>1&&args[0]=="-w"&&Environment.GetEnvironmentVariable("AGENT_LAUNCHER_TERMINAL_FIXTURE") is{Length:>0} captureRoot)
 {
     var pane=Array.IndexOf(args,"pane");if(pane<0||pane+1>=args.Length)return 2;
@@ -128,7 +178,7 @@ Test("P01 unavailable CPU sends a readable fail-closed resource response",()=>{
 });
 Test("F15 profile switching",()=>{var c=new Configuration();c.Edit(d=>d.Slots[0].Profiles["pi"]=new(){Executable="pi.exe",Arguments=["--pi"]});c.Edit(d=>d.Slots[0].AgentId="codex");Assert(c.Draft.Slots[0].Current.Executable=="","stale executable");c.Edit(d=>d.Slots[0].AgentId="pi");Assert(c.Draft.Slots[0].Current.Arguments[0]=="--pi","lost profile");});
 Test("F16/F17 full snapshots and LastEdited",()=>{var c=new Configuration();c.Edit(d=>{d.Slots.ForEach(s=>s.Enabled=false);d.Slots[3].Enabled=true;d.DirectoryMode="prepared";});c.SaveTemplate("a");c.Restore(new());c.Restore(new());c.Restore(c.LastEdited!);Assert(c.Draft.Slots[3].Enabled&&!c.Draft.Slots[0].Enabled&&c.Draft.DirectoryMode=="prepared","snapshot lost");c.Edit(d=>d.DirectoryMode="shared");Assert(c.Templates["a"].DirectoryMode=="prepared","snapshot aliases draft");});
-Test("P low memory rejects without spawning",()=>{var total=16*ResourcePolicy.GiB;var policy=new ResourcePolicySnapshot("practical",ResourcePolicy.DefaultJobMemoryLimit,ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultPhysicalFloor(total),ResourcePolicy.DefaultCommitFloor(32*ResourcePolicy.GiB),ResourcePolicy.DefaultCpuRate,ResourcePolicy.GitJobMemoryLimit,ResourcePolicy.DefaultGitPlanningBytes);var d=ResourcePolicy.Evaluate(new MemorySnapshot(total,ResourcePolicy.GiB,32*ResourcePolicy.GiB,20*ResourcePolicy.GiB,10,DateTimeOffset.UtcNow),policy,[],[new BudgetItem(Guid.NewGuid(),"agent",ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultJobMemoryLimit)]);Assert(d.Kind==AdmissionKind.Deny,"low memory allowed");});
+Test("P low memory rejects without spawning",()=>{var total=16*ResourcePolicy.GiB;MemorySnapshot Low()=>new(total,ResourcePolicy.GiB,32*ResourcePolicy.GiB,20*ResourcePolicy.GiB,10,DateTimeOffset.UtcNow);ResourcePolicySnapshot Snap(string mode)=>new(mode,ResourcePolicy.DefaultJobMemoryLimit,ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultPhysicalFloor(total),ResourcePolicy.DefaultCommitFloor(32*ResourcePolicy.GiB),ResourcePolicy.DefaultCpuRate,ResourcePolicy.GitJobMemoryLimit,ResourcePolicy.DefaultGitPlanningBytes);var request=new BudgetItem[]{new(Guid.NewGuid(),"agent",ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultJobMemoryLimit)};var practical=ResourcePolicy.Evaluate(Low(),Snap("practical"),[],request);Assert(practical.Kind==AdmissionKind.Allow&&practical.Advisory,"practical low memory blocked or lost its advisory: "+practical.Reason);var d=ResourcePolicy.Evaluate(Low(),Snap("conservative"),[],request);Assert(d.Kind==AdmissionKind.Deny,"conservative low memory allowed");});
 Test("F atomic persistence and backup",()=>{var p=Path.Combine(temp,"config.json");Store.Save(p,new Configuration());var c=new Configuration();c.Draft.Project=temp;Store.Save(p,c);Assert(Store.Read<Configuration>(p)!.Draft.Project==temp&&File.Exists(p+".bak"),"save/backup failed");});
 Test("R11 required schema fields refuse partial configuration",()=>{bool rejected=false;try{JsonSerializer.Deserialize<Configuration>("{}",Store.Json);}catch(JsonException){rejected=true;}Assert(rejected,"empty config accepted");});
 Test("R12 receipt atomic replacement concurrent reader",()=>{
@@ -163,8 +213,26 @@ Test("P02 Job memory evidence survives child exit and never invents crash cause"
 Test("ACC-A01 preset argv keeps every argument exact and isolated per agent",()=>{
  var omp=AgentPresets.For("omp",AgentPresets.OmpVerifiedVersion);
  Assert(omp.Count==5&&AgentPresets.For("omp","19.0.0").Count==0,"unknown version exposed presets");
+ Assert(AgentPresets.For("omp",AgentPresets.OmpCurrentVerifiedVersion).Count==5,"current Omp version presets missing");
+ Assert(AgentPresets.For("qoder",AgentPresets.QoderVerifiedVersion).Count==4,"Qoder presets missing");
+ foreach(var pair in new[]{("omp",AgentPresets.OmpCurrentVerifiedVersion),("qoder",AgentPresets.QoderVerifiedVersion)})
+ {
+  var presets=AgentPresets.For(pair.Item1,pair.Item2);
+  Assert(presets.Single(p=>p.Semantic=="resume-session").Fill("session 中文 with spaces").Arguments.SequenceEqual(new[]{"--resume","session 中文 with spaces"}),"resume arguments split or changed");
+  Assert(presets.Single(p=>p.Semantic=="resume-last").Arguments.SequenceEqual(new[]{"--continue"}),"continue arguments changed");
+ }
+ Assert(AgentPresets.For("qoder","1.1.90").Count==0,"unverified Qoder version exposed presets");
  Assert(AgentPresets.All.All(AgentPresets.StructurallyValid)&&AgentPresets.All.Select(p=>p.Id).Distinct().Count()==AgentPresets.All.Count,"preset table invalid or ids collide");
  Assert(AgentPresets.For("claude",AgentPresets.CodexVerifiedVersion).Count==0&&AgentPresets.For("codex",AgentPresets.CodexVerifiedVersion).All(p=>p.AgentId=="codex"),"preset leaked across agents");
+ // 2026-11-14: claude 2.1.322 and pi 1.5.2 probed on this machine (--help/--version evidence). hermes stays
+ // without presets until a real install pins its version (advisory: never pin unprobed versions).
+ var claude=AgentPresets.For("claude",AgentPresets.ClaudeVerifiedVersion);
+ Assert(claude.Count==4&&AgentPresets.For("claude","2.1.999").Count==0,"claude presets missing or leaked to an unverified version");
+ Assert(claude.Single(p=>p.Id=="claude-continue").Arguments.SequenceEqual(new[]{"--continue"})&&claude.Single(p=>p.Id=="claude-resume").Fill("sess-1").Arguments.SequenceEqual(new[]{"--resume","sess-1"}),"claude resume argv wrong");
+ var pi=AgentPresets.For("pi",AgentPresets.PiVerifiedVersion);
+ Assert(pi.Count==3&&AgentPresets.For("pi","1.5.3").Count==0,"pi presets missing or leaked to an unverified version");
+ Assert(pi.Single(p=>p.Id=="pi-continue").Arguments.SequenceEqual(new[]{"--continue"})&&pi.Single(p=>p.Id=="pi-model").Fill("openai/gpt-5.2").Arguments.SequenceEqual(new[]{"--model","openai/gpt-5.2"}),"pi argv wrong");
+ Assert(AgentPresets.For("hermes","0.0.0").Count==0,"hermes presets must not activate without a probed install");
  var resume=omp.Single(p=>p.Id=="omp-resume");
  var filled=resume.Fill("会话 id; --x");
  Assert(filled.Arguments.SequenceEqual(new[]{"--resume","会话 id; --x"})&&resume.Arguments.Contains(ArgumentPreset.ValueToken),"preset fill corrupted arguments or aliased the table");
@@ -280,7 +348,7 @@ Test("R-discovery searches install dirs beyond PATH",()=>{
 Test("F06 Qoder preset uses CLI rather than IDE dispatcher",()=>{
  var dir=Path.Combine(temp,"qoder-cli");Directory.CreateDirectory(dir);var exe=Path.Combine(dir,"qodercli.exe");File.WriteAllText(exe,"");File.WriteAllText(Path.Combine(dir,"qoder.cmd"),"@echo off\r\npowershell -File qoder-dispatcher.ps1 %*");
  var previous=Environment.GetEnvironmentVariable("PATH");
- try{Environment.SetEnvironmentVariable("PATH",dir);var command=Commands.Resolve("qoder",new(){Arguments=["--help"]});Assert(command.Executable==exe&&command.Adapter=="exe"&&command.Arguments.SequenceEqual(new[]{"--help"}),"Qoder resolved a dispatcher/IDE instead of the CLI");}
+ try{Environment.SetEnvironmentVariable("PATH",dir);var command=Commands.Resolve("qoder",new(){Arguments=["--help"]});Assert(command.Executable==exe&&command.Adapter=="exe"&&QoderMemoryGuard.IsAttached(command)&&QoderMemoryGuard.Detach(command).Arguments.SequenceEqual(new[]{"--help"}),"Qoder resolved a dispatcher/IDE instead of the CLI");}
  finally{Environment.SetEnvironmentVariable("PATH",previous);}
 });
 Test("F06 discovery accepts quoted PATH without duplicate candidates",()=>{
@@ -301,8 +369,11 @@ Test("F12 portable templates inherit new project without weakening directory pol
 ResourcePolicyChecks.RunMigration(Test,temp);
 ResourcePolicyChecks.RunReviewFixes(Test,temp);
 ResourcePolicyChecks.RunDecisions(Test);
+MemoryAdmissionChecks.Run(Test,temp);
+QoderMemoryChecks.Run(Test,temp);
+WorkspaceCleanupChecks.Run(Test);
+LongTaskResourceChecks.Run(Test);
 ResourcePolicyChecks.RunPoolAccounting(Test);
-ResourcePolicyChecks.RunWaivers(Test);
 ResourcePolicyChecks.RunAuthorityFixes(Test);
 ConfigurationReviewChecks.Run(Test,temp);
 AgentLauncher.Tests.PaneLayoutChecks.Run(Test);

@@ -19,7 +19,7 @@ internal static class RuntimeReviewChecks
         if(!Store.Root.Contains("AgentLauncher-tests-",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Runtime review checks require the integration test build and an isolated AgentLauncher-tests-* root.");
         if(!File.Exists(Store.WorkerPath))throw new FileNotFoundException("Runtime review checks require the published Worker beside the test executable.",Store.WorkerPath);
         Directory.CreateDirectory(cwd);
-        await test("P01 real CPU sampling keeps status and waiver replies readable",()=>NativeSamplingAsync(cwd));
+        await test("P01 real CPU sampling keeps status and reserve replies readable",()=>NativeSamplingAsync(cwd));
         await test("P02 future memory changes preserve active Job and exit evidence",()=>FutureMemoryAsync(cwd));
         await test("CR04 revoke save failure restores state and detail before later begin",()=>RevokeRollbackAsync(cwd));
         await test("CR06 oversized plan is rejected before persistence",()=>OversizedPlanAsync(cwd));
@@ -309,8 +309,7 @@ internal static class RuntimeReviewChecks
         config.Draft.Slots[0].Enabled=false;config.Draft.Slots[1].Enabled=true;
         Store.Save(Path.Combine(monitor.Root,"configuration.json"),config);
         var second=Plan(1,4*ResourcePolicy.GiB,["--hold","10"]);
-        var waiver=await monitor.SendAsync(new("waiver",Guid.NewGuid(),[second]));Assert(waiver.Ok&&waiver.WaiverId!=null,waiver.Message);
-        var next=await monitor.SendAsync(new("reserve",Guid.NewGuid(),[second],WaiverId:waiver.WaiverId));Assert(next.Ok,next.Message);
+        var next=await monitor.SendAsync(new("reserve",Guid.NewGuid(),[second]));Assert(next.Ok,next.Message);
         using var secondRunner=Run(second);
         await Task.WhenAll(firstRunner.WaitForExitAsync(),secondRunner.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(15));
         Assert(firstRunner.ExitCode==0&&secondRunner.ExitCode==0,"memory fixture runner failed");
@@ -327,15 +326,17 @@ internal static class RuntimeReviewChecks
         foreach(var slot in config.Draft.Slots)slot.Enabled=true;
         Store.Save(Path.Combine(monitor.Root,"configuration.json"),config);
         var batch=Guid.NewGuid();
+        // Nine panes exceed the fixed 8-pane ceiling, so every reserve is refused for a stable reason while
+        // real CPU sampling keeps status and reply frames readable. No child is ever started.
+        while(config.Draft.Slots.Count<9)config.Draft.Slots.Add(new(){Enabled=true});
         var items=config.Draft.Slots.Select((slot,index)=>new LaunchItem(Guid.NewGuid(),batch,index+1,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),true,
             new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.AgentBudget,SourceSlotId:slot.Id,AgentId:slot.AgentId)).ToArray();
-        // No child is started: real resource pressure may deny a grant, but must never break IPC.
         for(var i=0;i<50;i++)
         {
             var status=await monitor.SendAsync(new("status",Guid.NewGuid()));
             Assert(status.Memory is {} sample&&double.IsFinite(sample.CpuPercent),"native status lost the CPU sample: "+JsonSerializer.Serialize(status,Store.Json));
-            var reply=await monitor.SendAsync(new("waiver",Guid.NewGuid(),items));
-            Assert(reply.Memory==null||double.IsFinite(reply.Memory.CpuPercent),"waiver returned a non-finite CPU reading");
+            var reply=await monitor.SendAsync(new("reserve",Guid.NewGuid(),items));
+            Assert(reply.Memory==null||double.IsFinite(reply.Memory.CpuPercent),"reserve returned a non-finite CPU reading");
             Assert(reply.Ok||!string.IsNullOrWhiteSpace(reply.Message),"denial lost its reason");
         }
         var final=await monitor.SendAsync(new("status",Guid.NewGuid()));
@@ -544,13 +545,21 @@ internal static class RuntimeReviewChecks
 
     private static Task PressureReasonAsync(string cwd)
     {
-        var root=OwnedRoot(cwd);using var probe=new MonitorProbe(new Ledger(),FreshSample(),Path.Combine(root,"control.json"));
+        var root=OwnedRoot(cwd);var configPath=Path.Combine(root,"configuration.json");
+        var config=new Configuration();config.Draft.Project=cwd;config.Draft.DirectoryMode="shared";
+        using var probe=new MonitorProbe(new Ledger(),FreshSample(),Path.Combine(root,"control.json"));
         var tracker=(PressureTracker)probe.Get("pressureTracker")!;
         var high=FreshSample() with{CpuPercent=85};
         for(var i=0;i<3;i++)tracker.Observe(high,ResourcePolicy.DefaultPhysicalFloor(high.Total));
+        config.Draft.Resource=new(){Mode="conservative"};Store.Save(configPath,config);
         var pressured=probe.Status();
         Assert(pressured.Ok,"resource pressure changed reconciliation health");
-        Assert(!string.IsNullOrEmpty(pressured.AdmissionBlockedReason)&&pressured.AdmissionBlockedReason!.Contains("压力"),"pressure admission blocker not exposed: "+(pressured.AdmissionBlockedReason??"<null>"));
+        Assert(!string.IsNullOrEmpty(pressured.AdmissionBlockedReason)&&pressured.AdmissionBlockedReason!.Contains("压力"),"conservative pressure admission blocker not exposed: "+(pressured.AdmissionBlockedReason??"<null>"));
+        config.Draft.Resource=new(){Mode="practical"};Store.Save(configPath,config);
+        var advisory=probe.Status();
+        Assert(advisory.Ok&&advisory.AdmissionBlockedReason==null,"practical mode still reports a pressure blocker: "+(advisory.AdmissionBlockedReason??"<null>"));
+        config.Draft.Resource=new(){Mode="conservative"};Store.Save(configPath,config);
+        Assert(probe.Status().AdmissionBlockedReason?.Contains("压力")==true,"practical probe cleared latched pressure early");
         for(var i=0;i<5;i++)tracker.Observe(FreshSample(),ResourcePolicy.DefaultPhysicalFloor(high.Total));
         var normal=probe.Status();
         Assert(normal.Ok&&normal.AdmissionBlockedReason==null,"cleared pressure still reports an admission blocker: "+(normal.AdmissionBlockedReason??"<null>"));
@@ -624,6 +633,7 @@ internal static class RuntimeReviewChecks
         var first=probe.Status();Assert(first.Entries?.Length==1&&!string.IsNullOrEmpty(first.StatusSignature),"full status omitted its stable signature");
         Response Poll(Response prior)=>(Response)probe.Invoke("Handle",new Request("status",Guid.NewGuid(),StatusEpoch:prior.Epoch,StatusSignature:prior.StatusSignature))!;
         var nextSample=FreshSample() with{Available=11*ResourcePolicy.GiB};probe.Set("sample",nextSample);
+        probe.Set("sampleOverride",(Func<MemorySnapshot>)(()=>nextSample));
         var shortFrame=Poll(first);Assert(shortFrame.Unchanged&&shortFrame.Entries==null&&shortFrame.Memory==nextSample&&shortFrame.StatusSignature==first.StatusSignature,"unchanged status did not return a sample-only short frame");
         entry.Detail="changed progress";var detail=Poll(first);Assert(!detail.Unchanged&&detail.Entries?.Single().Detail==entry.Detail&&detail.StatusSignature!=first.StatusSignature,"detail change was hidden by short status");
         entry.State="Revoked";var terminal=Poll(detail);Assert(!terminal.Unchanged&&terminal.Entries?.Single().State=="Revoked","terminal transition did not invalidate status");

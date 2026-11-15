@@ -190,7 +190,7 @@ internal static class WorkspaceReviewChecks
             var sourceStatus=await GitChecked(repo,"status","--porcelain");
             var sourceEntries=Directory.GetFileSystemEntries(repo).Select(Path.GetFileName).Order().ToArray();
             var beforePreparation=PreparationFiles();var beforeWorkspaces=WorkspaceFiles();
-            var plans=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true);
+            var plans=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true);
             Assert(plans.Count==1&&plans[0].Position==1,"强制独立目录没有只准备唯一启动项");
             var target=Path.GetFullPath(plans[0].Cwd);
             Assert(!SameDirectory(target,source),"强制独立目录仍在原始源目录");
@@ -206,14 +206,14 @@ internal static class WorkspaceReviewChecks
             Assert(await GitChecked(repo,"rev-parse","HEAD")==sourceHead,"强制准备改动了源 HEAD");
             Assert(Directory.GetFileSystemEntries(repo).Select(Path.GetFileName).Order().SequenceEqual(sourceEntries),"强制准备在源目录新增或删除了条目");
             Assert(PreparationFiles().Count==beforePreparation.Count+1&&WorkspaceFiles().Count==beforeWorkspaces.Count+1,"强制准备未各自写入准备和工作目录记录");
-            var replay=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true);
+            var replay=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true);
             Assert(replay.Count==1&&SameDirectory(replay[0].Cwd,target),"同一强制输入改变了准备目录");
             Assert(replay[0].Id!=plans[0].Id&&replay[0].BatchId!=plans[0].BatchId,"同一强制输入复用了启动授权 ID");
             Assert(PreparationFiles().Count==beforePreparation.Count+1&&WorkspaceFiles().Count==beforeWorkspaces.Count+1,"强制重放新增了准备或工作目录记录");
             var unforced=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None);
             Assert(unforced.Count==1&&SameDirectory(unforced[0].Cwd,source),"默认准备路径不再停留在原始源目录");
             Assert(PreparationFiles().Count==beforePreparation.Count+2&&WorkspaceFiles().Count==beforeWorkspaces.Count+1,"强制与默认准备摘要未分离");
-            var forcedAgain=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true);
+            var forcedAgain=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true);
             Assert(forcedAgain.Count==1&&SameDirectory(forcedAgain[0].Cwd,target)&&PreparationFiles().Count==beforePreparation.Count+2,"强制记录被默认准备覆盖或重复");
         });
 
@@ -223,8 +223,8 @@ internal static class WorkspaceReviewChecks
             var source=PhysicalDirectory.Resolve(repo).Path;var sourceStatus=await GitChecked(repo,"status","--porcelain");
             var sourceEntries=Directory.GetFileSystemEntries(repo).Select(Path.GetFileName).Order().ToArray();
             var beforePreparation=PreparationFiles();
-            var first=await new WorkspacePreparer(destination).PrepareAsync(Isolated(repo,[0]),_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true);
-            var second=await new WorkspacePreparer(destination).PrepareAsync(Isolated(repo,[1]),_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true);
+            var first=await new WorkspacePreparer(destination).PrepareAsync(Isolated(repo,[0]),_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true);
+            var second=await new WorkspacePreparer(destination).PrepareAsync(Isolated(repo,[1]),_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true);
             Assert(first.Count==1&&second.Count==1&&first[0].Position!=second[0].Position,"顺序强制输入丢失位置身份");
             Assert(!SameDirectory(first[0].Cwd,second[0].Cwd),"两个顺序任务复用了同一工作树");
             Assert(!SameDirectory(first[0].Cwd,source)&&!SameDirectory(second[0].Cwd,source),"顺序任务有运行在原始源目录的一项");
@@ -248,7 +248,7 @@ internal static class WorkspaceReviewChecks
             var beforeBranches=await GitChecked(repo,"for-each-ref","--format=%(refname)","refs/heads/launcher");
             var beforeDestination=Directory.GetFileSystemEntries(destination).Order().ToArray();
             IOException? rejected=null;
-            try{await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,new[]{PhysicalDirectory.Workspace(destination)},null,true);}catch(IOException e){rejected=e;}
+                try{await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,new[]{PhysicalDirectory.Workspace(destination)},true);}catch(IOException e){rejected=e;}
             Assert(rejected!=null&&rejected.Message.Contains("重叠"),"强制目标与运行中会话重叠未被预检拒绝："+(rejected?.Message??"准备成功"));
             Assert(PreparationFiles().SetEquals(beforePreparation),"拒绝后新增了准备记录");
             Assert(WorkspaceFiles().SetEquals(beforeWorkspaces),"拒绝后新增了工作目录记录");
@@ -257,7 +257,7 @@ internal static class WorkspaceReviewChecks
             Assert(Directory.GetFileSystemEntries(destination).Order().SequenceEqual(beforeDestination),"拒绝后目标目录出现写入");
             Assert(await GitChecked(repo,"rev-parse","HEAD")==sourceHead,"拒绝后源 HEAD 变化");
             var unrelated=Path.Combine(root,"unrelated-active");Directory.CreateDirectory(unrelated);
-            var allowed=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,new[]{PhysicalDirectory.Workspace(unrelated)},null,true);
+            var allowed=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,new[]{PhysicalDirectory.Workspace(unrelated)},true);
             Assert(allowed.Count==1&&!SameDirectory(allowed[0].Cwd,PhysicalDirectory.Resolve(repo).Path),"不重叠的活动会话阻止了强制独立目录");
         });
 
@@ -271,7 +271,7 @@ internal static class WorkspaceReviewChecks
             foreach(var draft in new[]{Isolated(repo,[0,1]),shared})
             {
                 IOException? refused=null;
-                try{await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true);}catch(IOException e){refused=e;}
+                try{await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true);}catch(IOException e){refused=e;}
                 Assert(refused!=null,"强制独立目录接受了不合法草稿："+draft.DirectoryMode+"（启用 "+draft.Slots.Count(s=>s.Enabled)+" 项）");
             }
             Assert(PreparationFiles().SetEquals(beforePreparation),"非法强制草稿新增了准备记录");
@@ -292,17 +292,17 @@ internal static class WorkspaceReviewChecks
             var beforeBranches=await GitChecked(repo,"for-each-ref","--format=%(refname)","refs/heads/launcher");
             var beforeDestination=Directory.GetFileSystemEntries(destination).Order().ToArray();
             IOException? rejected=null;
-            try{await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true,expected);}catch(IOException e){rejected=e;}
+            try{await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true,expected);}catch(IOException e){rejected=e;}
             Assert(rejected!=null&&rejected.Message.Contains("物理身份"),"替换后的源工作区未被身份核对拒绝："+(rejected?.Message??"准备成功"));
             Assert(PreparationFiles().SetEquals(beforePreparation),"身份拒绝后新增了准备记录");
             Assert(WorkspaceFiles().SetEquals(beforeWorkspaces),"身份拒绝后新增了工作目录记录");
             Assert(await GitChecked(repo,"worktree","list","--porcelain")==beforeWorktrees,"身份拒绝后 Git 工作树发生变化");
             Assert(await GitChecked(repo,"for-each-ref","--format=%(refname)","refs/heads/launcher")==beforeBranches,"身份拒绝后 Git 分支发生变化");
             Assert(Directory.GetFileSystemEntries(destination).Order().SequenceEqual(beforeDestination),"身份拒绝后目标目录出现写入");
-            var accepted=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true,replaced);
+            var accepted=await new WorkspacePreparer(destination).PrepareAsync(draft,_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true,replaced);
             Assert(accepted.Count==1&&!SameDirectory(accepted[0].Cwd,PhysicalDirectory.Resolve(repo).Path),"匹配的源身份被拒绝或仍在原始源目录");
             IOException? multi=null;
-            try{await new WorkspacePreparer(destination).PrepareAsync(Isolated(repo,[0,1]),_=>{},_=>Task.FromResult(false),CancellationToken.None,null,null,true,PhysicalDirectory.Resolve(repo).Key);}catch(IOException e){multi=e;}
+            try{await new WorkspacePreparer(destination).PrepareAsync(Isolated(repo,[0,1]),_=>{},_=>Task.FromResult(false),CancellationToken.None,null,true,PhysicalDirectory.Resolve(repo).Key);}catch(IOException e){multi=e;}
             Assert(multi!=null,"源身份核对接受了多个启用项");
         });
     }

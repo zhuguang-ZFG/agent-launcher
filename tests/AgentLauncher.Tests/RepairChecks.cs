@@ -58,16 +58,13 @@ internal static class RepairChecks
             Assert(((string?)Call(restarted,"AdmissionBlockedReason"))?.Contains("备份")==true,"missing recovery reason");
             Assert(!File.Exists(path)&&backup.SequenceEqual(File.ReadAllBytes(path+".bak")),"recovery overwrote retained claims");
         });
-        Test("R11 missing configuration blocks status reserve waiver with one reason",()=>
+        Test("R11 missing configuration blocks status and reserve with one reason",()=>
         {
             using var monitor=Monitor();var path=Store.FilePath("authority-"+Guid.NewGuid().ToString("N")+".json");Set(monitor,"configurationPath",path);
             Store.Save(path,new Configuration());Store.Save(path,new Configuration());File.Delete(path);
             var reason=(string?)Call(monitor,"AdmissionBlockedReason");Assert(reason?.Contains("备份")==true,"missing authority fell back to defaults");
-            foreach(var op in new[]{"reserve","waiver"})
-            {
-                string? message=null;try{Call(monitor,"Handle",new Request(op,Guid.NewGuid(),[Item()]));}catch(IOException e){message=e.Message;}
-                Assert(message==reason,op+" used a different block reason: "+message);
-            }
+            string? message=null;try{Call(monitor,"Handle",new Request("reserve",Guid.NewGuid(),[Item()]));}catch(IOException e){message=e.Message;}
+            Assert(message==reason,"reserve used a different block reason: "+message);
             var status=(Response)Call(monitor,"Handle",new Request("status",Guid.NewGuid()))!;
             Assert(!status.Ok&&status.AdmissionBlockedReason==reason,"status did not fail closed consistently");
         });
@@ -190,13 +187,13 @@ internal static class RepairChecks
             Assert(text.Contains("共享池内所有项")&&text.Contains("池内并发")&&!text.Contains("该项及工具子进程"),"shared peak mislabeled as one pane");
             Assert(ExitDiagnostics.MemoryText(memory with{LimitReached=false,NotificationError="notification unavailable"}).Contains("不能排除"),"missing event treated as evidence of no pressure");
         });
-        Test("R07 undersized shared pool requires explicit admission warning",()=>
+        Test("R07 undersized shared pool produces an advisory warning in practical mode",()=>
         {
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,PoolMemoryLimit=2*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.GiB};
             var sample=new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow);var policy=ResourcePolicy.SnapshotFor(settings,sample.Total,sample.CommitLimit);var pool=Guid.NewGuid();
             var items=Enumerable.Range(0,3).Select(_=>new BudgetItem(Guid.NewGuid(),"agent",ResourcePolicy.GiB,2*ResourcePolicy.GiB,pool,2*ResourcePolicy.GiB)).ToArray();
-            var decision=ResourcePolicy.Evaluate(sample,policy,[],items);Assert(decision.Kind==AdmissionKind.RequireWaiver&&decision.Reason.Contains("共享池"),"pool undersizing silently admitted");
-            Assert(ResourcePolicy.Evaluate(sample,policy,items,[],false).Kind==AdmissionKind.Allow,"begin re-consumed consent");
+            var decision=ResourcePolicy.Evaluate(sample,policy,[],items);Assert(decision.Kind==AdmissionKind.Allow&&decision.Advisory&&decision.Reason.Contains("共享池"),"pool undersizing lost its advisory warning");
+            Assert(ResourcePolicy.Evaluate(sample,policy,items,[],false).Kind==AdmissionKind.Allow,"advisory pool warning persisted hard state");
         });
         Test("R04 failed pane keeps an error receipt and deliberate dismissal key",()=>
         {
@@ -220,8 +217,10 @@ internal static class RepairChecks
             var poolId=Guid.NewGuid();var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,PoolMemoryLimit=8*ResourcePolicy.GiB,JobMemoryLimit=ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.MinPlanningBytes};
             var config=new Configuration();config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             var book=new Ledger{Pools=[new(){Id=poolId,BatchId=Guid.NewGuid(),MemoryLimit=8*ResourcePolicy.GiB,PolicyHash=ResourcePolicy.PolicyHash(ResourcePolicy.SnapshotFor(settings,256*ResourcePolicy.GiB,512*ResourcePolicy.GiB))}]};
-            for(var i=0;i<10;i++){var plan=Item(new string('x',480000)) with{PoolId=poolId,Budget=ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.MinPlanningBytes};book.Entries.Add(new(){Plan=plan,Digest=Store.Digest(plan)});}
+            for(var i=0;i<10;i++){var plan=Item(new string('x',480000)) with{PoolId=poolId,Budget=ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.MinPlanningBytes,Kind="git"};book.Entries.Add(new(){Plan=plan,Digest=Store.Digest(plan)});}
             using var monitor=Monitor(book);Set(monitor,"sample",new MemorySnapshot(256*ResourcePolicy.GiB,192*ResourcePolicy.GiB,512*ResourcePolicy.GiB,384*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow));
+            // Admission now takes fresh bracket samples; retain this capacity test's large-machine fixture through those reads.
+            Set(monitor,"sampleOverride",(Func<MemorySnapshot>)(()=>new(256*ResourcePolicy.GiB,192*ResourcePolicy.GiB,512*ResourcePolicy.GiB,384*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow)));
             var freshPool=poolId;var planNew=Item(new string('y',480000)) with{PoolId=freshPool,Budget=ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.MinPlanningBytes};
             var before=JsonSerializer.Serialize(book,Store.Json);var denied=false;try{Call(monitor,"Handle",new Request("reserve",Guid.NewGuid(),[planNew]));}catch(IOException e){denied=e.Message.Contains("容量");}
             Assert(denied&&JsonSerializer.Serialize(book,Store.Json)==before,"overfull batch changed retained authority");Assert(Get<Dictionary<Guid,Job>>(monitor,"pools").Count==0,"capacity denial created a pool");
@@ -299,6 +298,16 @@ internal static class RepairChecks
                 }
             }
             finally{gate.ReleaseMutex();}
+        });
+        Test("ACC-R05 repeated admission probes do not manufacture pressure sampling intervals",()=>
+        {
+            using var monitor=Monitor();
+            Set(monitor,"sampleOverride",(Func<MemorySnapshot>)(()=>new(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,ResourcePolicy.MiB,5,DateTimeOffset.UtcNow)));
+            var tracker=Get<PressureTracker>(monitor,"pressureTracker");
+            for(var i=0;i<3;i++)Call(monitor,"SampleResources");
+            Assert(tracker.HighStreak==1&&!tracker.Pressure,"rapid probes tripped pressure hysteresis");
+            for(var i=0;i<2;i++){Set(monitor,"pressureObservedAt",DateTimeOffset.UtcNow.AddSeconds(-3));Call(monitor,"SampleResources");}
+            Assert(tracker.Pressure,"three distinct low-commit intervals did not latch pressure");
         });
         Test("CR-N01 healthy frozen resume does not reconsume soft admission consent",()=>
         {

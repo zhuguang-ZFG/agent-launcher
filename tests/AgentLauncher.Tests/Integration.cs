@@ -38,8 +38,8 @@ internal static class Integration
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             try
             {
-                var batch=Guid.NewGuid();var pool=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-16.release");
-                var items=Enumerable.Range(1,ResourcePolicy.MaxSlots).Select(n=>Item("Terminal 16-pane fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-16-{n}.json"),release]) with{BatchId=batch,Position=n,Shared=true,PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode,PoolId=pool}).ToArray();
+                var batch=Guid.NewGuid();var pool=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-8.release");
+                var items=Enumerable.Range(1,ResourcePolicy.MaxConcurrentAgents).Select(n=>Item("Terminal 8-pane fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-8-{n}.json"),release]) with{BatchId=batch,Position=n,Shared=true,PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode,PoolId=pool}).ToArray();
                 using var monitor=Process.GetProcessById(Store.Read<int>(Store.FilePath("monitor-pid.json")));_ = monitor.Handle;
                 var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
                 int[] missing=[];var runners=new List<Process>();
@@ -47,11 +47,11 @@ internal static class Integration
                 {
                     if(directBatch)foreach(var item in items)runners.Add(Start("run",item.Id));else Commands.SubmitTerminal(terminal,items,"vertical");
                     var deadline=Stopwatch.StartNew();
-                    while(deadline.Elapsed<TimeSpan.FromSeconds(25)&&items.Any(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))))await Task.Delay(100);
+                    while(deadline.Elapsed<TimeSpan.FromSeconds(25)&&items.Any(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-8-{item.Position}.json"))))await Task.Delay(100);
                 }
                 finally
                 {
-                    missing=items.Where(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-16-{item.Position}.json"))).Select(item=>item.Position).ToArray();
+                    missing=items.Where(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-8-{item.Position}.json"))).Select(item=>item.Position).ToArray();
                     var snapshot=new{missing,monitorExited=monitor.HasExited,monitorExitCode=monitor.HasExited?(int?)monitor.ExitCode:null,items=items.Select(item=>new{item.Id,item.Position,claim=File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim")),receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id)),entered=Store.Read<JsonElement?>(Store.FilePath(Path.Combine("attempts",item.Id.ToString("N"),"runner-entered.json"))),error=Store.Read<JsonElement?>(Store.FilePath(Path.Combine("attempts",item.Id.ToString("N"),"runner-error.json")))}).ToArray()};
                     Store.Save(Store.FilePath("terminal-16-diagnostics.json"),snapshot);
                     Console.WriteLine("Terminal sixteen pane diagnostics: "+JsonSerializer.Serialize(snapshot,Store.Json));
@@ -186,17 +186,62 @@ internal static class Integration
             Store.Save(Store.FilePath("integration-results.json"),evidence);
             return evidence.Any(e=>e.GetType().GetProperty("passed")?.GetValue(e) is false)?1:0;
         }
+        await Test("ACC-R11 Qoder runner prepares plugin and receives its child hook handshake",async()=>{
+            var ready=Path.Combine(Store.Root,"qoder-hook-ready.json");var release=Path.Combine(Store.Root,"qoder-hook.release");
+            var item=Item("Qoder runner fixture",["--qoder-runner-fixture",ready,release]);
+            item=item with{Command=QoderMemoryGuard.Attach(item.Command)};
+            var before=Environment.GetEnvironmentVariable(OmpMemoryGuard.PipeEnvironment);
+            var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
+            using var runner=Start("run",item.Id);
+            try
+            {
+                var wait=Stopwatch.StartNew();
+                while((!File.Exists(ready)||Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase!="Started")&&!runner.HasExited&&wait.Elapsed<TimeSpan.FromSeconds(10))await Task.Delay(25);
+                Assert(File.Exists(ready),"runner did not execute generated hooks");
+                using var result=JsonDocument.Parse(File.ReadAllText(ready));
+                using var hello=JsonDocument.Parse(result.RootElement.GetProperty("Hello").GetString()!);
+                Assert(hello.RootElement.GetProperty("systemMessage").GetString()!.Contains("已连接"),"Runner pipe was not inherited by the hook");
+                using var decision=JsonDocument.Parse(result.RootElement.GetProperty("Decision").GetString()!);
+                Assert(!decision.RootElement.TryGetProperty("hookSpecificOutput",out var blocked)||blocked.GetProperty("permissionDecision").GetString()=="deny","unexpected permission grant");
+                var receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id));
+                Assert(receipt is{Phase:"Started"}&&!receipt.Detail.Contains("未确认加载"),"Runner did not confirm handshake");
+                Assert(Environment.GetEnvironmentVariable(OmpMemoryGuard.PipeEnvironment)==before,"child environment leaked");
+                using var job=new Job(Store.JobName(item.Id),openOnly:true);
+                job.SetMemoryLimit(256*ResourcePolicy.MiB);
+                File.WriteAllText(ready+".check1","check");
+                var deadline=Stopwatch.StartNew();
+                while((!File.Exists(ready+".result1")||Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Detail.Contains(ToolRecovery.BlockedMarker)!=true)&&deadline.Elapsed<TimeSpan.FromSeconds(8))await Task.Delay(25);
+                Assert(File.Exists(ready+".result1")&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Detail.Contains(ToolRecovery.BlockedMarker)==true,"tool refusal was not published in the live receipt");
+                var shown=(await Ipc.SendAsync(new("status",Guid.NewGuid()))).Entries!.Single(entry=>entry.Plan.Id==item.Id);
+                Assert(shown.Detail.Contains(ToolRecovery.BlockedMarker),"monitor discarded the live tool refusal");
+                job.SetMemoryLimit(item.Budget);
+                File.WriteAllText(ready+".check2","check");deadline.Restart();
+                while((!File.Exists(ready+".result2")||Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Detail.Contains("最近一次工具已通过")!=true)&&deadline.Elapsed<TimeSpan.FromSeconds(8))await Task.Delay(25);
+                Assert(File.Exists(ready+".result2")&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Detail.Contains("最近一次工具已通过")==true,"healthy recheck did not clear the refusal");
+            }
+            finally{File.WriteAllText(release,"release");await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));}
+            Assert(runner.ExitCode==0&&Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0},"runner did not finish normally");
+            await Ipc.SendAsync(new("status",Guid.NewGuid()));
+        });
         await Test("P04 begin rechecks complete resource policy without consuming grant",async()=>{
             var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
             const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
             System.Reflection.FieldInfo Field(string name)=>type.GetField(name,flags)??throw new MissingFieldException(type.FullName,name);
             var handle=type.GetMethod("Handle",flags)??throw new MissingMethodException(type.FullName,"Handle");
             var healthySample=new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow);
+            // Conservative mode keeps the begin recheck complete: resource shortfalls stay hard refusals instead of practical-mode advice.
+            var owned=Path.Combine(Store.Root,"recheck-owned-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(owned);
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.DirectoryMode="shared";config.Draft.Resource=new(){Mode="conservative"};
+            Store.Save(Path.Combine(owned,"configuration.json"),config);
             foreach(var sample in new[]{healthySample with{CommitAvailable=ResourcePolicy.GiB},healthySample with{Available=ResourcePolicy.DefaultPhysicalFloor(healthySample.Total)+ResourcePolicy.DefaultPlanningBytes-1},healthySample with{CpuPercent=double.NaN},healthySample with{At=DateTimeOffset.UtcNow.AddSeconds(-10)}})
             {
-                using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;var item=Item("recheck",["--hold","1"]);var entry=new ControlEntry{Plan=item,Digest=Store.Digest(item)};
+                using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;var item=Item("recheck",["--hold","1"]);
+                // The begin recheck derives policy from the entry's frozen Mode, not from configuration.json.
+                var entry=new ControlEntry{Plan=item,Digest=Store.Digest(item),Mode="conservative"};
                 Field("sample").SetValue(monitor,sample);Field("ledger").SetValue(monitor,new Ledger{Entries=[entry]});
-                Field("ledgerPath").SetValue(monitor,Path.Combine(Store.Root,"recheck-"+Guid.NewGuid().ToString("N")+".json"));
+                // Keep the invalid evidence at the sampling boundary now that begin refreshes live usage.
+                Field("sampleOverride").SetValue(monitor,(Func<MemorySnapshot>)(()=>sample));
+                Field("ledgerPath").SetValue(monitor,Path.Combine(owned,"recheck-"+Guid.NewGuid().ToString("N")+".json"));
                 var denied=false;try{handle.Invoke(monitor,[new Request("begin",Guid.NewGuid(),Attempt:item.Id)]);}catch(System.Reflection.TargetInvocationException ex)when(ex.InnerException is IOException){denied=true;}
                 Assert(denied&&entry.State=="Pending","begin consumed a grant with invalid resource evidence");
             }
@@ -301,8 +346,8 @@ internal static class Integration
             CommandSpec command;try{command=Commands.Resolve("pi",new(){Arguments=["--version"]});}catch(Exception e){throw new Exception($"pi resolved path: {found??"<null>"}; {e.Message}");}
             var result=await ControlledCommand.RunAsync(command,cwd);Assert(result.Code==0&&result.Output.Trim().Length>0,result.Error);evidence.Add(new{name="pi-version",output=result.Output.Trim()});
         });
-        await Test("Real Omp and Codex capability probes gate presets by version",async()=>{
-            foreach(var agent in new[]{"omp","codex"})
+        await Test("Real Omp Codex and Qoder capability probes gate presets by version",async()=>{
+            foreach(var agent in new[]{"omp","codex","qoder"})
             {
                 var found=Commands.FindExe(Agents.Get(agent).Command);evidence.Add(new{name=agent+"-found",path=found});
                 if(found==null){evidence.Add(new{name=agent+"-probe",result="not installed"});continue;}
@@ -310,7 +355,7 @@ internal static class Integration
                 evidence.Add(new{name=agent+"-capability",version=capability.Version,note=capability.Note,fingerprint=capability.Fingerprint[..12]});
                 Assert(capability.Fingerprint.Length==64,$"{agent} fingerprint missing");
                 if(capability.Version==null)continue;
-                var verified=capability.Version is AgentPresets.OmpVerifiedVersion or AgentPresets.CodexVerifiedVersion;
+                var verified=agent switch {"omp"=>capability.Version is AgentPresets.OmpVerifiedVersion or AgentPresets.OmpCurrentVerifiedVersion,"qoder"=>capability.Version==AgentPresets.QoderVerifiedVersion,_=>capability.Version==AgentPresets.CodexVerifiedVersion};
                 Assert(capability.Presets.Count>0==verified&&capability.Presets.All(p=>p.AgentId==agent),$"{agent} presets offered outside its verified version");
                 if(verified)Assert(capability.Note.Contains("版本与预设已按此安装核对"),$"{agent} verified version not reported: {capability.Note}");
             }
