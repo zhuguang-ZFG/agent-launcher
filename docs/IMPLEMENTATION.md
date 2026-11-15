@@ -1212,5 +1212,5 @@ powershell -NoProfile -File scripts/test.ps1
 ## 66. 应用图标与窄态能力损失入档（2026-11-15，Asia/Shanghai）
 
 - 图标：`Assets/app.ico`（PIL 生成，256/64/48/32/24/16 六档 PNG 载荷，品牌 `>_` 主题 #7BD88A/#26282C）；`ApplicationIcon` 入 exe 资源，窗口 `Icon` 用 pack URI 引用同一 Resource，单一事实源。
-- 分屏资源问题（用户问）：实现实证——`PaneLayout.SplitSteps` 恒生成一条 wt 命令（1×new-tab + split-pane 网格），N 个 Agent 永远共用一个 Windows Terminal 窗口；不存在「逐个窗口」路径。分屏省掉的是每窗口终端进程开销（N−1 份渲染/GPU 表面）；pane 级 cmd/agent 进程相同，准入排队逻辑不受影响。
+- 分屏资源问题（用户问）：实现实证——`TerminalCommands.ComposeTerminalArguments` 以 `-w agent-<BatchId>` 指定同一命名窗口，`SubmitTerminal` 逐 pane 各 `Process.Start` 一次短生命周期 wt 客户端（claim 确认后顺序提交下一个），客户端经 `-w` 汇聚进**同一个 Windows Terminal 窗口**（多 pane 时 `--maximized`）；不存在「每 Agent 一个窗口」路径。因此省的是「每窗口一套终端渲染宿主」的开销——N 个 Agent 始终 1 个窗口/布局宿主；wt 客户端进程即起即退可忽略。未做同机多窗口对照测量，不给量化数字；pane 级 cmd/agent 进程两种形态相同，准入排队逻辑不受影响。
 - 评审收口：窄态（<900 逻辑 px）能力损失已写入设计 §6（更换项目按钮、⚙/更多/恢复备份不可达；拖拽换项目与「设置」保持可达）；§9 中圆点配色映射、摘要 ≤3+「全部…」截断两项尚无自动化断言（窄态 RailWidth==56 已被布局 JSON 检查覆盖）——列入待评审积压，不阻塞 v0.8 交付。
