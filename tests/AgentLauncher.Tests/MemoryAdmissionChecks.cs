@@ -265,6 +265,30 @@ internal static class MemoryAdmissionChecks
                 if (!child.Process.HasExited) { child.Process.Kill(true); child.Process.WaitForExit(5000); }
             }
         });
+        test("zero available readings are valid exhaustion evidence", () =>
+        {
+            Assert(ResourcePolicy.IsSampleValid(Sample(20 * gib, 0)), "physical exhaustion reading rejected");
+            Assert(ResourcePolicy.IsSampleValid(Sample(0)), "commit exhaustion reading rejected");
+            var practical = ResourcePolicy.SnapshotFor(new ResourceSettings { Mode = "practical" }, 16 * gib, 32 * gib);
+            var allowed = ResourcePolicy.Evaluate(Sample(20 * gib, 0), practical, [], [Item()]);
+            Assert(allowed.Kind == AdmissionKind.Allow && allowed.Advisory && !allowed.Reason.Contains("系统采样无效"),
+                "practical exhaustion was mislabeled as a sampler failure: " + allowed.Reason);
+            var denied = ResourcePolicy.Evaluate(Sample(20 * gib, 0), policy, [], [Item()]);
+            Assert(denied.Kind == AdmissionKind.Deny && !denied.Reason.Contains("系统采样无效"),
+                "conservative exhaustion was mislabeled as a sampler failure: " + denied.Reason);
+        });
+        test("cap overflow cannot hide behind advisory returns", () =>
+        {
+            var practical = ResourcePolicy.SnapshotFor(new ResourceSettings { Mode = "practical" }, 16 * gib, 32 * gib);
+            var huge = Item() with { JobMemoryLimit = ulong.MaxValue };
+            var shortfall = Sample(8 * gib, 256 * ResourcePolicy.MiB);
+            var over = ResourcePolicy.Evaluate(shortfall, practical, [huge], [huge]);
+            Assert(over.Kind == AdmissionKind.Deny && !over.Advisory && over.Reason.Contains("加总溢出"),
+                "physical advisory return bypassed overflow denial: " + over.Reason);
+            var begin = ResourcePolicy.Evaluate(shortfall, practical, [huge], [huge], includeSoftBudget: false);
+            Assert(begin.Kind == AdmissionKind.Deny && !begin.Advisory && begin.Reason.Contains("加总溢出"),
+                "begin-time admission bypassed overflow denial: " + begin.Reason);
+        });
     }
 
     private static void Wait(Func<bool> condition, string error)

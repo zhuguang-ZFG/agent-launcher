@@ -24,6 +24,49 @@ internal static class QoderMemoryChecks
                 Refuses(() => QoderMemoryGuard.IsAttached(attached with { Arguments = moved }), "changed plugin location accepted");
             }
         });
+        test("ACC-R11 Node.exe memory guard options follow the entry script", () =>
+        {
+            var extension = Path.Combine(AppContext.BaseDirectory, OmpMemoryGuard.ExtensionFile);
+            foreach (var executable in new[] { @"C:\fake\node.exe", @"C:\fake\NODE.EXE" })
+                foreach (var script in new[] { @"C:\fake\cli.js", @"C:\fake\cli.cjs", @"C:\fake\cli.mjs" })
+                {
+                    var original = new CommandSpec(executable, [script, "--flag"], "exe");
+                    var omp = OmpMemoryGuard.Attach(original);
+                    Assert(omp.Arguments[0] == script && omp.Arguments[1] == "--extension" && omp.Arguments[2] == extension && omp.Arguments[3] == "--flag", "Omp guard options were not placed after the Node entry script");
+                    Assert(OmpMemoryGuard.IsAttached(omp), "Omp marker after the entry script was not recognized");
+                    Assert(OmpMemoryGuard.Detach(omp).Arguments.SequenceEqual(original.Arguments), "Omp detach did not restore the Node entry argv");
+                    var qoder = QoderMemoryGuard.Attach(original);
+                    Assert(qoder.Arguments[0] == script && qoder.Arguments[1] == "--plugin-dir" && qoder.Arguments[2] == QoderMemoryGuard.PluginPath && qoder.Arguments[3] == "--flag", "Qoder guard options were not placed after the Node entry script");
+                    Assert(QoderMemoryGuard.IsAttached(qoder), "Qoder marker after the entry script was not recognized");
+                    Assert(QoderMemoryGuard.Detach(qoder).Arguments.SequenceEqual(original.Arguments), "Qoder detach did not restore the Node entry argv");
+                }
+        });
+        test("ACC-R11 plain exe memory guard options stay at argv[0]", () =>
+        {
+            var omp = OmpMemoryGuard.Attach(new CommandSpec(@"C:\fake\omp.exe", ["--flag"], "exe"));
+            Assert(omp.Arguments[0] == "--extension" && omp.Arguments[2] == "--flag", "Omp plain exe insertion point changed");
+            var qoder = QoderMemoryGuard.Attach(new CommandSpec(@"C:\fake\qoder.exe", ["--flag"], "exe"));
+            Assert(qoder.Arguments[0] == "--plugin-dir" && qoder.Arguments[2] == "--flag", "Qoder plain exe insertion point changed");
+            Assert(QoderMemoryGuard.Attach(new CommandSpec(@"C:\fake\node.exe", ["--flag"], "exe")).Arguments[0] == "--plugin-dir", "Node.exe without an entry script was treated as script-first");
+        });
+        test("ACC-R11 Node.exe without an entry script is rejected for guarded agents", () =>
+        {
+            var directory = Path.Combine(temp, "node-entry");Directory.CreateDirectory(directory);
+            var node = Path.Combine(directory, "node.exe");File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), node);
+            var script = Path.Combine(directory, "cli.js");File.WriteAllText(script, "// entry");
+            const string expected = "Node.exe 手动配置必须以入口脚本（.js/.cjs/.mjs）作为第一个参数，否则无法附加内存保护组件。";
+            void Rejected(Action action, string message)
+            {
+                try { action(); }
+                catch (IOException e) { Assert(e.Message == expected, message);return; }
+                throw new Exception(message);
+            }
+            Rejected(() => Commands.Resolve("omp", new() { Executable = node, Arguments = ["--flag"] }), "Omp accepted Node.exe without an entry script");
+            Rejected(() => Commands.Resolve("qoder", new() { Executable = node }), "Qoder accepted Node.exe without an entry script");
+            var resolved = Commands.Resolve("qoder", new() { Executable = node, Arguments = [script, "--flag"] });
+            Assert(resolved.Adapter == "exe" && resolved.Arguments[0] == script && resolved.Arguments[1] == "--plugin-dir" && resolved.Arguments[3] == "--flag", "guarded Node.exe plan did not keep the entry script first");
+            Assert(QoderMemoryGuard.IsAttached(resolved) && QoderMemoryGuard.Detach(resolved).Arguments.SequenceEqual(new[] { script, "--flag" }), "guarded Node.exe plan lost its marker round-trip");
+        });
         test("ACC-R11 generated Qoder plugin is additive immutable and uses exec argv", () =>
         {
             var storage = Path.Combine(temp, "qoder plugin space & quote '");Directory.CreateDirectory(storage);

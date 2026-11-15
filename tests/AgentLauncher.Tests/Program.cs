@@ -176,6 +176,25 @@ Test("P01 unavailable CPU sends a readable fail-closed resource response",()=>{
         Assert(!reply.Ok&&reply.Memory==null&&reply.Decision==nameof(AdmissionKind.Deny),"unknown sample became a launch authorization");
     }
 });
+Test("P01 pagination rejects an admission-state flip between frames",()=>{
+    var entry=new ControlEntry{Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),0,"page",temp,new(temp,"workspace"),false,new CommandSpec(Path.Combine(Environment.SystemDirectory,"cmd.exe"),[],"exe"),2*ResourcePolicy.GiB)};
+    var first=new Response(true,"",[entry],Epoch:"page",StatusSignature:"sig",More:true);
+    Response Read(Response second)
+    {
+        using var stream=new MemoryStream();
+        Ipc.WriteAsync(stream,first,default).GetAwaiter().GetResult();
+        Ipc.WriteAsync(stream,second,default).GetAwaiter().GetResult();
+        stream.Position=0;return Ipc.ReadResponseAsync(stream,default).GetAwaiter().GetResult();
+    }
+    foreach(var second in new[]{first with{More=false,AdmissionPressure=true},first with{More=false,AdmissionHardBlockedReason="hard-blocked"}})
+    {
+        var rejected=false;
+        try{Read(second);}catch(IOException e){rejected=e.Message=="协议分页帧不一致，已拒绝混合响应。";}
+        Assert(rejected,"mixed admission state was assembled from pages");
+    }
+    var assembled=Read(first with{More=false});
+    Assert(!assembled.More&&assembled.Entries is {Length:2},"identical pages did not assemble");
+});
 Test("F15 profile switching",()=>{var c=new Configuration();c.Edit(d=>d.Slots[0].Profiles["pi"]=new(){Executable="pi.exe",Arguments=["--pi"]});c.Edit(d=>d.Slots[0].AgentId="codex");Assert(c.Draft.Slots[0].Current.Executable=="","stale executable");c.Edit(d=>d.Slots[0].AgentId="pi");Assert(c.Draft.Slots[0].Current.Arguments[0]=="--pi","lost profile");});
 Test("F16/F17 full snapshots and LastEdited",()=>{var c=new Configuration();c.Edit(d=>{d.Slots.ForEach(s=>s.Enabled=false);d.Slots[3].Enabled=true;d.DirectoryMode="prepared";});c.SaveTemplate("a");c.Restore(new());c.Restore(new());c.Restore(c.LastEdited!);Assert(c.Draft.Slots[3].Enabled&&!c.Draft.Slots[0].Enabled&&c.Draft.DirectoryMode=="prepared","snapshot lost");c.Edit(d=>d.DirectoryMode="shared");Assert(c.Templates["a"].DirectoryMode=="prepared","snapshot aliases draft");});
 Test("P low memory rejects without spawning",()=>{var total=16*ResourcePolicy.GiB;MemorySnapshot Low()=>new(total,ResourcePolicy.GiB,32*ResourcePolicy.GiB,20*ResourcePolicy.GiB,10,DateTimeOffset.UtcNow);ResourcePolicySnapshot Snap(string mode)=>new(mode,ResourcePolicy.DefaultJobMemoryLimit,ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultPhysicalFloor(total),ResourcePolicy.DefaultCommitFloor(32*ResourcePolicy.GiB),ResourcePolicy.DefaultCpuRate,ResourcePolicy.GitJobMemoryLimit,ResourcePolicy.DefaultGitPlanningBytes);var request=new BudgetItem[]{new(Guid.NewGuid(),"agent",ResourcePolicy.DefaultPlanningBytes,ResourcePolicy.DefaultJobMemoryLimit)};var practical=ResourcePolicy.Evaluate(Low(),Snap("practical"),[],request);Assert(practical.Kind==AdmissionKind.Allow&&practical.Advisory,"practical low memory blocked or lost its advisory: "+practical.Reason);var d=ResourcePolicy.Evaluate(Low(),Snap("conservative"),[],request);Assert(d.Kind==AdmissionKind.Deny,"conservative low memory allowed");});

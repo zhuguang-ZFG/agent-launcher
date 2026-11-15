@@ -111,7 +111,9 @@ internal static class AdmissionIntegration
             {
                 await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: item.Id));
             }
-            var seventeen = Enumerable.Range(0, 17).Select(i => Item("n17-" + i,i+1)).ToArray();
+            // 17 items exceed MaxSlots and must be rejected before any launch; slot position stays at the default so
+            // constructing the batch itself cannot index past the authority slot list (this assert never ran before).
+            var seventeen = Enumerable.Range(0, 17).Select(i => Item("n17-" + i)).ToArray();
             var overflowCount = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), seventeen, Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest(seventeen), DraftRevision: 3));
             Assert(!overflowCount.Ok && overflowCount.Message.Contains("数量"), "17 items accepted: " + overflowCount.Message);
             SaveAuthority();
@@ -154,7 +156,9 @@ internal static class AdmissionIntegration
             Assert(blocked.Ok, blocked.Message);
             try
             {
-                var items = Enumerable.Range(0, 3).Select(i => Item("conflict-" + i,i+1) with { Shared = false }).ToArray();
+                // The conflict batch shares its directory internally; only the non-shared blocker collides with it.
+                // Marking the batch itself non-shared made it self-conflict on retry, so the retry assert never ran.
+                var items = Enumerable.Range(0, 3).Select(i => Item("conflict-" + i,i+1)).ToArray();
                 var conflict = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), items, Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest(items), DraftRevision: 3));
                 Assert(!conflict.Ok && conflict.Message.Contains("占用"), "expected directory conflict, got " + conflict.Message);
                 await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: blocker.Id));
@@ -237,6 +241,153 @@ internal static class AdmissionIntegration
             var survived = status.Entries ?? [];
             Assert(items.All(i => survived.Any(e => e.Plan.Id == i.Id)), "ledger entries were lost across monitor restart");
             foreach (var item in items) { try { await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: item.Id)); } catch { } }
+        });
+
+        // The fixed fake sample (12 GiB available, 24 GiB commit available, 5% CPU) cannot be pushed below any
+        // authority-valid floor: overrides are rejected above min(total/2, 8 GiB), so an out-of-process monitor can never
+        // latch pressure in this harness. Pressure is therefore latched on a directly constructed monitor, exactly as CR-N01
+        // does, and the IPC monitor is only used to prove the two new status fields cross the wire.
+        await Test("ACC-R07 latched pressure gates reservations by the entry's frozen mode, not the global mode", async () =>
+        {
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var monitorType = System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe", ".dll", StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor", true)!;
+            object? Invoke(object monitor, string name, params object?[] args)
+            {
+                try { return (monitorType.GetMethod(name, flags) ?? throw new MissingMethodException(name)).Invoke(monitor, args); }
+                catch (System.Reflection.TargetInvocationException e) when (e.InnerException != null)
+                {
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+                    throw;
+                }
+            }
+            void Set(object monitor, string field, object? value) => monitorType.GetField(field, flags)!.SetValue(monitor, value);
+            T Get<T>(object monitor, string field) => (T)monitorType.GetField(field, flags)!.GetValue(monitor)!;
+            var sample = new MemorySnapshot(16 * ResourcePolicy.GiB, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 5, DateTimeOffset.UtcNow);
+            var taskPath = Store.FilePath("tasks.json");
+            Response? granted = null;
+            string? practicalRefusal = null;
+            string? conservativeRefusal = null;
+            SaveAuthority(new ResourceSettings { Mode = "conservative" });
+            try
+            {
+                var command = new CommandSpec(Environment.ProcessPath!, ["--hold", "1"], "exe");
+                var profile = new AgentProfile { Executable = command.Executable, Arguments = command.Arguments };
+                var book = new TaskBook();
+                var practicalTask = TaskBookOps.Create(book, "frozen practical", cwd, "custom", profile, "", [], "shared", new ResourceSettings { Mode = "practical" }, 0);
+                var practicalQueue = TaskBookOps.Enqueue(book, practicalTask.Id, command, AgentProbe.Fingerprint(command));
+                var conservativeTask = TaskBookOps.Create(book, "frozen conservative", cwd, "custom", profile, "", [], "shared", new ResourceSettings { Mode = "conservative" }, 0);
+                var conservativeQueue = TaskBookOps.Enqueue(book, conservativeTask.Id, command, AgentProbe.Fingerprint(command));
+                Store.Save(taskPath, book);
+                var fixture = Activator.CreateInstance(monitorType, true)!;
+                try
+                {
+                    Set(fixture, "ledger", new Ledger());
+                    Set(fixture, "ledgerPath", Store.FilePath("admission-pressure-" + Guid.NewGuid().ToString("N") + ".json"));
+                    Set(fixture, "configurationPath", Store.FilePath("configuration.json"));
+                    Set(fixture, "sample", sample);
+                    Set(fixture, "rootCpuRate", ResourcePolicy.DefaultCpuRate);
+                    var tracker = Get<PressureTracker>(fixture, "pressureTracker");
+                    void Latch()
+                    {
+                        // Three high readings cross the tracker's hysteresis; a later healthy sample only starts the five-sample
+                        // recovery streak, so the latch survives every admission probe in this test.
+                        for (var i = 0; i < 3; i++) tracker.Observe(sample with { CpuPercent = 95 }, ResourcePolicy.DefaultPhysicalFloor(sample.Total));
+                        Assert(tracker.Pressure, "pressure fixture did not latch");
+                    }
+                    Latch();
+                    var status = (Response)Invoke(fixture, "Handle", new Request("status", Guid.NewGuid()))!;
+                    Assert(status.AdmissionPressure, "status did not expose the raw pressure latch");
+                    Assert(status.AdmissionBlockedReason?.Contains("资源压力尚未连续恢复，稍后重新检查。") == true, "global conservative mode did not report the pressure blocker: " + (status.AdmissionBlockedReason ?? "<null>"));
+                    Assert(status.AdmissionHardBlockedReason == null, "pressure was reported as a hard admission reason: " + (status.AdmissionHardBlockedReason ?? "<null>"));
+                    var viaIpc = await Ipc.EnsureMonitorAsync();
+                    Assert(viaIpc.Ok && !viaIpc.AdmissionPressure && viaIpc.AdmissionHardBlockedReason == null, "idle monitor reported an unexpected pressure or hard blocker: " + viaIpc.Message);
+                    var practicalPlan = Item("frozen-practical") with { SourceSlotId = practicalTask.Id, AgentId = practicalTask.AgentId, Command = command, ResourceMode = "practical" };
+                    var practicalPolicy = ResourcePolicy.SnapshotFor(practicalQueue.Resource, sample.Total, sample.CommitLimit);
+                    Latch();
+                    try
+                    {
+                        granted = (Response)Invoke(fixture, "Handle", new Request("reserve-task", Guid.NewGuid(), [practicalPlan], Policy: practicalPolicy, PolicyHash: ResourcePolicy.PolicyHash(practicalPolicy), PlanDigest: ResourcePolicy.PlanDigest([practicalPlan]), TaskEntryId: practicalQueue.Id))!;
+                    }
+                    catch (IOException e) { practicalRefusal = e.Message; }
+                    Assert(practicalRefusal is null && granted?.Ok == true, "frozen practical queue task was hard-blocked by latched pressure: " + (practicalRefusal ?? granted?.Message));
+                    var conservativePlan = Item("frozen-conservative") with { SourceSlotId = conservativeTask.Id, AgentId = conservativeTask.AgentId, Command = command, ResourceMode = "conservative" };
+                    var conservativePolicy = ResourcePolicy.SnapshotFor(conservativeQueue.Resource, sample.Total, sample.CommitLimit);
+                    Latch();
+                    try
+                    {
+                        _ = Invoke(fixture, "Handle", new Request("reserve-task", Guid.NewGuid(), [conservativePlan], Policy: conservativePolicy, PolicyHash: ResourcePolicy.PolicyHash(conservativePolicy), PlanDigest: ResourcePolicy.PlanDigest([conservativePlan]), TaskEntryId: conservativeQueue.Id));
+                    }
+                    catch (IOException e) { conservativeRefusal = e.Message; }
+                    Assert(conservativeRefusal == "资源压力尚未连续恢复，稍后重新检查。", "frozen conservative queue task was not refused by latched pressure: " + (conservativeRefusal ?? "<accepted>"));
+                }
+                finally { ((IDisposable)fixture).Dispose(); }
+            }
+            finally
+            {
+                Store.Save(taskPath, new TaskBook());
+                SaveAuthority();
+            }
+        });
+
+        await Test("R21 legacy ledger with nine pending agents is refused at begin and eight still begins", async () =>
+        {
+            SaveAuthority();
+            var controlPath = Store.FilePath("control.json");
+            Ledger LedgerFor(int count)
+            {
+                var ledger = new Ledger { BootId = Store.BootId() };
+                for (var index = 0; index < count; index++)
+                {
+                    var plan = Item("legacy-" + index, index + 1);
+                    ledger.Entries.Add(new ControlEntry { Plan = plan, Digest = Store.Digest(plan), State = "Pending" });
+                }
+                return ledger;
+            }
+            void StopMonitor()
+            {
+                var pid = Store.Read<int>(Store.FilePath("monitor-pid.json"));
+                using var process = System.Diagnostics.Process.GetProcessById(pid);
+                process.Kill();
+                Assert(process.WaitForExit(5000), "monitor did not exit before the crafted ledger was published");
+            }
+            async Task StartWith(Ledger ledger)
+            {
+                // Ledgers written before the 8-pane cap cannot be produced through reserve, so the crafted book is published
+                // while no monitor holds it in memory; the order (stop, publish, start) is what makes the load authoritative.
+                StopMonitor();
+                Store.Save(controlPath, ledger);
+                var started = await Ipc.EnsureMonitorAsync();
+                Assert(started.Ok, "monitor did not load the crafted ledger: " + started.Message);
+            }
+            await StartWith(LedgerFor(9));
+            var nine = Store.Read<Ledger>(controlPath)!;
+            var refused = await Ipc.SendAsync(new("begin", Guid.NewGuid(), Attempt: nine.Entries[0].Plan.Id));
+            Assert(!refused.Ok && refused.Message.Contains($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个"), "nine pending agents were not refused at begin: " + refused.Message);
+            var retained = Store.Read<Ledger>(controlPath)!;
+            Assert(retained.Entries.Count == 9 && retained.Entries.All(entry => entry.State == "Pending"), "refused begin changed or consumed the legacy ledger");
+            await StartWith(LedgerFor(8));
+            var eight = Store.Read<Ledger>(controlPath)!;
+            var began = await Ipc.SendAsync(new("begin", Guid.NewGuid(), Attempt: eight.Entries[0].Plan.Id));
+            Assert(began.Ok, "eight pending agents were refused at begin: " + began.Message);
+            var cleanup = Store.Read<Ledger>(controlPath)!;
+            // The begun entry is Creating: only Pending entries can be revoked, while an unstarted Creating grant settles as
+            // FailedBeforeStart on the monitor's next refresh (no receipt, no job member). Wait for that tick before reading.
+            foreach (var entry in cleanup.Entries.Where(entry => entry.State == "Pending"))
+            {
+                var revoked = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: entry.Plan.Id));
+                Assert(revoked.Ok, "cleanup revoke failed: " + revoked.Message);
+            }
+            var allTerminal = false;
+            var openStates = "";
+            for (var attempt = 0; attempt < 50 && !allTerminal; attempt++)
+            {
+                var probe = await Ipc.SendAsync(new("status", Guid.NewGuid()));
+                var open = probe.Entries?.Where(entry => !Store.IsTerminal(entry)).ToArray() ?? [];
+                openStates = string.Join(",", open.Select(entry => entry.State));
+                allTerminal = open.Length == 0;
+                if (!allTerminal) await Task.Delay(100);
+            }
+            Assert(allTerminal, "legacy fixture entries were not revoked or settled after cleanup: " + openStates);
         });
 
         Store.Save(Path.Combine(Store.Root, "admission-integration-results.json"), evidence);
