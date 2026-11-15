@@ -274,6 +274,26 @@ public partial class MainWindow
         Check("rail row selection drives the detail row",AutomationProperties.GetName(Find<ComboBox>(SlotList).First())=="第 3 项 Agent"&&SlotList.Children.Count==1);
         Render();
         Check("rail keeps exactly one detail row",SlotList.Children.Count==1);
+        // Rail refresh seams: the polling/task fan-outs must update the rail without a full Render(). Probes must not weaken the final launch guard, so the real snapshot is restored via finally.
+        var savedStatus=status;var savedBook=taskBook;
+        try
+        {
+            RailResourceText.Text="rail-stale-marker";
+            await RefreshLocalPreviewAsync();
+            Check("rail resource pill follows preview refresh",RailResourceText.Text.Contains("可用")&&RailResourceText.Text.EndsWith("GiB"));
+            var railTaskId=Guid.NewGuid();
+            taskBook=new(){Revision=1,Tasks=[new(){Id=railTaskId,Revision=1,Name="rail-queue-probe",Project=Store.Root}],Queue=[new(){Id=Guid.NewGuid(),TaskId=railTaskId,TaskRevision=1,Priority=1,Sequence=1,EnqueuedAt=DateTimeOffset.UtcNow,Project=Store.Root}]};
+            RenderTasks();
+            Check("rail queue follows task render",FindLogical<TextBlock>(RailQueue).Any(t=>t.Text.Contains("rail-queue-probe")));
+            status=new(true,"rail probe",[new(){Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"rail-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Started"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
+            RenderMonitorStatus();
+            Check("rail sessions follow monitor refresh",FindLogical<TextBlock>(RailSessions).Any(t=>t.Text.Contains("rail-session-probe")));
+        }
+        finally
+        {
+            taskBook=savedBook;RenderTasks();
+            status=savedStatus;RenderMonitorStatus();
+        }
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});Close();
     }

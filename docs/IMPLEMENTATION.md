@@ -1199,3 +1199,11 @@ powershell -NoProfile -File scripts/test.ps1
 - 验证：Release 构建 0 警 0 错；INTEGRATION_TESTS 发布 0 错；`--ui-check` 两轮退出 0、**279/279 通过**（274 基线 + 2 修复轮新增 + 3 新 Rail 检查）；`node --test tests/prototype.test.cjs` 5/0；`scripts/test-browser.mjs` 5 PASS；内存：ui-idle-memory PrivateBytes 134.6 MiB 对 §60 基线 130.8（+3.8，≤5 预算内）；WorkingSet 199.7 对 193.0（+6.7，同构建两次运行即存在 ±7 MiB 方差，判定为噪声带内）。
 - 待评审决策：草稿整体替换（模板/备份/重载）时选中回退第 1 项（MainWindow.xaml.cs:205-214，与应用内 Edit/点击选中保持选中互补）；参数编辑仍只走详情对话框（不复制第二套结构化参数编辑器）；窄模式隐藏项目卡/会话摘要/资源 pill（设置按钮保留可达）；Rail 摘要有界（≤3+全部…）。
 - task_verify：unverified（`project-or-git-baseline-unavailable`，checks=[]）；上述夹具变更均为待评审基线。
+- 门禁：`scripts/test.ps1` 全量 **GATE_EXIT=0**（552.9s，权威日志 `artifacts/gate-20261115-v08.log`，零 FAIL 行）：原生/模型 183/0、修复检查 36/0、Integration failures: 0，UI（279/279）/node/浏览器各段由 test.ps1 逐段检查通过。
+
+## 65. v0.8 随访：Rail 轮询刷新接缝与同口径内存核验（2026-11-15，Asia/Shanghai）
+
+- 缺陷（评审发现）：`RenderRail()` 原仅在 `Render()` 内调用；轮询路径（`RefreshLocalPreviewAsync`/`RefreshMonitorAsync` 成败与状态读取失败分支）与任务渲染路径（`RenderTasks`、队列泵收尾）更新 status/taskBook 时不刷新 Rail——资源 pill、会话与队列摘要在正常采样与调度期间停滞，仅当用户编辑/选中才更新。
+- 修复：五条轮询分支补 `RenderRail()`；`RefreshMonitorAsync` 成功路径统一走新缝合方法 `RenderMonitorStatus()`（RenderSessions+RenderRail+UpdateLaunch，MainWindow.xaml.cs:506）；`RenderTasks` finally 与队列泵收尾各补一次。零新增 I/O/采样，复用既有渲染周期。
+- 回归（RED→GREEN）：`UiChecks` 新增 3 项——pill 跟随预览刷新（先置 `rail-stale-marker` 防既有文本真空通过）、队列跟随任务渲染（合成 taskBook + `RenderTasks()`）、会话跟随监控刷新（合成 Started 条目 + `RenderMonitorStatus()`）；探针前以 `savedStatus/savedBook` 存现场、`finally` 恢复真实快照（初版曾恢复为空快照，会架空「UI checks do not launch agents」守卫，经评审指出后改为恢复探针前真实状态，守卫语义不变）。RED：摘除 3 处挂钩后「rail queue follows task render」如期失败（EXIT=1）；恢复后 **282/282** 全绿（274 基线 + 2 修复轮 + 3 Rail + 3 刷新接缝）。
+- 内存同口径核验（修正 §64 的不严谨表述）：§64 以不同运行的数值对比并断言「±7 MiB 噪声带」，方法不成立。现以 worktree 旧版 `2c32dd6`（v0.7）与最终树同机、同 ui-check 夹具、背靠背各跑一次取 `ui-idle-memory.json`：v0.7 PrivateBytes 132.2 MiB / WorkingSet 203.8 MiB；v0.8 134.6 / 199.7。同指标增量 **PrivateBytes +2.4 MiB（+1.8%）、WorkingSet −4.1 MiB**——无增长趋势，§10 收敛目标按此同口径证据判定达成；§64 的「+3.8 ≤5 预算内/噪声带」表述作废。测量环境说明：v0.7 套件在同一 run 后段于 ACC-U07（真实终端启动）失败一次，判定为 worktree 路径环境敏感；内存快照在其之前按固定点采集，不受影响。

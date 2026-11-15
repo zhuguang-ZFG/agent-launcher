@@ -67,6 +67,7 @@ public partial class MainWindow
             status = new(false, commError, status?.Entries);
             previewOnly = false;
             ErrorText.Text = commError;
+            RenderRail();
             UpdateLaunch();
         }
     }
@@ -97,12 +98,14 @@ public partial class MainWindow
             // This is display/preflight input only. LaunchAsync always obtains monitor authority before preparing/reserving.
             status = new(true, "本机资源预览；启动前重新核验", status?.Entries ?? [], memory);
             previewOnly = true;
+            RenderRail();
             UpdateLaunch();
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
             status = new(false, "本机资源采样失败 · " + e.Message, status?.Entries);
             previewOnly = true;
+            RenderRail();
             UpdateLaunch();
         }
         finally { refreshing = false; }
@@ -141,8 +144,7 @@ public partial class MainWindow
             if (commError != null && ErrorText.Text == commError) ErrorText.Text = "";
             commError = response.Ok ? null : response.Message;
             if (commError != null) ErrorText.Text = commError;
-            RenderSessions();
-            UpdateLaunch();
+            RenderMonitorStatus();
         }
         catch (Exception e) when (e is IOException or OperationCanceledException or TimeoutException)
         {
@@ -152,6 +154,7 @@ public partial class MainWindow
             status = new(false, commError, previous?.Entries, Epoch: previous?.Epoch);
             previewOnly = false;
             ErrorText.Text = commError;
+            RenderRail();
             UpdateLaunch();
         }
         finally { refreshing = false; }

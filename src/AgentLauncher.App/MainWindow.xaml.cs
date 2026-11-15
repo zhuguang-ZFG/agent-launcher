@@ -502,6 +502,8 @@ public partial class MainWindow : Window
         var task=RefreshMonitorAsync();resourceRefreshTask=task;
         try{await task;}finally{if(ReferenceEquals(resourceRefreshTask,task))resourceRefreshTask=null;}
     }
+    // Monitor-status fan-out: the polling seam refreshes sessions, the rail summary and the launch gate together.
+    private void RenderMonitorStatus(){RenderSessions();RenderRail();UpdateLaunch();}
     private void RenderSessions()
     {
         var entries=status?.Entries??[];var signature=string.Join("|",entries.Select(e=>$"{e.Plan.Id}:{e.State}:{e.Detail}:{(e.State=="Pending"&&DateTimeOffset.UtcNow-e.Created>TimeSpan.FromSeconds(10))}"));

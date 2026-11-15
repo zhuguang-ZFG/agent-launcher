@@ -70,7 +70,7 @@ public partial class MainWindow
     private void RenderTasks()
     {
         renderingTasks = true;
-        try { RenderTaskCards(); } finally { renderingTasks = false; UpdateQuickQueueButton(); RenderSessions(); }
+        try { RenderTaskCards(); } finally { renderingTasks = false; UpdateQuickQueueButton(); RenderSessions(); RenderRail(); }
     }
 
     private void RenderTaskCards()
@@ -405,7 +405,7 @@ public partial class MainWindow
             queueCancellation = null;
             cancellation.Dispose();
             UpdateQuickQueueButton();
-            if (taskBook is not null) RenderQueueEntries(taskBook);
+            if (taskBook is not null) { RenderQueueEntries(taskBook); RenderRail(); }
         }
     }
 
