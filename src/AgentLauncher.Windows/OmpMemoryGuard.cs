@@ -25,7 +25,7 @@ public sealed class OmpMemoryGuard : IDisposable
     {
         var path = Path.Combine(AppContext.BaseDirectory, ExtensionFile);
         if (!File.Exists(path)) throw new IOException("启动器缺少 Omp 内存保护组件，请使用完整发布包。");
-        var offset = command.Adapter == "node-shim" ? 1 : 0;
+        var offset = Commands.MemoryGuardInjectionOffset(command);
         var flag = command.Arguments.Skip(offset).TakeWhile(arg => arg != "--").Any(arg => arg == "--trusted-extension" || arg.StartsWith("--trusted-extension=", StringComparison.Ordinal))
             ? "--trusted-extension" : "--extension";
         return command with { Arguments = [..command.Arguments.Take(offset), flag, path, ..command.Arguments.Skip(offset)] };
@@ -33,7 +33,7 @@ public sealed class OmpMemoryGuard : IDisposable
     /// <summary>Inverse of <see cref="Attach"/>: version probes run the bare CLI, while plan identity keeps the injected arguments.</summary>
     public static CommandSpec Detach(CommandSpec command)
     {
-        var offset = command.Adapter == "node-shim" ? 1 : 0;
+        var offset = Commands.MemoryGuardInjectionOffset(command);
         if (command.Arguments.Length > offset + 1 && command.Arguments[offset] is "--extension" or "--trusted-extension"
             && string.Equals(Path.GetFileName(command.Arguments[offset + 1]), ExtensionFile, StringComparison.OrdinalIgnoreCase))
             return command with { Arguments = [.. command.Arguments.Take(offset), .. command.Arguments.Skip(offset + 2)] };
@@ -41,7 +41,7 @@ public sealed class OmpMemoryGuard : IDisposable
     }
     public static bool IsAttached(CommandSpec command)
     {
-        var offset = command.Adapter == "node-shim" ? 1 : 0;
+        var offset = Commands.MemoryGuardInjectionOffset(command);
         if (command.Arguments.Length <= offset + 1 || command.Arguments[offset] is not ("--extension" or "--trusted-extension")
             || !string.Equals(Path.GetFileName(command.Arguments[offset + 1]), ExtensionFile, StringComparison.OrdinalIgnoreCase)) return false;
         // Frozen queues may refer to an identical component in another complete package.

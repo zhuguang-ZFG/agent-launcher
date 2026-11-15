@@ -20,27 +20,26 @@ public static class QoderMemoryGuard
 
     public static CommandSpec Attach(CommandSpec command)
     {
-        var offset = command.Adapter == "node-shim" ? 1 : 0;
+        var offset = Commands.MemoryGuardInjectionOffset(command);
         return command with { Arguments = [..command.Arguments.Take(offset), "--plugin-dir", PluginPath, ..command.Arguments.Skip(offset)] };
     }
 
     public static CommandSpec Detach(CommandSpec command)
     {
-        var offset = command.Adapter == "node-shim" ? 1 : 0;
-        return HasMarker(command) ? command with { Arguments = [..command.Arguments.Take(offset), ..command.Arguments.Skip(offset + 2)] } : command;
+        var offset = Commands.MemoryGuardInjectionOffset(command);
+        return HasMarker(command, offset) ? command with { Arguments = [..command.Arguments.Take(offset), ..command.Arguments.Skip(offset + 2)] } : command;
     }
 
-    private static bool HasMarker(CommandSpec command)
+    private static bool HasMarker(CommandSpec command, int offset)
     {
-        var offset = command.Adapter == "node-shim" ? 1 : 0;
         return command.Arguments.Length > offset + 1 && command.Arguments[offset] == "--plugin-dir"
             && Path.GetFileName(command.Arguments[offset + 1]).StartsWith(Prefix, StringComparison.Ordinal);
     }
 
     public static bool IsAttached(CommandSpec command)
     {
-        if (!HasMarker(command)) return false;
-        var offset = command.Adapter == "node-shim" ? 1 : 0;
+        var offset = Commands.MemoryGuardInjectionOffset(command);
+        if (!HasMarker(command, offset)) return false;
         if (!string.Equals(command.Arguments[offset + 1], PluginPath, StringComparison.OrdinalIgnoreCase))
             throw new IOException("排队记录的 Qoder 内存保护版本或位置已变化，请重新入队。");
         return true;

@@ -129,7 +129,7 @@ public static class Ipc
         {
             if(++frames>MaxResponseFrames)throw new IOException("协议分页帧数量超出边界。");
             var nextFrame=await ReadFrameAsync<Response>(stream,ct);var next=nextFrame.Message;
-            if(next.Ok!=first.Ok||next.Message!=first.Message||next.Memory!=first.Memory||next.Epoch!=first.Epoch||next.AdmissionBlockedReason!=first.AdmissionBlockedReason||next.StatusSignature!=first.StatusSignature||next.Unchanged!=first.Unchanged||next.RootCpuRate!=first.RootCpuRate||next.ReconcileOffered!=first.ReconcileOffered)throw new IOException("协议分页帧不一致，已拒绝混合响应。");
+            if(next.Ok!=first.Ok||next.Message!=first.Message||next.Memory!=first.Memory||next.Epoch!=first.Epoch||next.AdmissionBlockedReason!=first.AdmissionBlockedReason||next.StatusSignature!=first.StatusSignature||next.Unchanged!=first.Unchanged||next.RootCpuRate!=first.RootCpuRate||next.ReconcileOffered!=first.ReconcileOffered||next.AdmissionHardBlockedReason!=first.AdmissionHardBlockedReason||next.AdmissionPressure!=first.AdmissionPressure)throw new IOException("协议分页帧不一致，已拒绝混合响应。");
             if((first.Budgets is null)!=(next.Budgets is null)||(first.Budgets is not null&&!first.Budgets.SequenceEqual(next.Budgets!)))throw new IOException("协议资源读数不一致，已拒绝混合响应。");
             if(next.Entries is not {Length:>0})throw new IOException("协议分页帧缺少记录。");
             bytes+=nextFrame.Size;
@@ -272,12 +272,34 @@ public static partial class Commands
             }
     }
     public static IReadOnlyList<string> DiscoverInstalls(string name,IReadOnlyList<string>? extraDirs=null)=>EnumerateInstalls(name,extraDirs).ToArray();
+    private static bool IsNodeExecutable(string path)
+    {
+        var name=Path.GetFileName(path);
+        return name.Equals("node",StringComparison.OrdinalIgnoreCase)||name.Equals("node.exe",StringComparison.OrdinalIgnoreCase);
+    }
+    // Guard options must follow a Node entry script, otherwise Node parses them as its own options and exits.
+    // Name and extension only: a frozen plan must keep identical authority without touching the filesystem.
+    internal static int MemoryGuardInjectionOffset(CommandSpec command)
+    {
+        if(command.Adapter=="node-shim")return 1;
+        if(command.Arguments.Length==0||!IsNodeExecutable(command.Executable))return 0;
+        var extension=Path.GetExtension(command.Arguments[0]);
+        return extension.Equals(".js",StringComparison.OrdinalIgnoreCase)||extension.Equals(".cjs",StringComparison.OrdinalIgnoreCase)||extension.Equals(".mjs",StringComparison.OrdinalIgnoreCase)?1:0;
+    }
     public static CommandSpec Resolve(string agentId,AgentProfile profile)
     {
         var input=string.IsNullOrWhiteSpace(profile.Executable)?Agents.Get(agentId).Command:profile.Executable;
         var path=FindExe(input)??throw new FileNotFoundException($"未找到 {Agents.Get(agentId).Name} 命令，请选择程序位置。");
         CommandSpec Protect(CommandSpec command)=>agentId switch { "omp"=>OmpMemoryGuard.Attach(command), "qoder"=>QoderMemoryGuard.Attach(command), _=>command };
-        if(Path.GetExtension(path).Equals(".exe",StringComparison.OrdinalIgnoreCase))return Protect(new(path,profile.Arguments,"exe"));
+        if(Path.GetExtension(path).Equals(".exe",StringComparison.OrdinalIgnoreCase))
+        {
+            var command=new CommandSpec(path,profile.Arguments,"exe");
+            // A guarded agent configured as Node.exe must start with its entry script; otherwise Attach would prepend
+            // options Node rejects and the pane would silently fail. Surface the misconfiguration instead.
+            if((agentId is "omp" or "qoder")&&IsNodeExecutable(path)&&MemoryGuardInjectionOffset(command)==0)
+                throw new IOException("Node.exe 手动配置必须以入口脚本（.js/.cjs/.mjs）作为第一个参数，否则无法附加内存保护组件。");
+            return Protect(command);
+        }
         if(!Path.GetExtension(path).Equals(".cmd",StringComparison.OrdinalIgnoreCase))throw new IOException("首版只支持 exe 和已识别的 Node 启动脚本。");
         if(new FileInfo(path).Length>8192)throw new IOException("启动脚本超出适配范围。");
         var text=File.ReadAllText(path).Replace("\r\n","\n").Trim();var folder=Path.GetDirectoryName(path)!;
@@ -328,7 +350,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             var candidates=matches.Select(m=>m.Groups[1].Value).Distinct().ToArray();
             if(candidates.Length==1&&text==npmShim.Replace("{ENTRY}",candidates[0]).Replace("\r\n","\n"))script=Path.GetFullPath(Path.Combine(folder,candidates[0]));
         }
-        if(script==null||!File.Exists(script))throw new IOException("脚本适配未识别。请选择实际 exe，或选择 Node.exe 并逐项填写入口脚本与参数。");
+        if(script==null||!File.Exists(script))throw new IOException("脚本适配未识别。请选择实际 exe，或选择 Node.exe 并以入口脚本（.js/.cjs/.mjs）作为第一个参数。");
         // The npm shim itself prefers a sibling node.exe; the Pi shim always resolves node through PATH. Mirror each template's own selection semantics.
         var node=npmStyle&&File.Exists(Path.Combine(folder,"node.exe"))?Path.Combine(folder,"node.exe"):FindExe("node.exe")??throw new FileNotFoundException("未找到 Node.js。");
         return Protect(new(node,[script,..profile.Arguments],"node-shim"));
