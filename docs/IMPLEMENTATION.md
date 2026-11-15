@@ -1186,3 +1186,16 @@ powershell -NoProfile -File scripts/test.ps1
 ## 63. 浸泡证据：main@0a5bd4f 双任务保守模式 3×30 分钟（CI 环境）（2026-11-15，Asia/Shanghai）
 
 - workflow_dispatch 浸泡 run `43706410402`（soak.yml，main@0a5bd4f）completed success：校准 + 3 轮完整 30 分钟双任务保守模式准入。属 CI 托管环境证据，不等同 ACCEPTANCE §11 要求的本机代表性长稳；S0.6 状态保持未完成，待操作员安排本机代表性负载。
+
+## 64. UI 重新设计 v0.8：会话优先侧栏（2026-11-15，Asia/Shanghai）
+
+- 来源：用户要求「UI 重新设计；可以参考 GitHub 上相关项目的 UI 设计」，产品方向「简单、美观、实用；不占用内存最好」。参考 claude-squad / Conductor / hivemux 的「侧栏会话列表+主区详情」范式，经两轮用户确认（方向 A 会话/状态优先；批准 v0.8 稿并选择「按稿实施：先 HTML 原型对照，再改 WPF，检查夹具随新结构重写并记待评审」）。设计契约：`docs/UI-REDESIGN-v0.8.md`（元素迁移表、主题令牌、交互模型、§9 检查清单逐项映射）。
+- 结构：左侧 232px Rail（品牌行+设置、项目迷你卡、AGENT 索引（状态点+序号+名称+状态，点击选中）、会话与队列摘要（各 ≤3 行+全部…跳转）、资源 pill（模式+可用内存+更多+⚙））；主区 = 选中项详情行（SlotList 主从模型，恒 1 行，自动化名「第 N 项 Agent/工作目录/详情」模式不变）+ 常显分屏预览卡（Preview/PaneCount 移出折叠区）+ 四个既有折叠区原样 + 底栏不变。逻辑宽 <900 Rail 收为 56px 圆点条（设置与圆点行仍可达，项目卡/摘要/pill 隐藏）；<650 既有底栏/行内紧凑分支不变。新增主题令牌 StatusOk/StatusOff/StatusBad/RailSurface（亮/暗/高对比三组，进 ApplyTheme）。无 WebView、无新定时器/轮询/动画；Rail 摘要复用既有 Render 周期与缓存快照，不新增采样或 IPC。
+- 实现：4 个互不重叠文件切片并行（RailCore：App.xaml+MainWindow.xaml+xaml.cs；RailSections：新 MainWindow.Rail.cs（partial void RenderRail 实现，数据源复用 RenderSessions/RenderQueueEntries/LoadResourceViewAsync 缓存）；CheckMigration：UiChecks.cs 夹具迁移；PrototypeV08：docs/prototype.html）。集成所有者修复：Thickness 双参构造 4 处、Shapes.Path 与 IO.Path 歧义 4 处（含 INTEGRATION_TESTS 分支 2 处）、级联 CS0019 1 处、夹具选中复位缺口 1 处（见下）、品牌行挤压（设置留品牌行右侧，更多/恢复备份移入资源 pill）。只读审计 scout 对 7 个套件逐项核查：零破坏（退役名零引用、无多行 SlotList 假设、几何断言均 Preview/窗口相对）。
+- 测试基线变更（待评审；只增不削）：
+  - `UiChecks`：新增 `SelectRailSlot(n)` 夹具助手（点 Rail 行选中）；`.Last()` 用例改 `SelectRailSlot(4)`+`.First()`（断言不变），其后插 `SelectRailSlot(1)` 复位——后续 Agent 选择器/菜单/移除族均以选中第 1 项为前提（集成时发现的遗漏，RailCore 草稿替换回退第 1 项语义与其一致）；检查更名 `primary configuration fills width without a resource sidebar` → `…fills the main column without a right summary sidebar`（断言逐字不变，布局 JSON 增 RailWidth/SelectedSlotIndex 两字段）；末尾新增 3 项：Rail 索引完整且行名连续、Rail 行选中联动详情行、详情行恒 1。
+  - 截图与布局基线全部重新出图（native-{theme}-{width}.png ×4、native-text-{125,150}.png、layout-*.json），人工核对：深色/浅色、1040/800（窄模式 RailWidth=56、ConfigWidth==WorkWidth、SummaryColumn=0）/650 均符合稿。
+  - `docs/prototype.html` 重构为 v0.8 主从布局：非选中 .slot 行 `hidden`（DOM 钩子全保留，F15/F16/F17 浏览器断言逐字未动且仍绿）；`prototype-state.js` 未改。
+- 验证：Release 构建 0 警 0 错；INTEGRATION_TESTS 发布 0 错；`--ui-check` 两轮退出 0、**279/279 通过**（274 基线 + 2 修复轮新增 + 3 新 Rail 检查）；`node --test tests/prototype.test.cjs` 5/0；`scripts/test-browser.mjs` 5 PASS；内存：ui-idle-memory PrivateBytes 134.6 MiB 对 §60 基线 130.8（+3.8，≤5 预算内）；WorkingSet 199.7 对 193.0（+6.7，同构建两次运行即存在 ±7 MiB 方差，判定为噪声带内）。
+- 待评审决策：草稿整体替换（模板/备份/重载）时选中回退第 1 项（MainWindow.xaml.cs:205-214，与应用内 Edit/点击选中保持选中互补）；参数编辑仍只走详情对话框（不复制第二套结构化参数编辑器）；窄模式隐藏项目卡/会话摘要/资源 pill（设置按钮保留可达）；Rail 摘要有界（≤3+全部…）。
+- task_verify：unverified（`project-or-git-baseline-unavailable`，checks=[]）；上述夹具变更均为待评审基线。

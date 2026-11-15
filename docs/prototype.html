@@ -5,21 +5,177 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>多 Agent 启动器 · 交互设计稿</title>
 <style>
-:root{color-scheme:light;--bg:#f5f5f5;--surface:#fff;--raised:#eaeaea;--text:#202020;--secondary:#5f6368;--line:#7a7a7a;--divider:#dedede;--accent:#0067c0;--accent-text:#fff;--error:#b42318;--focus:#0067c0;--radius:4px}
-[data-theme=dark]{color-scheme:dark;--bg:#202020;--surface:#2b2b2b;--raised:#343434;--text:#f5f5f5;--secondary:#c5c5c5;--line:#8a8a8a;--divider:#484848;--accent:#60cdff;--accent-text:#002b40;--error:#ffb4ab;--focus:#60cdff}
-*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 'Segoe UI Variable','Segoe UI','Microsoft YaHei',sans-serif}button,input,select{font:inherit;color:inherit}button,select,input{min-height:36px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:6px 12px}button{cursor:pointer}button:hover{background:var(--raised)}button:active{filter:brightness(.96)}button:disabled{cursor:not-allowed;opacity:.55}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:3px}.primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent);min-height:40px}.primary:hover{background:var(--accent);filter:brightness(.94)}.quiet{background:transparent;border-color:transparent}.danger{color:var(--error)}.secondary{color:var(--secondary)}.mono{font-family:'Cascadia Mono',Consolas,monospace}.small{font-size:12px}.design-bar{border-bottom:1px solid var(--divider);padding:12px 24px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}.design-bar strong{font-size:14px;font-weight:600}.design-controls{display:flex;gap:8px;align-items:center;margin-left:auto;flex-wrap:wrap}.design-controls label{display:flex;gap:8px;align-items:center}.shell{max-width:1280px;margin:24px auto;border:1px solid var(--divider);border-radius:8px;background:var(--surface);overflow:hidden;min-height:650px}.titlebar{padding:16px 24px;display:flex;gap:24px;align-items:center;border-bottom:1px solid var(--divider)}h1{font-size:20px;font-weight:600;margin:0}.titlebar .template{display:flex;gap:8px;align-items:center}.titlebar .settings{margin-left:auto}.workspace{display:grid;grid-template-columns:200px 1fr;min-height:500px}.sidebar{background:var(--bg);padding:24px 16px;border-right:1px solid var(--divider)}h2{font-size:16px;font-weight:600;margin:0 0 12px}h3{font-size:14px;font-weight:600;margin:0 0 8px}.sidebar input{width:100%;margin-bottom:12px}.project{display:block;text-align:left;width:100%;border-color:transparent;margin-bottom:4px;background:transparent}.project[aria-pressed=true]{background:var(--raised);border-color:var(--line)}.project span{display:block;color:var(--secondary);font-size:12px}.content{min-width:0;padding:24px;display:grid;gap:24px;align-content:start}.drop{border:1px dashed var(--line);border-radius:8px;padding:16px;display:flex;justify-content:space-between;gap:16px;align-items:center;background:var(--bg)}.drop p{margin:0}.drop small{display:block;color:var(--secondary);margin-top:4px}.drop[data-drag=true]{outline:2px solid var(--focus)}.project-path{display:flex;gap:8px;align-items:center;margin-top:8px;color:var(--secondary)}.project-path code{overflow-wrap:anywhere;flex:1;font-size:12px}.section-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.section-top h2{margin:0}.slots{display:grid;gap:8px}.slot{border:1px solid var(--divider);border-radius:4px;padding:12px;display:grid;grid-template-columns:52px 32px 180px minmax(130px,1fr) auto;gap:12px;align-items:center}.slot[data-enabled=false]{background:var(--bg)}.slot-check{display:flex;align-items:center;gap:8px}.slot-check input{width:18px;height:18px;min-height:0;margin:0;accent-color:var(--accent)}.slot-index{color:var(--secondary);font-family:Consolas,monospace}.slot select{width:100%;min-width:0}.slot-dir{font-size:12px;color:var(--secondary);overflow-wrap:anywhere}.slot-dir strong{display:block;font-weight:400;color:var(--text);font-size:14px}.slot .more{min-width:44px}.preview-area{display:grid;grid-template-columns:180px 1fr;gap:16px}.preview-caption label{display:block;margin-bottom:8px}.preview-caption p{margin:8px 0 0;font-size:12px;color:var(--secondary)}.preview{min-height:144px;border:1px solid var(--line);border-radius:4px;display:grid;gap:1px;background:var(--line);overflow:hidden}.preview[data-count='1']{grid-template-columns:1fr}.preview[data-count='2']{grid-template-columns:1fr 1fr}.preview[data-count='2'][data-direction='horizontal']{grid-template-columns:1fr;grid-template-rows:1fr 1fr}.preview[data-count='3'],.preview[data-count='4']{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}.preview[data-count='3'] .pane:first-child{grid-row:span 2}.pane{background:var(--bg);padding:12px;display:flex;flex-direction:column;justify-content:center;gap:2px}.pane span{font-size:12px;color:var(--secondary)}.empty-preview{padding:16px;background:var(--bg)}.directory-rule{display:flex;align-items:center;gap:12px;padding-top:12px;border-top:1px solid var(--divider);flex-wrap:wrap}.directory-rule p{margin:0;flex:1}.footer{border-top:1px solid var(--divider);padding:16px 24px;display:grid;gap:12px;background:var(--bg)}.resource-line{display:flex;align-items:center;gap:12px}.resource-line button{margin-left:auto}.resource-mark{width:8px;height:8px;background:var(--accent);flex:none;border-radius:50%}.resource-line[data-state=low] .resource-mark{background:var(--error)}.resource-line p{margin:0}.actions{display:flex;gap:12px;align-items:center}.actions .secondary{margin-right:auto}.help-note{max-width:1280px;margin:16px auto 32px;padding:0 4px;color:var(--secondary);font-size:12px}.help-note a{color:var(--accent)}.notice{padding:12px 16px;background:var(--bg);border-left:3px solid var(--accent);margin:12px 0}.notice.error{border-color:var(--error)}dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:24px;width:min(600px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto}dialog::backdrop{background:rgb(0 0 0 / .32)}dialog h2{margin-right:32px}dialog .close{position:absolute;right:16px;top:16px;min-width:36px}dialog p{margin:12px 0}.dialog-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:24px}.form-row{display:grid;gap:8px;margin:16px 0}.form-row input,.form-row select{width:100%}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}.metrics div{border-bottom:1px solid var(--divider);padding-bottom:12px}.metrics dt{color:var(--secondary);font-size:12px}.metrics dd{margin:4px 0 0;font-size:20px;font-variant-numeric:tabular-nums}.result-row{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--divider)}.result-row p{margin:0}.result-row .result-state{color:var(--secondary);text-align:right}.checks{display:grid;gap:12px}.checks label{display:flex;gap:12px;align-items:start}.checks input{min-height:0;margin-top:4px}#status-message:empty{display:none}#status-message{padding:12px 16px;background:var(--bg);border-left:3px solid var(--accent);margin:0}.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 32px);padding:12px 16px;background:var(--text);color:var(--surface);border-radius:4px;z-index:5}.toast[hidden]{display:none}@media(max-width:1100px){.shell{margin:16px}.slot{grid-template-columns:48px 24px 150px 1fr auto;gap:8px}.help-note{margin:16px}}@media(max-width:840px){.workspace{grid-template-columns:1fr}.sidebar{display:none}.titlebar{flex-wrap:wrap;gap:12px}.titlebar .settings{margin-left:auto}.content{padding:16px}.slot{grid-template-columns:40px 24px 1fr auto}.slot-dir{grid-column:3;grid-row:2}.slot .more{grid-column:4;grid-row:1}.preview-area{grid-template-columns:1fr}.shell{min-height:0}.footer{padding:16px}.design-bar{padding:12px 16px}.design-controls{margin-left:0}.actions{flex-wrap:wrap}.actions .secondary{width:100%}}@media(forced-colors:active){.resource-mark{background:CanvasText}.primary{border:2px solid ButtonText}.drop{border-color:CanvasText}.notice{border-color:CanvasText}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+:root{color-scheme:light;--bg:#f5f5f5;--surface:#fff;--raised:#eaeaea;--text:#202020;--secondary:#5f6368;--line:#7a7a7a;--divider:#dedede;--accent:#0067c0;--accent-text:#fff;--error:#b42318;--focus:#0067c0;--radius:4px;--rail:#ececee;--ok:#1e8e3e;--off:#9aa0a6;--bad:#b42318}
+[data-theme=dark]{color-scheme:dark;--bg:#202020;--surface:#2b2b2b;--raised:#343434;--text:#f5f5f5;--secondary:#c5c5c5;--line:#8a8a8a;--divider:#484848;--accent:#60cdff;--accent-text:#002b40;--error:#ffb4ab;--focus:#60cdff;--rail:#26282c;--ok:#7bd88a;--off:#6b7078;--bad:#ffb4ab}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 'Segoe UI Variable','Segoe UI','Microsoft YaHei',sans-serif}
+button,input,select{font:inherit;color:inherit}
+button,select,input{min-height:36px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:6px 12px}
+button{cursor:pointer}
+button:hover{background:var(--raised)}
+button:active{filter:brightness(.96)}
+button:disabled{cursor:not-allowed;opacity:.55}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:3px}
+.primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent);min-height:40px}
+.primary:hover{background:var(--accent);filter:brightness(.94)}
+.quiet{background:transparent;border-color:transparent}
+.danger{color:var(--error)}
+.secondary{color:var(--secondary)}
+.mono{font-family:'Cascadia Mono',Consolas,monospace}
+.small{font-size:12px}
+.design-bar{border-bottom:1px solid var(--divider);padding:12px 24px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.design-bar strong{font-size:14px;font-weight:600}
+.design-controls{display:flex;gap:8px;align-items:center;margin-left:auto;flex-wrap:wrap}
+.design-controls label{display:flex;gap:8px;align-items:center}
+.shell{max-width:1280px;margin:24px auto;border:1px solid var(--divider);border-radius:8px;background:var(--surface);overflow:hidden;min-height:650px;display:flex;flex-direction:column}
+h1,h2,h3{margin:0}
+.workspace{display:grid;grid-template-columns:232px minmax(0,1fr);flex:1;min-height:0}
+.rail{background:var(--rail);border-right:1px solid var(--divider);padding:14px 12px;display:flex;flex-direction:column;gap:14px;min-width:0}
+.rail-brand{display:flex;align-items:center;gap:8px}
+.rail-brand h1{font-size:15px;font-weight:600;flex:1}
+.rail-brand button{min-width:36px}
+.rail-section{display:grid;gap:8px}
+.rail-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--secondary)}
+.project-head{display:flex;align-items:center;gap:8px}
+.project-head strong{font-size:15px;flex:1}
+.project-card code#project-path{display:block;font-size:12px;color:var(--secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent-projects{display:grid;gap:6px}
+.recent-projects input{width:100%;min-height:32px}
+.recent-list{display:flex;gap:6px;flex-wrap:wrap}
+.project{background:transparent;border-color:transparent;min-height:28px;padding:2px 8px;font-size:12px}
+.project[aria-pressed=true]{background:var(--raised);border-color:var(--line)}
+.drop{border:1px dashed var(--line);border-radius:6px;padding:8px;background:var(--bg);font-size:11px;color:var(--secondary);text-align:center}
+.drop[data-drag=true]{outline:2px solid var(--focus)}
+.rail-slots{display:grid;gap:4px}
+.rail-slot{display:grid;grid-template-columns:10px 24px 1fr auto;gap:8px;align-items:center;text-align:left;min-height:34px;padding:6px 8px;border:1px solid transparent;background:transparent;border-radius:6px}
+.rail-slot:hover{background:var(--raised)}
+.rail-slot[data-selected=true]{background:var(--raised);border-color:var(--accent)}
+.rail-index{font-family:Consolas,monospace;font-size:12px;color:var(--secondary)}
+.rail-name{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail-state{font-size:11px;color:var(--secondary)}
+.rail-add{justify-self:start;min-height:30px;font-size:12px;color:var(--accent);border-color:var(--divider)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--off);flex:none;display:block}
+.dot[data-state=ok]{background:var(--ok)}
+.dot[data-state=bad]{background:var(--bad)}
+.rail-sessions{display:grid;gap:6px}
+.rail-session{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.resource-line{display:flex;align-items:center;gap:8px;margin-top:auto;padding-top:12px;border-top:1px solid var(--divider)}
+.resource-mark{width:8px;height:8px;background:var(--accent);flex:none;border-radius:50%}
+.resource-line[data-state=low] .resource-mark{background:var(--error)}
+.rail-pill-text{flex:1;min-width:0}
+.rail-pill-text p{margin:0;font-size:11px;color:var(--secondary);overflow-wrap:anywhere}
+.resource-line button{margin-left:auto}
+.main{min-width:0;padding:20px 24px;display:grid;gap:16px;align-content:start}
+.selected-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.selected-head h2{font-size:18px;font-weight:600}
+.selected-head .secondary{display:block}
+.card{border:1px solid var(--divider);border-radius:8px;background:var(--surface);padding:16px;display:grid;gap:12px}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.card-head h2{font-size:14px;font-weight:600}
+.slots{display:grid;gap:8px}
+.slot{border:1px solid var(--divider);border-radius:4px;padding:12px;display:grid;grid-template-columns:52px 32px 180px minmax(130px,1fr) auto;gap:12px;align-items:center}
+.slot[data-enabled=false]{background:var(--bg)}
+.slot-check{display:flex;align-items:center;gap:8px}
+.slot-check input{width:18px;height:18px;min-height:0;margin:0;accent-color:var(--accent)}
+.slot-index{color:var(--secondary);font-family:Consolas,monospace}
+.slot select{width:100%;min-width:0}
+.slot-dir{font-size:12px;color:var(--secondary);overflow-wrap:anywhere}
+.slot-dir strong{display:block;font-weight:400;color:var(--text);font-size:14px}
+.slot .more{min-width:44px}
+.preview{min-height:144px;border:1px solid var(--line);border-radius:6px;display:grid;gap:1px;background:var(--line);overflow:hidden}
+.preview[data-count='1']{grid-template-columns:1fr}
+.preview[data-count='2']{grid-template-columns:1fr 1fr}
+.preview[data-count='2'][data-direction='horizontal']{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
+.preview[data-count='3'],.preview[data-count='4']{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+.preview[data-count='3'] .pane:first-child{grid-row:span 2}
+.pane{background:var(--bg);padding:12px;display:flex;flex-direction:column;justify-content:center;gap:2px}
+.pane span{font-size:12px;color:var(--secondary)}
+.empty-preview{padding:16px;background:var(--bg)}
+.advanced{border:1px solid var(--divider);border-radius:8px;background:var(--surface)}
+.advanced summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:14px;list-style-position:inside}
+.advanced-body{padding:0 16px 16px;display:grid;gap:12px}
+.preview-caption label{display:block;margin-bottom:8px}
+.preview-caption p{margin:8px 0 0;font-size:12px;color:var(--secondary)}
+.directory-rule{display:flex;align-items:center;gap:12px;padding-top:12px;border-top:1px solid var(--divider);flex-wrap:wrap}
+.directory-rule p{margin:0;flex:1}
+.footer{border-top:1px solid var(--divider);padding:16px 24px;display:grid;gap:12px;background:var(--bg)}
+.actions{display:flex;gap:12px;align-items:center}
+.actions .secondary{margin-right:auto}
+.help-note{max-width:1280px;margin:16px auto 32px;padding:0 4px;color:var(--secondary);font-size:12px}
+.help-note a{color:var(--accent)}
+.notice{padding:12px 16px;background:var(--bg);border-left:3px solid var(--accent);margin:12px 0}
+.notice.error{border-color:var(--error)}
+dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:24px;width:min(600px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto}
+dialog::backdrop{background:rgb(0 0 0 / .32)}
+dialog h2{font-size:18px;font-weight:600;margin-right:32px}
+dialog .close{position:absolute;right:16px;top:16px;min-width:36px}
+dialog p{margin:12px 0}
+.dialog-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:24px}
+.form-row{display:grid;gap:8px;margin:16px 0}
+.form-row input,.form-row select{width:100%}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}
+.metrics div{border-bottom:1px solid var(--divider);padding-bottom:12px}
+.metrics dt{color:var(--secondary);font-size:12px}
+.metrics dd{margin:4px 0 0;font-size:20px;font-variant-numeric:tabular-nums}
+.result-row{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--divider)}
+.result-row p{margin:0}
+.result-row .result-state{color:var(--secondary);text-align:right}
+.checks{display:grid;gap:12px}
+.checks label{display:flex;gap:12px;align-items:start}
+.checks input{min-height:0;margin-top:4px}
+#status-message:empty{display:none}
+#status-message{padding:12px 16px;background:var(--bg);border-left:3px solid var(--accent);margin:0}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 32px);padding:12px 16px;background:var(--text);color:var(--surface);border-radius:4px;z-index:5}
+.toast[hidden]{display:none}
+@media(max-width:1100px){.shell{margin:16px}.slot{grid-template-columns:48px 24px 150px 1fr auto;gap:8px}.help-note{margin:16px}}
+@media(max-width:900px){.workspace{grid-template-columns:56px minmax(0,1fr)}.rail{padding:10px 4px;align-items:center}.rail-brand h1,.rail-label,.project-card,.rail-sessions,.rail-add,.rail-pill-text{display:none}.rail-brand{justify-content:center}.rail-slot{grid-template-columns:1fr;justify-items:center;padding:6px 0}.rail-slot .rail-index,.rail-slot .rail-name,.rail-slot .rail-state{display:none}.resource-line{border-top:0;justify-content:center}.main{padding:16px}}
+@media(max-width:650px){.slot{grid-template-columns:40px 24px 1fr auto}.slot-dir{grid-column:3;grid-row:2}.slot .more{grid-column:4;grid-row:1}.selected-head{flex-wrap:wrap}.shell{min-height:0}.footer{padding:16px}.design-bar{padding:12px 16px}.design-controls{margin-left:0}.actions{flex-wrap:wrap}.actions .secondary{width:100%}}
+@media(forced-colors:active){.resource-mark,.dot{background:CanvasText}.primary{border:2px solid ButtonText}.drop{border-color:CanvasText}.notice{border-color:CanvasText}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
 </style>
 </head>
 <body>
-<div class="design-bar"><strong>交互设计稿 v0.6</strong><span class="secondary">示例数据 · 不会运行 Agent 或读取本机资源</span><div class="design-controls"><label>主题 <select id="theme"><option value="light">浅色</option><option value="dark">深色</option></select></label><label>演示场景 <select id="scenario"><option value="ready">资源充足</option><option value="low">内存不足</option><option value="partial">部分启动失败</option><option value="unknown">启动结果未确认</option></select></label></div></div>
+<div class="design-bar"><strong>交互设计稿 v0.8</strong><span class="secondary">示例数据 · 不会运行 Agent 或读取本机资源</span><div class="design-controls"><label>主题 <select id="theme"><option value="light">浅色</option><option value="dark">深色</option></select></label><label>演示场景 <select id="scenario"><option value="ready">资源充足</option><option value="low">内存不足</option><option value="partial">部分启动失败</option><option value="unknown">启动结果未确认</option></select></label></div></div>
 <main class="shell">
-<header class="titlebar"><h1>多 Agent 启动器</h1><label class="template">组合 <select id="template"><option value="last" id="last-template" disabled>上次组合（尚无快照）</option><option value="single" selected>单个 Pi</option><option value="pair">Pi + Codex</option></select></label><button class="settings quiet" id="settings-button">设置</button></header>
-<div class="workspace"><aside class="sidebar" aria-label="最近项目"><h2>最近项目</h2><input id="project-search" type="search" placeholder="搜索项目" aria-label="搜索最近项目"><button class="project" data-project="demo" aria-pressed="true">demo<span>D:\Projects\demo</span></button><button class="project" data-project="website" aria-pressed="false">website<span>D:\Projects\website</span></button><button class="project" data-project="tools" aria-pressed="false">tools<span>D:\Projects\tools</span></button></aside>
-<div class="content"><section aria-labelledby="project-title"><h2 id="project-title">项目</h2><div class="drop" id="drop-area"><div><p>将项目文件夹拖到这里</p><small>设计稿固定展示 4 项；可编辑示例路径，真实拖拽由原生应用实现</small></div><button id="choose-project">选择文件夹</button></div><div class="project-path"><code id="project-path">D:\Projects\demo</code><button class="quiet" id="edit-project">更换</button></div></section>
-<section aria-labelledby="agents-title"><div class="section-top"><h2 id="agents-title">Agent 配置</h2><span class="secondary small">勾选的项才会启动</span></div><div class="slots" id="slots"></div></section>
-<section aria-label="本次布局"><div class="preview-area"><div class="preview-caption"><label for="layout">本次布局</label><select id="layout"><option value="vertical">左右排列</option><option value="horizontal">上下排列</option></select><p id="layout-count"></p></div><div class="preview" id="preview" aria-label="有效窗格预览"></div></div></section>
-<div class="directory-rule"><p>同项目目录：<strong id="directory-label">各自独立</strong></p><button class="quiet" id="directory-button">调整目录策略</button></div><p id="status-message" role="status"></p></div></div>
-<footer class="footer"><div class="resource-line" id="resource-line"><span class="resource-mark" aria-hidden="true"></span><p id="resource-status" aria-live="polite"></p><button class="quiet" id="resource-button">资源详情</button></div><div class="actions"><span class="secondary small">演示配置仅在本页内存中保留</span><button id="save-button">保存组合</button><button class="primary" id="launch-button">预览启动 1 个 Agent</button></div></footer>
+<div class="workspace">
+<aside class="rail" aria-label="会话优先侧栏">
+<header class="rail-brand"><h1>◆ 多 Agent 启动器</h1><button class="quiet" id="settings-button" aria-label="设置">⚙</button></header>
+<section class="rail-section project-card" aria-labelledby="project-title">
+<div class="rail-label" id="project-title">项目</div>
+<div class="project-head"><strong id="project-name">demo</strong><button class="quiet small" id="edit-project">更换</button></div>
+<code id="project-path" class="mono small">D:\Projects\demo</code>
+<div class="recent-projects"><input id="project-search" type="search" placeholder="搜索项目" aria-label="搜索最近项目"><div class="recent-list"><button class="project" data-project="demo" aria-pressed="true">demo</button><button class="project" data-project="website" aria-pressed="false">website</button><button class="project" data-project="tools" aria-pressed="false">tools</button></div></div>
+<button class="quiet small" id="choose-project">选择文件夹…</button>
+<div class="drop" id="drop-area"><small>拖入项目文件夹（设计稿不读取目录）</small></div>
+</section>
+<section class="rail-section" aria-labelledby="rail-agents-title">
+<div class="rail-label" id="rail-agents-title">AGENT · 已选 <span id="rail-agent-count">1/4</span></div>
+<div class="rail-slots" id="rail-slots"></div>
+<button class="quiet rail-add" id="add-agent-button">＋ 添加 Agent</button>
+</section>
+<section class="rail-section" aria-labelledby="rail-sessions-title">
+<div class="rail-label" id="rail-sessions-title">会话与队列</div>
+<div class="rail-sessions"><div class="rail-session"><span class="dot" data-state="ok"></span><span>01 Pi · 12:34</span></div><div class="rail-session"><span class="dot" data-state="off"></span><span>排队 2 项 · 等待资源</span></div><button class="quiet small" id="rail-jump">全部…</button></div>
+</section>
+<div class="resource-line" id="resource-line" data-state="ready"><span class="resource-mark" aria-hidden="true"></span><div class="rail-pill-text"><span class="small secondary">本机资源</span><p id="resource-status" aria-live="polite"></p></div><button class="quiet" id="resource-button" aria-label="资源详情">⚙</button></div>
+</aside>
+<section class="main" aria-label="主区">
+<div class="selected-head"><div><h2 id="selected-title">01 · Pi</h2><span id="selected-status" class="secondary small">已启用 · 程序与目录就绪</span></div><span class="secondary small">已选 <span id="main-count">1</span> 项</span></div>
+<section class="card" aria-labelledby="agents-title"><div class="card-head"><h2 id="agents-title">配置</h2><span class="secondary small">勾选的项才会启动</span></div><div class="slots" id="slots"></div></section>
+<section class="card preview-card" aria-labelledby="preview-title"><div class="card-head"><h2 id="preview-title">分屏预览</h2><span class="secondary small" id="preview-caption">1 个窗格</span></div><div class="preview" id="preview" aria-label="有效窗格预览"></div></section>
+<details class="advanced" open>
+<summary>启动选项 · 目录与分屏</summary>
+<div class="advanced-body"><div class="preview-caption"><label for="layout">本次布局</label><select id="layout"><option value="vertical">左右排列</option><option value="horizontal">上下排列</option></select><p id="layout-count"></p></div><div class="directory-rule"><p>同项目目录：<strong id="directory-label">各自独立</strong></p><button class="quiet" id="directory-button">调整目录策略</button></div></div>
+</details>
+<details class="advanced" open>
+<summary>组合与批量设置</summary>
+<div class="advanced-body"><label class="preview-caption">组合 <select id="template"><option value="last" id="last-template" disabled>上次组合（尚无快照）</option><option value="single" selected>单个 Pi</option><option value="pair">Pi + Codex</option></select></label></div>
+</details>
+<p id="status-message" role="status"></p>
+</section>
+</div>
+<footer class="footer"><div class="actions"><span class="secondary small">演示配置仅在本页内存中保留</span><button id="save-button">保存组合</button><button class="primary" id="launch-button">预览启动 1 个 Agent</button></div></footer>
 </main>
 <p class="help-note">这是交互说明，不代表原生 WPF 视觉验收已通过。设计语言：Windows Fluent 原则；实现计划：C# + WPF/XAML。<a href="UI-DESIGN.md">详细设计</a> · <a href="ACCEPTANCE.md">验收矩阵</a> · 视觉审查方法参考 <a href="https://heydamir.design/unslop">unslop / Damir Sokolovsky</a>（CC BY 4.0，原生界面适配）</p>
 <dialog id="project-dialog" aria-labelledby="project-heading"><button class="close quiet" data-close aria-label="关闭目录对话框">×</button><h2 id="project-heading">选择项目</h2><p class="secondary">设计稿用示例路径表达交互。正式应用使用 Windows 文件夹选择器和原生拖拽。</p><label class="form-row">示例项目路径<input id="project-input" value="D:\Projects\demo" spellcheck="false"></label><div class="dialog-actions"><button data-close>取消</button><button class="primary" id="apply-project">应用示例路径</button></div></dialog>
@@ -42,7 +198,8 @@ let editedSlot = null;
 let toastTimer;
 let templateCounter = 0;
 let directoryRevision;
-function sync(){slots=model.draft.slots;projectPath=model.draft.projectPath;$('project-path').textContent=projectPath;$('project-input').value=projectPath;$('layout').value=model.draft.layout;$('directory-label').textContent=model.draft.directoryMode;$('last-template').disabled=!model.lastEdited;$('last-template').textContent=model.lastEdited?'上次组合':'上次组合（尚无快照）';renderSlots();renderState();}
+let selectedSlotId = (model.draft.slots.find(s=>s.enabled)||model.draft.slots[0])?.id;
+function sync(){slots=model.draft.slots;projectPath=model.draft.projectPath;$('project-path').textContent=projectPath;const parts=projectPath.replaceAll('\\','/').split('/').filter(Boolean);$('project-name').textContent=parts[parts.length-1]||projectPath;$('project-input').value=projectPath;$('layout').value=model.draft.layout;$('directory-label').textContent=model.draft.directoryMode;$('last-template').disabled=!model.lastEdited;$('last-template').textContent=model.lastEdited?'上次组合':'上次组合（尚无快照）';renderSlots();renderState();}
 function openDialog(id){if(id==='directory-dialog'){directoryRevision=model.draft.revision;document.querySelectorAll('input[name=directory-mode]').forEach(input=>input.checked=input.value===model.draft.directoryMode);}$(id).showModal();}
 function closeDialog(node){node.closest('dialog').close();}
 function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{$('toast').hidden=true;},3500);}
@@ -50,8 +207,9 @@ function enabled(){return slots.filter(s=>s.enabled);}
 function isBlocked(){return $('scenario').value==='low'||enabled().length>2||enabled().length===0;}
 function renderSlots(){
  $('slots').replaceChildren();
+ if(!slots.some(s=>s.id===selectedSlotId))selectedSlotId=(slots.find(s=>s.enabled)||slots[0])?.id;
  for(const slot of slots){
-  const row=document.createElement('div');row.className='slot';row.dataset.enabled=String(slot.enabled);
+  const row=document.createElement('div');row.className='slot';row.dataset.enabled=String(slot.enabled);row.dataset.slotId=String(slot.id);row.hidden=slot.id!==selectedSlotId;
   const label=document.createElement('label');label.className='slot-check';
   const check=document.createElement('input');check.type='checkbox';check.checked=slot.enabled;check.setAttribute('aria-label',`本次启动第 ${slot.id} 项 ${names[slot.agentId]}`);
   check.addEventListener('change',()=>{model.edit(d=>d.slots.find(s=>s.id===slot.id).enabled=check.checked);slots=model.draft.slots;row.dataset.enabled=String(check.checked);renderState();});label.append(check);
@@ -64,6 +222,30 @@ function renderSlots(){
   more.addEventListener('click',()=>{editedSlot=model.beginEdit(slot.id);$('agent-context').textContent=`第 ${slot.id} 项 · ${names[editedSlot.agentId]}`;$('agent-path').value=editedSlot.profile.path;$('agent-arg').value=editedSlot.profile.arg;openDialog('agent-dialog');});
   row.append(label,index,select,dir,more);$('slots').append(row);
  }
+}
+function renderRail(){
+ const list=$('rail-slots');if(!list)return;
+ const enabledCount=slots.filter(s=>s.enabled).length;
+ $('rail-agent-count').textContent=`${enabledCount}/${slots.length}`;
+ if(!slots.some(s=>s.id===selectedSlotId))selectedSlotId=(slots.find(s=>s.enabled)||slots[0])?.id;
+ list.replaceChildren();
+ for(const slot of slots){
+  const row=document.createElement('button');row.type='button';row.className='rail-slot';row.dataset.enabled=String(slot.enabled);row.dataset.selected=String(slot.id===selectedSlotId);
+  const dot=document.createElement('span');dot.className='dot';dot.dataset.state=slot.enabled?'ok':'off';
+  const idx=document.createElement('span');idx.className='rail-index';idx.textContent=String(slot.id).padStart(2,'0');
+  const name=document.createElement('span');name.className='rail-name';name.textContent=names[slot.agentId];
+  const state=document.createElement('span');state.className='rail-state';state.textContent=slot.enabled?'已启用':'未启用';
+  row.append(dot,idx,name,state);
+  row.addEventListener('click',()=>{selectedSlotId=slot.id;renderRail();});
+  list.append(row);
+ }
+ renderSelected();
+}
+function renderSelected(){
+ const slot=slots.find(s=>s.id===selectedSlotId);if(!slot)return;
+ document.querySelectorAll('#slots .slot').forEach(row=>row.hidden=row.dataset.slotId!==String(selectedSlotId));
+ $('selected-title').textContent=`${String(slot.id).padStart(2,'0')} · ${names[slot.agentId]}`;
+ $('selected-status').textContent=slot.enabled?'已启用 · 程序与目录就绪':'未启用 · 勾选后参与启动';
 }
 function renderState(){
  const active=enabled();const count=active.length;const low=$('scenario').value==='low';const over=count>2;
@@ -84,12 +266,15 @@ function renderState(){
   resourceDetail = '本示例的可用内存低于系统保留余量，暂缓新增 Agent。';
  } else if (over) {
   resourceStatus = '超过本示例受管内存预算 · 减少到 1～2 项';
-  resourceDetail = '本示例总内存为 16 GiB，受管预算上限约 5.6 GiB。当前选中项超过预算，不会通过减少系统保留来强行启动。';
+  resourceDetail = '本示例总内存为 16 GiB，受管内存预算上限约 5.6 GiB。当前选中项超过预算，不会通过减少系统保留来强行启动。';
  }
  $('resource-status').textContent = resourceStatus;
  $('metric-available').textContent=low?'1.2 GiB':'10.0 GiB';$('metric-budget').textContent=(count*2).toFixed(1)+' GiB';
  $('resource-detail').textContent = resourceDetail;
  $('resource-detail').className=low||over?'notice error':'notice';
+ $('preview-caption').textContent=`${count} 个窗格`;
+ $('main-count').textContent=String(count);
+ renderRail();
 }
 function applyProject(path){const next=path.trim();if(!next){toast('请输入示例路径');return false;}model.edit(d=>d.projectPath=next);sync();document.querySelectorAll('.project').forEach(b=>b.setAttribute('aria-pressed',String(projectPath.endsWith('\\'+b.dataset.project))));return true;}
 $('theme').addEventListener('change',()=>{document.documentElement.dataset.theme=$('theme').value;});
@@ -104,6 +289,8 @@ $('apply-agent').addEventListener('click',()=>{try{if(editedSlot)model.applyEdit
 $('save-button').addEventListener('click',()=>openDialog('save-dialog'));$('apply-save').addEventListener('click',()=>{const name=$('template-name').value.trim();if(!name){$('template-name').focus();return;}const key='saved-'+(++templateCounter);model.save(key);const option=document.createElement('option');option.value=key;option.textContent=name;$('template').append(option);$('template').value=key;$('save-dialog').close();toast('已保存到本页，刷新后不会保留');});
 $('template').addEventListener('change',()=>{try{model.restore($('template').value);sync();}catch(error){toast(error.message);}});
 $('settings-button').addEventListener('click',()=>openDialog('settings-dialog'));
+$('add-agent-button').addEventListener('click',()=>toast('设计稿固定展示 4 项，不新增 Agent'));
+$('rail-jump').addEventListener('click',()=>toast('设计稿不包含运行记录与队列详情；实际应用会展开对应折叠区'));
 $('launch-button').addEventListener('click', () => {
  if (isBlocked()) return;
  const scene = $('scenario').value;

@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using AgentLauncher.Core;
@@ -36,6 +37,12 @@ public partial class MainWindow : Window
     private readonly string[] arguments;
     private string? sessionSignature;
     private readonly Dictionary<Guid,TextBlock> commandLabels=[];
+    private readonly Dictionary<Guid,TextBlock> railLabels=[];
+    private readonly Dictionary<Guid,TextBlock> railNames=[];
+    private readonly Dictionary<Guid,Ellipse> railDots=[];
+    private Guid? selectedSlotId;
+    private Draft? renderedDraft;
+    private bool draftEditedByApp;
     private readonly string configPath=Store.FilePath("configuration.json");
     private bool commandsChecking,commandsRunning;
     private bool editingSlot;
@@ -96,14 +103,14 @@ public partial class MainWindow : Window
         {
             uiChecksStarted=true;
             try{await RunTaskUsabilityOnlyAsync(usabilityFolder);}
-            catch(Exception e)when(e is not OutOfMemoryException){Store.Save(Path.Combine(usabilityFolder,"ui-exception.json"),new{Error=e.ToString()});Application.Current.Shutdown(1);}
+            catch(Exception e)when(e is not OutOfMemoryException){Store.Save(System.IO.Path.Combine(usabilityFolder,"ui-exception.json"),new{Error=e.ToString()});Application.Current.Shutdown(1);}
             return;
         }
         if(arguments is ["--ui-check",var folder]&&!uiChecksStarted)
         {
             uiChecksStarted=true;
             try{await RunUiChecksAsync(folder);}
-            catch(Exception e)when(e is not OutOfMemoryException){Store.Save(Path.Combine(folder,"ui-exception.json"),new{Error=e.ToString()});Application.Current.Shutdown(1);}
+            catch(Exception e)when(e is not OutOfMemoryException){Store.Save(System.IO.Path.Combine(folder,"ui-exception.json"),new{Error=e.ToString()});Application.Current.Shutdown(1);}
             return;
         }
         if(arguments is ["--screenshot",var path])
@@ -120,7 +127,9 @@ public partial class MainWindow : Window
         if(rendering||loading||busy)return false;
         if(readOnly){Render();return false;}
         var focusName=Keyboard.FocusedElement is DependencyObject focused&&Within(focused,SlotList)?AutomationProperties.GetName(focused):null;
-        var before=config.Draft;config.Edit(change);TrackMultipaneSlotEdits(before,config.Draft);validationError="";ErrorText.Text="";QueueSave();Render();
+        var before=config.Draft;config.Edit(change);TrackMultipaneSlotEdits(before,config.Draft);validationError="";ErrorText.Text="";QueueSave();
+        // Keeps the rail selection on the edited slot: Render falls back to the first item only for a wholesale draft replacement (template/backup/reload).
+        draftEditedByApp=true;Render();
         if(focusName is {Length:>0}&&FindLogical(SlotList).FirstOrDefault(el=>AutomationProperties.GetName(el)==focusName) is IInputElement target)Keyboard.Focus(target);
         return true;
     }
@@ -172,13 +181,15 @@ public partial class MainWindow : Window
         SaveStatus.Text="配置已保存";RetrySaveButton.Visibility=Visibility.Collapsed;UpdateLaunch();
     }
     private async void RetrySaveClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>{await RetrySaveAsync();ErrorText.Text="";});
+    // Implemented by MainWindow.Rail.cs: the rail session/queue/resource summaries are rebuilt inside this existing Render cycle.
+    partial void RenderRail();
     private void Render()
     {
         commandsChecking=true;
         rendering=true;
         try
         {
-            ProjectPath.Text=config.Draft.Project;var noProject=string.IsNullOrWhiteSpace(config.Draft.Project);ProjectTitle.Text=MiddleEllipsis(noProject?"还没有选择项目":Path.GetFileName(config.Draft.Project.TrimEnd('\\','/')) is {Length:>0} title?title:config.Draft.Project);ProjectTitle.ToolTip=noProject?null:config.Draft.Project;
+            ProjectPath.Text=config.Draft.Project;var noProject=string.IsNullOrWhiteSpace(config.Draft.Project);ProjectTitle.Text=MiddleEllipsis(noProject?"还没有选择项目":System.IO.Path.GetFileName(config.Draft.Project.TrimEnd('\\','/')) is {Length:>0} title?title:config.Draft.Project);ProjectTitle.ToolTip=noProject?null:config.Draft.Project;
             var ownDirectories=config.Draft.Slots.Count(s=>s.Enabled&&!string.IsNullOrWhiteSpace(s.Directory));
             ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用下方各自的工作目录；修改此处不会改变它们。":noProject?"选择项目，勾选 Agent，然后启动。":"未单独指定目录的 Agent 使用此项目";
             ProjectGuide.Visibility=Visibility.Visible;
@@ -188,13 +199,28 @@ public partial class MainWindow : Window
             Templates.Items.Clear();Templates.Items.Add(new ComboBoxItem{Content="套用组合方案…",IsEnabled=false});
             Templates.Items.Add(new ComboBoxItem{Content="上次用的组合",Tag=TemplateAction.LastEdited,IsEnabled=config.LastEdited!=null,ToolTip="最近一次切换组合前的配置"});
             foreach(var name in config.Templates.Keys)Templates.Items.Add(new ComboBoxItem{Content=name,Tag=name});Templates.SelectedIndex=0;
+            var slots=config.Draft.Slots;
+            // A wholesale draft replacement (template, backup, reload) retires the previously selected row; the selection then
+            // falls back to the first item, exactly as a deletion does. App-initiated edits and rail clicks keep the selection.
+            if(!ReferenceEquals(renderedDraft,config.Draft)&&!draftEditedByApp)
+                selectedSlotId=renderedDraft is null
+                    ?slots.FirstOrDefault(s=>s.Enabled)?.Id??slots.FirstOrDefault()?.Id
+                    :slots.FirstOrDefault()?.Id;
+            renderedDraft=config.Draft;draftEditedByApp=false;
+            var selectedSlot=selectedSlotId.HasValue?slots.FirstOrDefault(s=>s.Id==selectedSlotId.Value):null;
+            selectedSlot??=slots.FirstOrDefault(s=>s.Enabled)??slots.FirstOrDefault();
+            selectedSlotId=selectedSlot?.Id;
             SlotList.Children.Clear();commandLabels.Clear();
-            foreach(var slot in config.Draft.Slots)AddSlot(slot);
+            if(selectedSlot is {} detailSlot)AddSlot(detailSlot);
+            if(selectedSlot is {} shown)DetailTitle.Text=$"{slots.IndexOf(shown)+1:00} · {shown.DisplayName}";else DetailTitle.Text="要一起启动的 Agent";
+            RailSlots.Children.Clear();railLabels.Clear();railNames.Clear();railDots.Clear();
+            for(var i=0;i<slots.Count;i++)AddRailSlot(slots[i],i+1);
             AddButton.IsEnabled=config.Draft.Slots.Count<ResourcePolicy.MaxSlots;
             var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
             RenderMultipanePreview(active);Layout.IsEnabled=active.Length==2;
             PaneCount.Text=$"{active.Length} 个窗格";ArrangePanels();
             UpdateLaunch();
+            RenderRail();
         }
         finally{rendering=false;}
         _=GuardAsync(CheckCommandsAsync);
@@ -220,8 +246,21 @@ public partial class MainWindow : Window
     }
     private void ArrangePanels()
     {
-        var logicalWidth=ActualWidth/UiScale.Value;var compact=logicalWidth<650;
-        Brand.Visibility=compact?Visibility.Collapsed:Visibility.Visible;DockPanel.SetDock(HeaderActions,compact?Dock.Left:Dock.Right);
+        var logicalWidth=ActualWidth/UiScale.Value;var compact=logicalWidth<650;var narrow=logicalWidth<900;
+        // Below 900 logical pixels the rail collapses to a 56px dot strip: brand text, the project card and every section
+        // caption step aside while the agent rows keep their dot and number (the row ToolTip still carries the name).
+        Rail.Width=narrow?56:232;
+        Rail.Padding=narrow?new Thickness(4,8,4,8):new Thickness(10,12,10,12);
+        foreach(var row in RailSlots.Children.OfType<Button>())row.Padding=narrow?new Thickness(2,7,2,7):new Thickness(6,7,6,7);
+        BrandText.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
+        ProjectCard.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
+        AgentHeader.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
+        SelectionSummary.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
+        RailSessionsSection.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
+        RailResource.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
+        AddButton.Content=narrow?"＋":"＋ 添加 Agent";
+        foreach(var name in railNames.Values)name.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
+        foreach(var status in railLabels.Values)status.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
         // Compact: actions take the first footer row and the message wraps underneath, so a long hint cannot squeeze the launch button.
         Grid.SetRow(FooterActions,0);Grid.SetColumn(FooterActions,compact?0:1);Grid.SetColumnSpan(FooterActions,compact?2:1);
         Grid.SetRow(FooterMessage,compact?1:0);Grid.SetColumn(FooterMessage,0);Grid.SetColumnSpan(FooterMessage,compact?2:1);
@@ -269,6 +308,28 @@ public partial class MainWindow : Window
         // Auto columns can otherwise push the row across its own breakpoint repeatedly at larger text scales.
         row.SizeChanged+=(_,_)=>{var compact=ActualWidth/UiScale.Value<650;directoryButton.MaxWidth=compact?160:double.PositiveInfinity;Grid.SetColumnSpan(choice,compact?4:1);Grid.SetRow(detail,compact?1:0);Grid.SetColumn(detail,compact?2:4);Grid.SetRow(actions,compact?1:0);Grid.SetRow(command,compact?2:1);Grid.SetRow(directoryButton,compact?1:0);Grid.SetColumn(directoryButton,compact?0:3);Grid.SetColumnSpan(directoryButton,compact?2:1);};
         var container=new Border{BorderBrush=(Brush)FindResource("Line"),BorderThickness=new(0,0,0,position<config.Draft.Slots.Count?1:0),Child=row};AttachSlotDrag(container,number,directory,slot,position);SlotList.Children.Add(container);
+    }
+    // One read-only index row per slot in the rail. The whole row is a Button so the click target matches the visual row;
+    // the status dot reuses the shared theme brushes through resource references (no per-row brush allocation).
+    private void AddRailSlot(Slot slot,int position)
+    {
+        var row=new Grid{Margin=new(0,1,0,1)};
+        row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});
+        var dot=new Ellipse{Width=12,Height=12,VerticalAlignment=VerticalAlignment.Center,Margin=new(2,0,0,0)};ApplyRailDot(dot,slot);row.Children.Add(dot);
+        var number=new TextBlock{Text=$"{position:00}",FontFamily=new FontFamily("Consolas"),FontSize=12,VerticalAlignment=VerticalAlignment.Center,Margin=new(6,0,6,0),TextWrapping=TextWrapping.NoWrap};number.SetResourceReference(TextBlock.ForegroundProperty,"Muted");Grid.SetColumn(number,1);row.Children.Add(number);
+        var name=new TextBlock{Text=slot.DisplayName,FontSize=13,VerticalAlignment=VerticalAlignment.Center,TextWrapping=TextWrapping.NoWrap,TextTrimming=TextTrimming.CharacterEllipsis};name.SetResourceReference(TextBlock.ForegroundProperty,"Ink");Grid.SetColumn(name,2);row.Children.Add(name);
+        var status=new TextBlock{Text=slot.Enabled?"正在检查…":"未启用",FontSize=12,VerticalAlignment=VerticalAlignment.Center,Margin=new(6,0,2,0),MaxWidth=96,TextWrapping=TextWrapping.NoWrap,TextTrimming=TextTrimming.CharacterEllipsis,ToolTip=slot.DisplayName};status.SetResourceReference(TextBlock.ForegroundProperty,"Muted");Grid.SetColumn(status,3);row.Children.Add(status);
+        railLabels[slot.Id]=status;railNames[slot.Id]=name;railDots[slot.Id]=dot;
+        var button=new Button{Content=row,Padding=new(6,7,6,7),HorizontalContentAlignment=HorizontalAlignment.Stretch,Background=Brushes.Transparent,BorderThickness=new(0),ToolTip=slot.DisplayName};
+        AutomationProperties.SetName(button,$"第 {position} 项 Agent 行");
+        if(selectedSlotId==slot.Id)button.SetResourceReference(Button.BackgroundProperty,"Selected");
+        button.Click+=(_,_)=>{if(rendering)return;selectedSlotId=slot.Id;Render();};
+        RailSlots.Children.Add(button);
+    }
+    private void ApplyRailDot(Ellipse dot,Slot slot)
+    {
+        var missing=railLabels.TryGetValue(slot.Id,out var text)&&text.Text.Contains("未找到");
+        dot.SetResourceReference(Ellipse.FillProperty,!slot.Enabled?"StatusOff":missing?"StatusBad":"StatusOk");
     }
     private sealed class MenuButton : ContentControl
     {
@@ -342,7 +403,13 @@ public partial class MainWindow : Window
             }
             if(draft.Revision!=config.Draft.Revision){pendingCommandCheck=config.Draft.Copy();continue;}
             if(!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal)){commandsChecking=false;validationError="项目路径输入尚未应用；请按 Enter 或移开焦点完成校验。";UpdateLaunch();break;}
-            foreach(var (id,label) in labels)if(commandLabels.TryGetValue(id,out var text)){text.Text=label.Text;text.ToolTip=label.Tooltip;}
+            foreach(var (id,label) in labels)
+            {
+                if(commandLabels.TryGetValue(id,out var text)){text.Text=label.Text;text.ToolTip=label.Tooltip;}
+                // The rail row carries the same status text; its dot turns red only for a command that is not found on this machine.
+                if(railLabels.TryGetValue(id,out var railText)){railText.Text=label.Text;railText.ToolTip=label.Tooltip;}
+                if(railDots.TryGetValue(id,out var dot))dot.SetResourceReference(Ellipse.FillProperty,label.Text.Contains("未找到")?"StatusBad":"StatusOk");
+            }
             commandsChecking=false;validationError=string.Join("\n",errors.Distinct());UpdateLaunch();
         }
         }
@@ -746,7 +813,7 @@ public partial class MainWindow : Window
             foreach(var file in Directory.EnumerateFiles(directory,"*.json").Take(200))
             {
                 using var json=Store.Read<JsonDocument>(file);if(json==null)continue;var r=json.RootElement;
-                rows.Add((Path.GetFileNameWithoutExtension(file),r.GetProperty("Root").GetString()!,r.GetProperty("Target").GetString()!,r.GetProperty("Branch").GetString()!,r.GetProperty("Oid").GetString()!,r.GetProperty("State").GetString()!));
+                rows.Add((System.IO.Path.GetFileNameWithoutExtension(file),r.GetProperty("Root").GetString()!,r.GetProperty("Target").GetString()!,r.GetProperty("Branch").GetString()!,r.GetProperty("Oid").GetString()!,r.GetProperty("State").GetString()!));
             }
             return rows;
         });
@@ -824,10 +891,12 @@ public partial class MainWindow : Window
         resources["Accent"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#60CDFF":"#245BC4"));resources["AccentInk"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#002B40":"#FFFFFF"));resources["SelectionInk"]=resources["Ink"];resources["ErrorInk"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#FFB4AB":"#B42318"));
         resources["AccentSoft"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#7EB2FF":"#3D6FD1"));resources["AccentPressed"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#5B93E8":"#1C46A0"));
         foreach(var (key,color) in new[]{("PreviewPage","#191B20"),("PreviewSurface","#0F1116"),("PreviewLine","#34373F"),("PreviewInk","#D7DBE2"),("PreviewMuted","#A5ABB6")})resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
+        // Rail status tokens: the three dots and the rail surface keep their own light/dark pair so the rail reads as one layer below Page.
+        foreach(var (key,darkColor,lightColor) in new[]{("StatusOk","#7BD88A","#1E8E3E"),("StatusOff","#6B7078","#9AA0A6"),("StatusBad","#FFB4AB","#B42318"),("RailSurface","#26282C","#ECECEE")})resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?darkColor:lightColor));
         if(SystemParameters.HighContrast)
         {
-            foreach(var key in new[]{"Surface","Page","PreviewPage","PreviewSurface","WarningSurface"})resources[key]=SystemColors.WindowBrush;
-            foreach(var key in new[]{"Ink","Muted","Line","InputLine","WarningInk","ErrorInk","PreviewInk","PreviewMuted","PreviewLine"})resources[key]=SystemColors.WindowTextBrush;
+            foreach(var key in new[]{"Surface","Page","PreviewPage","PreviewSurface","WarningSurface","RailSurface"})resources[key]=SystemColors.WindowBrush;
+            foreach(var key in new[]{"Ink","Muted","Line","InputLine","WarningInk","ErrorInk","PreviewInk","PreviewMuted","PreviewLine","StatusOk","StatusOff","StatusBad"})resources[key]=SystemColors.WindowTextBrush;
             resources["Raised"]=SystemColors.ControlBrush;resources["Selected"]=SystemColors.HighlightBrush;resources["Accent"]=SystemColors.HighlightBrush;resources["AccentSoft"]=SystemColors.HighlightBrush;resources["AccentPressed"]=SystemColors.HighlightBrush;resources["AccentInk"]=SystemColors.HighlightTextBrush;resources["SelectionInk"]=SystemColors.HighlightTextBrush;
         }
         SetResourceReference(BackgroundProperty,"Page");SetResourceReference(ForegroundProperty,"Ink");ErrorText.SetResourceReference(TextBlock.ForegroundProperty,"ErrorInk");LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,LaunchHintState().Key);

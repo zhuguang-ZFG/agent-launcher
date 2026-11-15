@@ -34,6 +34,11 @@ public partial class MainWindow
         {
             foreach(var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()){if(child is T target)yield return target;foreach(var nested in FindLogical<T>(child))yield return nested;}
         }
+        async Task SelectRailSlot(int position)
+        {
+            Find<Button>(RailSlots).First(b=>AutomationProperties.GetName(b)==$"第 {position} 项 Agent 行").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+        }
         Check("config load is writable",!readOnly);
         // F6/F8 regressions: null template values and unsupported LastEdited must fail closed. Both use the real configPath in the isolated test root.
         await saveTask;
@@ -89,9 +94,10 @@ public partial class MainWindow
         toggle=(System.Windows.Automation.Provider.IToggleProvider)new System.Windows.Automation.Peers.CheckBoxAutomationPeer(Find<CheckBox>(SlotList).First());
         toggle.Toggle();
         Check("automation toggle reverts cleanly",!config.Draft.Slots[0].Enabled&&config.Draft.Slots.All(slot=>!slot.Enabled));
-        var fourth=Find<CheckBox>(SlotList).Last();fourth.IsChecked=true;fourth.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
+        await SelectRailSlot(4);var fourth=Find<CheckBox>(SlotList).First();fourth.IsChecked=true;fourth.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
         Check("native checkbox updates Draft",config.Draft.Slots.Count(s=>s.Enabled)==1&&config.Draft.Slots[3].Enabled);
         Check("preview keeps original slot numbers",Find<TextBlock>(Preview).First().Text.StartsWith("4"));
+        await SelectRailSlot(1);
         config.SaveTemplate("fourth");config.Edit(d=>d.DirectoryMode="shared");config.Restore(config.Templates["fourth"]);Render();
         Check("native mode restore renders isolated",DirectoryMode.SelectedIndex==0&&config.Draft.DirectoryMode=="isolated");
         var firstId=config.Draft.Slots[0].Id;config.Edit(d=>d.Slots[0].Profiles["pi"]=new(){Executable="C:\\Example\\pi.exe",Arguments=["--only-pi"]});Render();
@@ -169,8 +175,9 @@ public partial class MainWindow
         {
             config.Theme=variant.Item1;ApplyTheme();await ResizeForCheckAsync(variant.Item2,variant.Item3);
             var point=LaunchButton.TranslatePoint(new Point(),this);Check($"launch visible {variant}",point.Y>=0&&point.Y+LaunchButton.ActualHeight<=ActualHeight&&point.X>=0&&point.X+LaunchButton.ActualWidth<=ActualWidth);
-            Store.Save(System.IO.Path.Combine(folder,$"layout-{variant.Item1}-{variant.Item2}.json"),new{RequestedWidth=variant.Item2,RequestedHeight=variant.Item3,Width,ActualWidth,Height,ActualHeight,Scale=UiScale.Value,WorkWidth=WorkGrid.ActualWidth,ConfigWidth=ConfigurationPanel.ActualWidth,SummaryWidth=SummaryPanel.ActualWidth,ConfigMargin=ConfigurationPanel.Margin.ToString(),SummaryMargin=SummaryPanel.Margin.ToString(),SummaryColumn=Grid.GetColumn(SummaryPanel),SummaryRow=Grid.GetRow(SummaryPanel),ColumnWidth=SummaryColumn.Width.ToString(),Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});
-            Check($"primary configuration fills width without a resource sidebar {variant}",Math.Abs(ConfigurationPanel.ActualWidth-WorkGrid.ActualWidth)<2&&SummaryColumn.Width.Value==0&&!LaunchOptionsExpander.IsExpanded&&!SummaryPanel.IsVisible);
+            var detailCombo=Find<ComboBox>(SlotList).FirstOrDefault();var selectedSlotIndex=detailCombo!=null&&int.TryParse(new string(AutomationProperties.GetName(detailCombo).Where(char.IsDigit).ToArray()),out var parsedSlot)?parsedSlot-1:-1;
+            Store.Save(System.IO.Path.Combine(folder,$"layout-{variant.Item1}-{variant.Item2}.json"),new{RequestedWidth=variant.Item2,RequestedHeight=variant.Item3,Width,ActualWidth,Height,ActualHeight,Scale=UiScale.Value,WorkWidth=WorkGrid.ActualWidth,ConfigWidth=ConfigurationPanel.ActualWidth,SummaryWidth=SummaryPanel.ActualWidth,ConfigMargin=ConfigurationPanel.Margin.ToString(),SummaryMargin=SummaryPanel.Margin.ToString(),SummaryColumn=Grid.GetColumn(SummaryPanel),SummaryRow=Grid.GetRow(SummaryPanel),ColumnWidth=SummaryColumn.Width.ToString(),RailWidth=Rail.ActualWidth,SelectedSlotIndex=selectedSlotIndex,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});
+            Check($"primary configuration fills the main column without a right summary sidebar {variant}",Math.Abs(ConfigurationPanel.ActualWidth-WorkGrid.ActualWidth)<2&&SummaryColumn.Width.Value==0&&!LaunchOptionsExpander.IsExpanded&&!SummaryPanel.IsVisible);
             Check($"project accessible name {variant}",AutomationProperties.GetName(ProjectPath).Length>0);
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-{variant.Item1}-{variant.Item2}.png"));encoder.Save(file);
@@ -261,6 +268,12 @@ public partial class MainWindow
         await RunReviewUiChecksAsync(Check);
         await RunMultipaneChecksAsync(Check);
         await RunSimpleUiChecksAsync(Check,folder);
+        config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
+        Check("rail index lists every slot with continuous names",Find<Button>(RailSlots).Count()==config.Draft.Slots.Count&&Find<Button>(RailSlots).Select(b=>AutomationProperties.GetName(b)).SequenceEqual(config.Draft.Slots.Select((_,i)=>$"第 {i+1} 项 Agent 行")));
+        await SelectRailSlot(3);
+        Check("rail row selection drives the detail row",AutomationProperties.GetName(Find<ComboBox>(SlotList).First())=="第 3 项 Agent"&&SlotList.Children.Count==1);
+        Render();
+        Check("rail keeps exactly one detail row",SlotList.Children.Count==1);
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});Close();
     }

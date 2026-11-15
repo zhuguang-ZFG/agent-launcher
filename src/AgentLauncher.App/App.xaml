@@ -17,6 +17,10 @@
   <SolidColorBrush x:Key="Selected" Color="#EDF2FC"/>
   <SolidColorBrush x:Key="WarningSurface" Color="#FFF5E5"/>
   <SolidColorBrush x:Key="WarningInk" Color="#8A4B08"/>
+  <SolidColorBrush x:Key="StatusOk" Color="#1E8E3E"/>
+  <SolidColorBrush x:Key="StatusOff" Color="#9AA0A6"/>
+  <SolidColorBrush x:Key="StatusBad" Color="#B42318"/>
+  <SolidColorBrush x:Key="RailSurface" Color="#ECECEE"/>
   <SolidColorBrush x:Key="ErrorInk" Color="#B42318"/>
   <SolidColorBrush x:Key="SelectionInk" Color="#202124"/>
   <SolidColorBrush x:Key="PreviewPage" Color="#191B20"/>
