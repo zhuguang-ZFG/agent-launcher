@@ -8,16 +8,11 @@ namespace AgentLauncher.Windows;
 public sealed record CommandResult(int Code,string Output,string Error);
 public static class ControlledCommand
 {
-    public static async Task<CommandResult> RunAsync(CommandSpec command,string cwd,CancellationToken ct=default,Action<string>? outputLine=null,ResourceSettings? resource=null,long? draftRevision=null,Func<LaunchItem[],Task<Guid?>>? authorize=null)
+    public static async Task<CommandResult> RunAsync(CommandSpec command,string cwd,CancellationToken ct=default,Action<string>? outputLine=null,ResourceSettings? resource=null,long? draftRevision=null)
     {
         ct.ThrowIfCancellationRequested();
         var item=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"Git 准备",cwd,PhysicalDirectory.Workspace(cwd),false,command,ResourcePolicy.GitJobMemoryLimit,"git",PlanningBytes:ResourcePolicy.DefaultGitPlanningBytes,ResourceMode:resource?.Mode??"practical");
         var reserve=await Ipc.ReserveWithCleanupAsync([item],ct,draftRevision:draftRevision,planDigest:ResourcePolicy.PlanDigest([item]));
-        if(!reserve.Ok&&reserve.Decision==AdmissionKind.RequireWaiver.ToString()&&authorize!=null)
-        {
-            ct.ThrowIfCancellationRequested();var waiver=await authorize([item]);ct.ThrowIfCancellationRequested();
-            reserve=await Ipc.ReserveWithCleanupAsync([item],ct,draftRevision:draftRevision,planDigest:ResourcePolicy.PlanDigest([item]),waiverId:waiver);
-        }
         if(!reserve.Ok)throw new IOException(reserve.Message);
         Process? process=null;
         try
@@ -80,7 +75,6 @@ public sealed class WorkspacePreparer
     private readonly string? destinationRoot;
     private ResourceSettings resourceSettings=new();
     private long draftRevision;
-    private Func<LaunchItem[],Task<Guid?>>? authorize;
     public WorkspacePreparer(string? destinationRoot=null){this.destinationRoot=string.IsNullOrWhiteSpace(destinationRoot)?null:destinationRoot;}
     private static bool StructurallyValid(PreparationRecord record,IReadOnlyList<LaunchItem> expected)
     {
@@ -117,11 +111,10 @@ public sealed class WorkspacePreparer
     }
     private static bool ValidText(string? value)=>!string.IsNullOrWhiteSpace(value)&&!value.Contains('\0');
     private static bool AbsolutePath(string? value)=>ValidText(value)&&Path.IsPathFullyQualified(value!);
-    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null,Func<LaunchItem[],Task<Guid?>>? authorize=null,bool forceIsolated=false,string? expectedWorkspaceKey=null)
+    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null,bool forceIsolated=false,string? expectedWorkspaceKey=null)
     {
         resourceSettings=draft.Resource??new ResourceSettings();
         draftRevision=draft.Revision;
-        this.authorize=authorize;
         draft.Validate();
         var active=draft.Slots.Where(s=>s.Enabled).ToArray();if(active.Length==0)throw new IOException("先勾选本次启动项。");
         // A single quick-launch input can demand a worktree even when it is the only item for its workspace.
@@ -197,12 +190,12 @@ public sealed class WorkspacePreparer
             if(record.Baselines.TryGetValue(group.Key,out var fixedOid))oid=fixedOid;
             else{record.Baselines[group.Key]=oid;Store.Save(preparationPath,record);}
             if((await Git(root,["ls-tree",oid,".gitmodules"],ct)).Length>0)throw new IOException("首版不自动准备含子模块的仓库，请先自行准备独立目录。");
-            var sparse=await ControlledCommand.RunAsync(new(git,["config","--bool","core.sparseCheckout"],"exe"),root,ct,resource:resourceSettings,draftRevision:draftRevision,authorize:authorize);
+            var sparse=await ControlledCommand.RunAsync(new(git,["config","--bool","core.sparseCheckout"],"exe"),root,ct,resource:resourceSettings,draftRevision:draftRevision);
             if(sparse.Code is not (0 or 1)||sparse.Output.Trim()=="true")throw new IOException("稀疏检出尚未验证，请使用已准备目录。");
             var dirty=(await Git(root,["status","--porcelain","--untracked-files=normal"],ct)).Length>0;
             if(dirty&&!await confirmHead($"原项目有未提交修改。独立目录只包含已提交版本 {oid[..8]}，不复制未提交文件、依赖或 .env。继续使用这个版本？"))throw new OperationCanceledException("已取消目录准备。");
             ulong estimated=0;
-            var sizeResult=await ControlledCommand.RunAsync(new(git,["ls-tree","-r","--format=%(objectsize)",oid],"exe"),root,ct,line=>{if(ulong.TryParse(line,out var bytes))estimated=checked(estimated+bytes);else if(line!="-")throw new IOException("Git 文件大小格式无效。");},resource:resourceSettings,draftRevision:draftRevision,authorize:authorize);
+            var sizeResult=await ControlledCommand.RunAsync(new(git,["ls-tree","-r","--format=%(objectsize)",oid],"exe"),root,ct,line=>{if(ulong.TryParse(line,out var bytes))estimated=checked(estimated+bytes);else if(line!="-")throw new IOException("Git 文件大小格式无效。");},resource:resourceSettings,draftRevision:draftRevision);
             if(sizeResult.Code!=0)throw new IOException("无法估算检出大小："+sizeResult.Error);
             foreach(var plan in group)
             {
@@ -374,7 +367,7 @@ public sealed class WorkspacePreparer
     }
     private async Task<string> Git(string cwd,string[] args,CancellationToken ct)
     {
-        var result=await ControlledCommand.RunAsync(new(git,args,"exe"),cwd,ct,resource:resourceSettings,draftRevision:draftRevision,authorize:authorize);
+        var result=await ControlledCommand.RunAsync(new(git,args,"exe"),cwd,ct,resource:resourceSettings,draftRevision:draftRevision);
         if(result.Code!=0)throw new IOException($"Git 准备失败（{result.Code}）：{result.Error.Trim()}");return result.Output;
     }
 }

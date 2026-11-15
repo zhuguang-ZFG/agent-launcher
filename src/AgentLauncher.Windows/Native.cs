@@ -136,6 +136,22 @@ public sealed class Job : IDisposable
         }
         finally{Marshal.FreeHGlobal(p);}
     }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryUsage { public ulong Current, Peak; }
+    public ulong? QueryCurrentCommit()
+    {
+        if(Handle.IsClosed||Handle.IsInvalid)return null;
+        // JobObjectMemoryUsageInformation returns the kernel's aggregate Job charge, including descendants.
+        // Never substitute a historical peak or a sum of Process.PrivateMemorySize64 for this live counter.
+        var size=Marshal.SizeOf<MemoryUsage>();var p=Marshal.AllocHGlobal(size);
+        try
+        {
+            if(!Native.QueryInformationJobObject(Handle,28,p,(uint)size,IntPtr.Zero))return null;
+            var usage=Marshal.PtrToStructure<MemoryUsage>(p);
+            return usage.Current<=usage.Peak?usage.Current:null;
+        }
+        finally{Marshal.FreeHGlobal(p);}
+    }
     public void SetMemoryLimit(ulong bytes)
     {
         if(Handle.IsClosed||Handle.IsInvalid)throw new InvalidOperationException("任务组句柄不可用，无法调整内存额度。");
@@ -164,13 +180,13 @@ public sealed class ProtectedProcess : IDisposable
     private Native.ProcessInfo info;
     public Process Process { get; }
     public long CreationTime { get; }
-    public ProtectedProcess(CommandSpec command,string cwd,Job root,Job child,bool redirected=false,bool createNoWindow=false):this(command,cwd,[root,child],redirected,createNoWindow){}
-    public ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,bool redirected=false,bool createNoWindow=false)
+    public ProtectedProcess(CommandSpec command,string cwd,Job root,Job child,bool redirected=false,bool createNoWindow=false,IReadOnlyDictionary<string,string>? environment=null):this(command,cwd,[root,child],redirected,createNoWindow,environment){}
+    public ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,bool redirected=false,bool createNoWindow=false,IReadOnlyDictionary<string,string>? environment=null)
     {
         if(chain.Count<1)throw new ArgumentException("启动链至少需要一个任务组。",nameof(chain));
         var attributeCount=redirected?2:1;
         UIntPtr size=UIntPtr.Zero;Native.InitializeProcThreadAttributeList(IntPtr.Zero,attributeCount,0,ref size);
-        var attrs=Marshal.AllocHGlobal(checked((int)size));var jobs=Marshal.AllocHGlobal(chain.Count*IntPtr.Size);var handles=Marshal.AllocHGlobal(3*IntPtr.Size);var initialized=false;
+        var attrs=Marshal.AllocHGlobal(checked((int)size));var jobs=Marshal.AllocHGlobal(chain.Count*IntPtr.Size);var handles=Marshal.AllocHGlobal(3*IntPtr.Size);var initialized=false;var environmentBlock=IntPtr.Zero;
         try
         {
             Native.Check(Native.InitializeProcThreadAttributeList(attrs,attributeCount,0,ref size));initialized=true;
@@ -185,12 +201,23 @@ public sealed class ProtectedProcess : IDisposable
                 startup.Info.Flags=0x100;startup.Info.StdInput=std[0];startup.Info.StdOutput=std[1];startup.Info.StdError=std[2];
             }
             var line=new StringBuilder(string.Join(" ",new[]{command.Executable}.Concat(command.Arguments).Select(Quote)));
-            Native.Check(Native.CreateProcess(command.Executable,line,IntPtr.Zero,IntPtr.Zero,redirected,0x00080000|0x4|(createNoWindow?0x08000000u:0),IntPtr.Zero,cwd,ref startup,out info));
+            if(environment is not null)
+            {
+                var values=new SortedDictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+                foreach(System.Collections.DictionaryEntry pair in Environment.GetEnvironmentVariables())values[(string)pair.Key]=(string)pair.Value!;
+                foreach(var pair in environment)
+                {
+                    if(string.IsNullOrEmpty(pair.Key)||pair.Key.IndexOfAny(['=','\0'])>=0||pair.Value.Contains('\0'))throw new ArgumentException("环境变量含非法字符。",nameof(environment));
+                    values[pair.Key]=pair.Value;
+                }
+                environmentBlock=Marshal.StringToHGlobalUni(string.Join('\0',values.Select(pair=>pair.Key+"="+pair.Value))+"\0\0");
+            }
+            Native.Check(Native.CreateProcess(command.Executable,line,IntPtr.Zero,IntPtr.Zero,redirected,0x00080000|0x4|(createNoWindow?0x08000000u:0)|(environmentBlock!=IntPtr.Zero?0x400u:0),environmentBlock,cwd,ref startup,out info));
             foreach(var level in chain){Native.Check(Native.IsProcessInJob(info.Process,level.Handle,out var joined));if(!joined)throw new IOException("进程未进入要求的资源组。");}
             Process=Process.GetProcessById((int)info.Pid);_ = Process.Handle;CreationTime=Process.StartTime.ToUniversalTime().ToFileTimeUtc();
         }
         catch { if(info.Process!=IntPtr.Zero){Native.TerminateProcess(info.Process,1);DisposeHandles();}throw; }
-        finally{if(initialized)Native.DeleteProcThreadAttributeList(attrs);Marshal.FreeHGlobal(attrs);Marshal.FreeHGlobal(jobs);Marshal.FreeHGlobal(handles);}
+        finally{if(initialized)Native.DeleteProcThreadAttributeList(attrs);Marshal.FreeHGlobal(attrs);Marshal.FreeHGlobal(jobs);Marshal.FreeHGlobal(handles);if(environmentBlock!=IntPtr.Zero)Marshal.FreeHGlobal(environmentBlock);}
     }
     public void Resume(){if(Native.ResumeThread(info.Thread)==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error());}
     public void AbortBeforeResume(){Native.Check(Native.TerminateProcess(info.Process,1));Process.WaitForExit(2000);}

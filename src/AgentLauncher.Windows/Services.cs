@@ -71,7 +71,7 @@ public static class Store
     {
         var p=Marshal.AllocHGlobal(32);try{if(NtQuerySystemInformation(90,p,32,out _)!=0)throw new IOException("无法读取系统启动身份。");return Marshal.PtrToStructure<Guid>(p).ToString("N");}finally{Marshal.FreeHGlobal(p);}
     }
-    public static bool IsTerminal(ControlEntry e)=>e.State is "Revoked" or "Settled" or "FailedBeforeStart";
+    public static bool IsTerminal(ControlEntry e)=>ControlEntryStates.IsTerminal(e);
 }
 public static class Ipc
 {
@@ -101,9 +101,9 @@ public static class Ipc
 #endif
         return await ReadResponseAsync(pipe,timeout.Token);
     }
-    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default,Action? beforeCleanup=null,ResourcePolicySnapshot? policy=null,long? draftRevision=null,string? policyHash=null,string? planDigest=null,IReadOnlyList<Guid>? enabledSlotIds=null,Guid? waiverId=null,Guid? taskEntryId=null)
+    public static async Task<Response> ReserveWithCleanupAsync(LaunchItem[] items,CancellationToken ct=default,Action? beforeCleanup=null,ResourcePolicySnapshot? policy=null,long? draftRevision=null,string? policyHash=null,string? planDigest=null,IReadOnlyList<Guid>? enabledSlotIds=null,Guid? taskEntryId=null)
     {
-        try{return await SendCoreAsync(new(taskEntryId is null?"reserve":"reserve-task",Guid.NewGuid(),items,WaiverId:waiverId,DraftRevision:draftRevision,PolicyHash:policyHash,PlanDigest:planDigest,EnabledSlotIds:enabledSlotIds,Policy:policy,TaskEntryId:taskEntryId),ct,true);}
+        try{return await SendCoreAsync(new(taskEntryId is null?"reserve":"reserve-task",Guid.NewGuid(),items,DraftRevision:draftRevision,PolicyHash:policyHash,PlanDigest:planDigest,EnabledSlotIds:enabledSlotIds,Policy:policy,TaskEntryId:taskEntryId),ct,true);}
         catch(Exception e)when(e is IOException or TimeoutException or OperationCanceledException)
         {
             // The server may have committed the reservation before the client saw a failure; revoke best-effort so the workspace is not held.
@@ -130,6 +130,7 @@ public static class Ipc
             if(++frames>MaxResponseFrames)throw new IOException("协议分页帧数量超出边界。");
             var nextFrame=await ReadFrameAsync<Response>(stream,ct);var next=nextFrame.Message;
             if(next.Ok!=first.Ok||next.Message!=first.Message||next.Memory!=first.Memory||next.Epoch!=first.Epoch||next.AdmissionBlockedReason!=first.AdmissionBlockedReason||next.StatusSignature!=first.StatusSignature||next.Unchanged!=first.Unchanged||next.RootCpuRate!=first.RootCpuRate||next.ReconcileOffered!=first.ReconcileOffered)throw new IOException("协议分页帧不一致，已拒绝混合响应。");
+            if((first.Budgets is null)!=(next.Budgets is null)||(first.Budgets is not null&&!first.Budgets.SequenceEqual(next.Budgets!)))throw new IOException("协议资源读数不一致，已拒绝混合响应。");
             if(next.Entries is not {Length:>0})throw new IOException("协议分页帧缺少记录。");
             bytes+=nextFrame.Size;
             if(bytes>MaxResponseBytes)throw new IOException("协议分页响应超出边界。");
@@ -154,19 +155,31 @@ public static class Ipc
         // rather than inventing zero usage or terminating the monitor while writing a reply.
         if(response.Memory is {} memory&&!double.IsFinite(memory.CpuPercent))response=response with{Memory=null};
         var single=JsonSerializer.SerializeToUtf8Bytes(response with{More=false},Store.Json);if(single.Length<=FrameLimit)return [single];
-        if(response.Entries is not {Length:>0})throw new IOException("响应超出单帧边界且没有可分页记录。");
+        if(response.Entries is not {Length:>0})
+        {
+            if(response.Budgets is not null)return SplitResponse(response with{Budgets=null});
+            throw new IOException("响应超出单帧边界且没有可分页记录。");
+        }
         var header=response with{Entries=null,More=true};var frames=new List<Response>();var chunk=new List<ControlEntry>();
         var empty=JsonSerializer.SerializeToUtf8Bytes(header,Store.Json).LongLength;var bytes=empty;
         foreach(var entry in response.Entries!)
         {
             var size=JsonSerializer.SerializeToUtf8Bytes(entry,Store.Json).LongLength+8;
+            // Usage is advisory. Never make an otherwise readable authority record disappear
+            // because fresh telemetry enlarged the frame envelope; clients fall back to unknown usage.
+            if(response.Budgets is not null&&empty+size>FrameLimit)return SplitResponse(response with{Budgets=null});
             if(chunk.Count>0&&bytes+size>FrameLimit){frames.Add(header with{Entries=chunk.ToArray()});chunk.Clear();bytes=empty;}
             chunk.Add(entry);bytes+=size;
         }
         frames.Add(header with{Entries=chunk.ToArray(),More=false});
         var encoded=new List<byte[]>(frames.Count);long total=0;
         foreach(var frame in frames){var data=JsonSerializer.SerializeToUtf8Bytes(frame,Store.Json);if(data.Length>FrameLimit)throw new IOException("控制记录参数过大，无法在协议边界内完整传输；已拒绝保存或读取该记录。");total+=data.Length;encoded.Add(data);}
-        if(encoded.Count>MaxResponseFrames||total>MaxResponseBytes)throw new IOException("协议分页响应超出边界。");return encoded;
+        if(encoded.Count>MaxResponseFrames||total>MaxResponseBytes)
+        {
+            if(response.Budgets is not null)return SplitResponse(response with{Budgets=null});
+            throw new IOException("协议分页响应超出边界。");
+        }
+        return encoded;
     }
     public static Task WriteAsync<T>(Stream stream,T message,CancellationToken ct)=>WriteFrameAsync(stream,JsonSerializer.SerializeToUtf8Bytes(message,Store.Json),ct);
     private static async Task WriteFrameAsync(Stream stream,byte[] bytes,CancellationToken ct)
@@ -263,7 +276,8 @@ public static partial class Commands
     {
         var input=string.IsNullOrWhiteSpace(profile.Executable)?Agents.Get(agentId).Command:profile.Executable;
         var path=FindExe(input)??throw new FileNotFoundException($"未找到 {Agents.Get(agentId).Name} 命令，请选择程序位置。");
-        if(Path.GetExtension(path).Equals(".exe",StringComparison.OrdinalIgnoreCase))return new(path,profile.Arguments,"exe");
+        CommandSpec Protect(CommandSpec command)=>agentId switch { "omp"=>OmpMemoryGuard.Attach(command), "qoder"=>QoderMemoryGuard.Attach(command), _=>command };
+        if(Path.GetExtension(path).Equals(".exe",StringComparison.OrdinalIgnoreCase))return Protect(new(path,profile.Arguments,"exe"));
         if(!Path.GetExtension(path).Equals(".cmd",StringComparison.OrdinalIgnoreCase))throw new IOException("首版只支持 exe 和已识别的 Node 启动脚本。");
         if(new FileInfo(path).Length>8192)throw new IOException("启动脚本超出适配范围。");
         var text=File.ReadAllText(path).Replace("\r\n","\n").Trim();var folder=Path.GetDirectoryName(path)!;
@@ -317,7 +331,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
         if(script==null||!File.Exists(script))throw new IOException("脚本适配未识别。请选择实际 exe，或选择 Node.exe 并逐项填写入口脚本与参数。");
         // The npm shim itself prefers a sibling node.exe; the Pi shim always resolves node through PATH. Mirror each template's own selection semantics.
         var node=npmStyle&&File.Exists(Path.Combine(folder,"node.exe"))?Path.Combine(folder,"node.exe"):FindExe("node.exe")??throw new FileNotFoundException("未找到 Node.js。");
-        return new(node,[script,..profile.Arguments],"node-shim");
+        return Protect(new(node,[script,..profile.Arguments],"node-shim"));
     }
     public static string Terminal(string explicitPath)
     {
