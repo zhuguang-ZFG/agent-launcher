@@ -1208,3 +1208,9 @@ powershell -NoProfile -File scripts/test.ps1
 - 回归（RED→GREEN）：`UiChecks` 新增 3 项——pill 跟随预览刷新（先置 `rail-stale-marker` 防既有文本真空通过）、队列跟随任务渲染（合成 taskBook + `RenderTasks()`）、会话跟随监控刷新（合成 Started 条目 + `RenderMonitorStatus()`）；探针前以 `savedStatus/savedBook` 存现场、`finally` 恢复真实快照（初版曾恢复为空快照，会架空「UI checks do not launch agents」守卫，经评审指出后改为恢复探针前真实状态，守卫语义不变）。RED：摘除 3 处挂钩后「rail queue follows task render」如期失败（EXIT=1）；恢复后 **282/282** 全绿（274 基线 + 2 修复轮 + 3 Rail + 3 刷新接缝）。
 - 内存同口径核验（修正 §64 的不严谨表述）：§64 以不同运行的数值对比并断言「±7 MiB 噪声带」，方法不成立。现以 worktree 旧版 `2c32dd6`（v0.7）与最终树同机、同 ui-check 夹具、背靠背各跑一次取 `ui-idle-memory.json`：v0.7 PrivateBytes 132.2 MiB / WorkingSet 203.8 MiB；v0.8 134.6 / 199.7。同指标增量 **PrivateBytes +2.4 MiB（+1.8%）、WorkingSet −4.1 MiB**——无增长趋势，§10 收敛目标按此同口径证据判定达成；§64 的「+3.8 ≤5 预算内/噪声带」表述作废。测量环境说明：v0.7 套件在同一 run 后段于 ACC-U07（真实终端启动）失败一次，判定为 worktree 路径环境敏感；内存快照在其之前按固定点采集，不受影响。
 - 门禁：最终树 `scripts/test.ps1` 全绿（native 183/0、repair 36/0、Integration failures: 0、UI 282/282，2026-11-15，`artifacts/gate-20261115-v08c.log`）；一并修正 `MainWindow.Polling.cs` 行尾归一（内容 5+/2−，无整文件 EOL 噪音）。
+
+## 66. 应用图标与窄态能力损失入档（2026-11-15，Asia/Shanghai）
+
+- 图标：`Assets/app.ico`（PIL 生成，256/64/48/32/24/16 六档 PNG 载荷，品牌 `>_` 主题 #7BD88A/#26282C）；`ApplicationIcon` 入 exe 资源，窗口 `Icon` 用 pack URI 引用同一 Resource，单一事实源。
+- 分屏资源问题（用户问）：实现实证——`PaneLayout.SplitSteps` 恒生成一条 wt 命令（1×new-tab + split-pane 网格），N 个 Agent 永远共用一个 Windows Terminal 窗口；不存在「逐个窗口」路径。分屏省掉的是每窗口终端进程开销（N−1 份渲染/GPU 表面）；pane 级 cmd/agent 进程相同，准入排队逻辑不受影响。
+- 评审收口：窄态（<900 逻辑 px）能力损失已写入设计 §6（更换项目按钮、⚙/更多/恢复备份不可达；拖拽换项目与「设置」保持可达）；§9 中圆点配色映射、摘要 ≤3+「全部…」截断两项尚无自动化断言（窄态 RailWidth==56 已被布局 JSON 检查覆盖）——列入待评审积压，不阻塞 v0.8 交付。
