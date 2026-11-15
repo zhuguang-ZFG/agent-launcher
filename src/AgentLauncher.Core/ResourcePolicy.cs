@@ -246,6 +246,11 @@ public static class ResourcePolicy
         try { ValidateSnapshot(policy, sample.Total, sample.CommitLimit); }
         catch (InvalidDataException ex) { return Result(AdmissionKind.Deny, ex.Message, true); }
 
+        // Accounting fails closed before any advisory return: a saturating cap sum cannot be budgeted in any mode.
+        var unionCap = requested.Count == 0 ? capReserved : SumCap(policy, [.. reserved, .. requested]);
+        if (unionCap == ulong.MaxValue)
+            return Result(AdmissionKind.Deny, "各项保护上限加总溢出，无法核算预算；请检查资源设置中的上限值。", true);
+
         var physicalNeed = AddSaturating(AddSaturating(planningRequested, RemainingPhysical(policy, reserved)), policy.PhysicalFloor);
         if (sample.Available < physicalNeed)
         {
@@ -280,11 +285,8 @@ public static class ResourcePolicy
                     : Result(AdmissionKind.Allow, text + "实用模式不拦截，每项及整池的保护不会放宽。", true, true);
             }
         }
-        if (includeSoftBudget && CombinedCapExceeds(policy, reserved, requested, soft, out var unionCap))
+        if (includeSoftBudget && unionCap > soft)
         {
-            // A saturating cap sum cannot be accounted against any budget; refuse rather than advise.
-            if (unionCap == ulong.MaxValue)
-                return Result(AdmissionKind.Deny, "各项保护上限加总溢出，无法核算预算；请检查资源设置中的上限值。", true);
             if (strict)
                 return Result(AdmissionKind.Deny, "本次要用的内存超过总预算，请少勾选几个 Agent。", true);
             return Result(AdmissionKind.Allow, "按 Job 上限加总已超过软预算，同时运行可能互相挤压；实用模式不拦截，硬保护仍然有效。", true, true);
@@ -461,7 +463,8 @@ public static class ResourcePolicy
         if (sample is null) return false;
         if (DateTimeOffset.UtcNow - sample.At > TimeSpan.FromSeconds(SampleTtlSeconds)) return false;
         if (!double.IsFinite(sample.CpuPercent) || sample.CpuPercent < 0 || sample.CpuPercent > 100) return false;
-        if (sample.Total == 0 || sample.Available == 0 || sample.CommitLimit == 0 || sample.CommitAvailable == 0) return false;
+        // Zero availability is exhaustion evidence, not a failed sample; only structural zeroes are invalid.
+        if (sample.Total == 0 || sample.CommitLimit == 0) return false;
         if (sample.Available > sample.Total || sample.CommitAvailable > sample.CommitLimit) return false;
         return true;
     }
@@ -553,15 +556,6 @@ public static class ResourcePolicy
             sum += value;
         }
         return sum;
-    }
-
-    static bool CombinedCapExceeds(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> reserved, IReadOnlyList<BudgetItem> requested, ulong cap, out ulong unionCap)
-    {
-        var union = new List<BudgetItem>(reserved.Count + requested.Count);
-        union.AddRange(reserved);
-        union.AddRange(requested);
-        unionCap = SumCap(policy, union);
-        return unionCap > cap;
     }
 
     static ulong Min(ulong left, ulong right) => left < right ? left : right;
