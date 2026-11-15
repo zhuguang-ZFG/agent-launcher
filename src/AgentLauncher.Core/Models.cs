@@ -120,9 +120,14 @@ public sealed class ControlEntry
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? PhysicalFloor { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? CommitFloor { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public int? CpuRate { get; set; }
-    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public Guid? WaiverId { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? Pool { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? PoolMemoryLimit { get; set; }
+}
+// Single source of truth for "this attempt can no longer be running": the monitor, the ledger migration and every
+// resource preview must agree, so the state set is never repeated by hand.
+public static class ControlEntryStates
+{
+    public static bool IsTerminal(ControlEntry entry) => entry.State is "Revoked" or "Settled" or "FailedBeforeStart";
 }
 public sealed class PoolRecord
 {
@@ -152,8 +157,8 @@ public sealed class Ledger : IJsonOnDeserialized
     internal void ConfirmTaskClaimsMigrated() => TaskClaimsAbsentFromJson = false;
 }
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? JobMemory = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? PoolMemory = null);
-public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, Guid? WaiverId = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null);
-public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, Guid? WaiverId = null, DateTimeOffset? WaiverExpiresAt = null, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null, bool? ReconcileOffered = null, PoolRecord[]? Pools = null);
+public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null);
+public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null, bool? ReconcileOffered = null, PoolRecord[]? Pools = null, BudgetItem[]? Budgets = null);
 
 public sealed record ArchivedAttempt(int SchemaVersion,Guid AttemptId,string Digest,ControlEntry Entry);
 

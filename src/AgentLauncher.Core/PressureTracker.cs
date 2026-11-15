@@ -6,7 +6,7 @@ public sealed class PressureTracker
     public int HighStreak { get; private set; }
     public int HealthyStreak { get; private set; }
 
-    public void Observe(MemorySnapshot sample, ulong physicalFloor)
+    public void Observe(MemorySnapshot sample, ulong physicalFloor, ulong? commitFloor = null)
     {
         if (!ResourcePolicy.IsSampleValid(sample))
         {
@@ -15,7 +15,8 @@ public sealed class PressureTracker
             return;
         }
 
-        var high = sample.CpuPercent >= ResourcePolicy.CpuBusyPercent || sample.Available < physicalFloor;
+        var high = sample.CpuPercent >= ResourcePolicy.CpuBusyPercent || sample.Available < physicalFloor
+            || sample.CommitAvailable < (commitFloor ?? ResourcePolicy.DefaultCommitFloor(sample.CommitLimit));
         if (high)
         {
             HighStreak++;

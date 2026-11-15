@@ -39,9 +39,15 @@ public sealed class AgentCapability
 
 public static class AgentPresets
 {
-    // Versions below are the ones actually probed on 2026-11-11; a different installed version keeps manual editing and hides these buttons.
+    // Versions below are the ones actually probed on this machine; a different installed version keeps manual editing and hides these buttons.
+    // hermes intentionally has no presets: no local install to pin (advisory 2026-11-14). Docs-verified flags
+    // (`--resume <id>`/`-c`/`--model`) stay manual-argument only until a real probe pins the exact version.
     public const string OmpVerifiedVersion = "18.18.8";
+    public const string OmpCurrentVerifiedVersion = "18.20.0";
     public const string CodexVerifiedVersion = "0.167.1";
+    public const string ClaudeVerifiedVersion = "2.1.322";
+    public const string PiVerifiedVersion = "1.5.2";
+    public const string QoderVerifiedVersion = "1.1.89";
 
     private static readonly ArgumentPreset[] all =
     [
@@ -50,10 +56,30 @@ public static class AgentPresets
         new("omp", "omp-resume", "恢复指定会话", "resume-session", ["--resume", ArgumentPreset.ValueToken], "会话 ID 前缀或路径", OmpVerifiedVersion),
         new("omp", "omp-model", "指定模型", "model", ["--model", ArgumentPreset.ValueToken], "模型（如 openai/gpt-5.2）", OmpVerifiedVersion),
         new("omp", "omp-thinking", "高思考强度", "thinking", ["--thinking", "high"], null, OmpVerifiedVersion),
+        new("omp", "omp-new-current", "新会话（当前版本）", "new-session", [], null, OmpCurrentVerifiedVersion),
+        new("omp", "omp-continue-current", "续接上次会话（当前版本）", "resume-last", ["--continue"], null, OmpCurrentVerifiedVersion),
+        new("omp", "omp-resume-current", "恢复指定会话（当前版本）", "resume-session", ["--resume", ArgumentPreset.ValueToken], "会话 ID 前缀或路径", OmpCurrentVerifiedVersion),
+        new("omp", "omp-model-current", "指定模型（当前版本）", "model", ["--model", ArgumentPreset.ValueToken], "模型（如 openai/gpt-5.2）", OmpCurrentVerifiedVersion),
+        new("omp", "omp-thinking-current", "高思考强度（当前版本）", "thinking", ["--thinking", "high"], null, OmpCurrentVerifiedVersion),
         new("codex", "codex-new", "新会话（无参数）", "new-session", [], null, CodexVerifiedVersion),
         new("codex", "codex-continue", "续接最近的会话", "resume-last", ["resume", "--last"], null, CodexVerifiedVersion),
         new("codex", "codex-resume", "恢复指定会话", "resume-session", ["resume", ArgumentPreset.ValueToken], "会话 ID", CodexVerifiedVersion),
-        new("codex", "codex-model", "指定模型", "model", ["-m", ArgumentPreset.ValueToken], "模型名称", CodexVerifiedVersion)
+        new("codex", "codex-model", "指定模型", "model", ["-m", ArgumentPreset.ValueToken], "模型名称", CodexVerifiedVersion),
+        // claude 2.1.322 (--help/--version probed 2026-11-14): --continue latest, --resume <id>, --model <model>.
+        new("claude", "claude-new", "新会话（无参数）", "new-session", [], null, ClaudeVerifiedVersion),
+        new("claude", "claude-continue", "续接最近的会话", "resume-last", ["--continue"], null, ClaudeVerifiedVersion),
+        new("claude", "claude-resume", "恢复指定会话", "resume-session", ["--resume", ArgumentPreset.ValueToken], "会话 ID", ClaudeVerifiedVersion),
+        new("claude", "claude-model", "指定模型", "model", ["--model", ArgumentPreset.ValueToken], "模型名称或别名", ClaudeVerifiedVersion),
+        // pi 1.5.2 (probed 2026-11-14): --continue resumes this directory's latest session; --resume opens its own
+        // interactive picker, so no value preset is offered. --model takes a pattern or provider/id.
+        new("pi", "pi-new", "新会话（无参数）", "new-session", [], null, PiVerifiedVersion),
+        new("pi", "pi-continue", "续接本目录最近会话", "resume-last", ["--continue"], null, PiVerifiedVersion),
+        new("pi", "pi-model", "指定模型", "model", ["--model", ArgumentPreset.ValueToken], "模型 pattern 或 provider/id", PiVerifiedVersion),
+        // qodercli 1.1.89 (--help/--version probed 2026-11-14); no permission flags are added.
+        new("qoder", "qoder-new", "新会话（无参数）", "new-session", [], null, QoderVerifiedVersion),
+        new("qoder", "qoder-continue", "续接最近会话", "resume-last", ["--continue"], null, QoderVerifiedVersion),
+        new("qoder", "qoder-resume", "恢复指定会话", "resume-session", ["--resume", ArgumentPreset.ValueToken], "会话 ID", QoderVerifiedVersion),
+        new("qoder", "qoder-model", "指定模型", "model", ["--model", ArgumentPreset.ValueToken], "模型名称", QoderVerifiedVersion)
     ];
 
     public static IReadOnlyList<ArgumentPreset> All => all;

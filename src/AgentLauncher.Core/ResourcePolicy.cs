@@ -29,9 +29,11 @@ public sealed record ResourcePolicySnapshot(
     ulong GitJobMemoryLimit, ulong GitPlanningBytes,
     string PoolMode = ResourcePolicy.PoolIndependent, ulong PoolMemoryLimit = 0);
 
-public sealed record BudgetItem(Guid Id, string Kind, ulong PlanningBytes, ulong JobMemoryLimit, Guid? PoolId = null, ulong? PoolLimit = null);
+// Usage credits come only from the monitor's live Job queries, never from launch requests or historical peaks.
+public sealed record BudgetItem(Guid Id, string Kind, ulong PlanningBytes, ulong JobMemoryLimit, Guid? PoolId = null, ulong? PoolLimit = null,
+    ulong? CurrentCommitBytes = null, ulong? CurrentPhysicalBytes = null, ulong? PoolCommitBytes = null);
 
-public enum AdmissionKind { Allow, RequireWaiver, Deny }
+public enum AdmissionKind { Allow, Deny }
 
 public sealed record AdmissionDecision(
     AdmissionKind Kind,
@@ -43,9 +45,10 @@ public sealed record AdmissionDecision(
     ulong SoftCap,
     ulong PhysicalFloor,
     ulong CommitFloor,
-    bool SampleValid)
+    bool SampleValid,
+    bool Advisory = false)
 {
-    public bool Launchable => Kind is AdmissionKind.Allow or AdmissionKind.RequireWaiver;
+    public bool Launchable => Kind is AdmissionKind.Allow;
 }
 
 public static class ConfigurationCompatibility
@@ -125,7 +128,7 @@ public static class LedgerMigration
         foreach (var entry in ledger.Entries)
         {
             // Finished history keeps the pool id for display; only an entry that can still launch needs frozen pool metadata.
-            if (entry.Plan.PoolId is { } id && entry.State is not ("Revoked" or "Settled" or "FailedBeforeStart"))
+            if (entry.Plan.PoolId is { } id && !ControlEntryStates.IsTerminal(entry))
             {
                 var pool = ledger.Pools.SingleOrDefault(p => p.Id == id) ?? throw new InvalidDataException("控制账本缺少池记录，已停止启动与回收。");
                 if (pool.MemoryLimit == 0) throw new InvalidDataException("控制账本中的池上限不可用。");
@@ -141,7 +144,7 @@ public static class LedgerMigration
     {
         if (ledger is null) throw new InvalidDataException("控制账本损坏或版本不支持。");
         if (ledger.BootId == boot) return false;
-        foreach (var entry in ledger.Entries.Where(e => e.State is not ("Revoked" or "Settled" or "FailedBeforeStart")))
+        foreach (var entry in ledger.Entries.Where(e => !ControlEntryStates.IsTerminal(e)))
         {
             entry.State = "Settled";
             entry.Detail = "系统已重新启动，未重放旧请求";
@@ -168,16 +171,20 @@ public static class ResourcePolicy
     public const int MaxCpuRate = 8000;
     public const int CpuBusyPercent = 80;
     public const int SampleTtlSeconds = 3;
-    public const int WaiverTtlSeconds = 45;
     public const int IdleTimeoutSeconds = 15;
     public const int CommandLineLimit = 24000;
     public const int MaxSlots = 16;
+    // Ray-style fixed concurrency pool: cap how many agent panes run at once instead of
+    // refusing launches when readings dip; the kernel Job cap stays the hard wall per process.
+    public const int MaxConcurrentAgents = 8;
     public const string PoolIndependent = "independent";
     public const string PoolShared = "shared";
     public const ulong AgentBudget = 2 * GiB;
     public const ulong GitBudget = GiB;
-    public static ulong DefaultPhysicalFloor(ulong total) => Math.Max(2 * GiB, total / 8);
-    public static ulong DefaultCommitFloor(ulong commitLimit) => Math.Max(2 * GiB, commitLimit / 20);
+    // In conservative mode floors refuse new work before the machine thrashes; in other modes they only advise.
+    // References: earlyoom acts at ~10% RAM free; Kubernetes admits on requests while limits are kernel-enforced.
+    public static ulong DefaultPhysicalFloor(ulong total) => Math.Max(3 * GiB / 2, total / 12);
+    public static ulong DefaultCommitFloor(ulong commitLimit) => Math.Max(3 * GiB / 2, commitLimit / 24);
     public static ulong SoftCap(ulong total)
     {
         var portion = total / 100 * 35 + total % 100 * 35 / 100;
@@ -228,8 +235,10 @@ public static class ResourcePolicy
         var floor = policy.PhysicalFloor;
         var commitFloor = policy.CommitFloor;
 
-        AdmissionDecision Result(AdmissionKind kind, string reason, bool sampleValid) =>
-            new(kind, reason, planningRequested, planningReserved, capRequested, capReserved, soft, floor, commitFloor, sampleValid);
+        var strict = policy.Mode == "conservative";
+
+        AdmissionDecision Result(AdmissionKind kind, string reason, bool sampleValid, bool advisory = false) =>
+            new(kind, reason, planningRequested, planningReserved, capRequested, capReserved, soft, floor, commitFloor, sampleValid, advisory);
 
         if (!IsSampleValid(sample) || sample is null)
             return Result(AdmissionKind.Deny, "系统采样无效，请稍后重试。", false);
@@ -237,12 +246,26 @@ public static class ResourcePolicy
         try { ValidateSnapshot(policy, sample.Total, sample.CommitLimit); }
         catch (InvalidDataException ex) { return Result(AdmissionKind.Deny, ex.Message, true); }
 
-        if (!HasRoom(sample.Available, planningRequested, planningReserved, policy.PhysicalFloor))
-            return Result(AdmissionKind.Deny, "现在可用内存不够：要给系统留余量。请关掉一些应用，或减少启动的 Agent 个数。", true);
-        if (!HasRoom(sample.CommitAvailable, planningRequested, planningReserved, policy.CommitFloor))
-            return Result(AdmissionKind.Deny, "系统内存余量不足，暂时不能新增任务。", true);
+        var physicalNeed = AddSaturating(AddSaturating(planningRequested, RemainingPhysical(policy, reserved)), policy.PhysicalFloor);
+        if (sample.Available < physicalNeed)
+        {
+            var text = $"可用内存 {GiBText(sample.Available)} GiB，本次启动需要 {GiBText(physicalNeed)} GiB（含系统保留 {GiBText(floor)} GiB），还差约 {ShortfallGiB(physicalNeed, sample.Available)} GiB。";
+            return strict
+                ? Result(AdmissionKind.Deny, text + "保存并退出不用的 Agent 或应用，或用「按资源依次启动」等待资源。", true)
+                : Result(AdmissionKind.Allow, text + "实用模式不拦截，进程内存硬上限仍然生效；建议保存并退出不用的 Agent 或应用。", true, true);
+        }
+        var commitNeed = AddSaturating(RemainingCommit(policy, reserved, requested), policy.CommitFloor);
+        if (sample.CommitAvailable < commitNeed)
+        {
+            var text = $"提交余量 {GiBText(sample.CommitAvailable)} GiB，本次需要 {GiBText(commitNeed)} GiB，还差约 {ShortfallGiB(commitNeed, sample.CommitAvailable)} GiB。";
+            return strict
+                ? Result(AdmissionKind.Deny, text + "保存并退出不用的 Agent、减少并发，或用「按资源依次启动」等待资源。", true)
+                : Result(AdmissionKind.Allow, text + "实用模式不拦截，进程内存硬上限仍然生效；建议保存并退出不用的 Agent 或减少并发。", true, true);
+        }
         if (sample.CpuPercent >= CpuBusyPercent)
-            return Result(AdmissionKind.Deny, "整机 CPU 正忙，稍等片刻再启动。", true);
+            return strict
+                ? Result(AdmissionKind.Deny, "整机 CPU 正忙，稍等片刻再启动。", true)
+                : Result(AdmissionKind.Allow, "整机 CPU 正忙，启动后响应可能偏慢；实用模式不拦截。", true, true);
 
         if(includeSoftBudget)
         {
@@ -251,14 +274,20 @@ public static class ResourcePolicy
             {
                 if(!requested.Any(item=>item.PoolId==pool.Key))continue;
                 if(SumPlanning(policy,pool.ToArray())<=pool.Min(item=>item.PoolLimit!.Value))continue;
-                return Result(policy.Mode=="conservative"?AdmissionKind.Deny:AdmissionKind.RequireWaiver,"共享池内各项规划估算之和超过池硬上限；并发分配可能被内核拒绝。请减少并发或明确确认风险；单项及整池保护不会放宽。",true);
+                var text="这批 Agent 的预计总量超过共享池上限，同时运行时可能被系统拒绝分配。";
+                return strict
+                    ? Result(AdmissionKind.Deny, text + "请减少同时启动数；每项及整池的保护不会放宽。", true)
+                    : Result(AdmissionKind.Allow, text + "实用模式不拦截，每项及整池的保护不会放宽。", true, true);
             }
         }
-        if (includeSoftBudget && CombinedCapExceeds(policy, reserved, requested, soft))
+        if (includeSoftBudget && CombinedCapExceeds(policy, reserved, requested, soft, out var unionCap))
         {
-            if (policy.Mode == "conservative")
+            // A saturating cap sum cannot be accounted against any budget; refuse rather than advise.
+            if (unionCap == ulong.MaxValue)
+                return Result(AdmissionKind.Deny, "各项保护上限加总溢出，无法核算预算；请检查资源设置中的上限值。", true);
+            if (strict)
                 return Result(AdmissionKind.Deny, "本次要用的内存超过总预算，请少勾选几个 Agent。", true);
-            return Result(AdmissionKind.RequireWaiver, "按 Job 上限加总已超过软预算，需要一次性确认授权后才能继续。硬保护仍然有效。", true);
+            return Result(AdmissionKind.Allow, "按 Job 上限加总已超过软预算，同时运行可能互相挤压；实用模式不拦截，硬保护仍然有效。", true, true);
         }
         return Result(AdmissionKind.Allow, "资源充足", true);
     }
@@ -437,6 +466,11 @@ public static class ResourcePolicy
         return true;
     }
 
+    // Status telemetry is advisory for previews; the monitor always remeasures before granting a launch.
+    public static BudgetItem[] ReservedFor(Response status) => status.Budgets
+        ?? (status.Entries ?? []).Where(e => !ControlEntryStates.IsTerminal(e))
+            .Select(e => BudgetOf(e.Plan, e.PoolMemoryLimit)).ToArray();
+
     static ulong PlanningOf(ResourcePolicySnapshot policy, BudgetItem item) =>
         item.Kind == "git" ? policy.GitPlanningBytes : item.PlanningBytes == 0 ? DefaultPlanningBytes : item.PlanningBytes;
 
@@ -454,6 +488,52 @@ public static class ResourcePolicy
         }
         return sum;
     }
+
+    static ulong RemainingPhysical(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> reserved)
+    {
+        ulong sum = 0;
+        foreach (var item in reserved)
+        {
+            var planning = PlanningOf(policy, item);
+            sum = AddSaturating(sum, planning - Math.Min(planning, item.CurrentPhysicalBytes ?? 0));
+        }
+        return sum;
+    }
+
+    // Admission reserves planning-based growth (requests); hard caps stay kernel-enforced limits.
+    // Charging full hard-cap remainders made a busy 16 GiB machine unable to admit any further agent.
+    static ulong RemainingCommit(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> reserved, IReadOnlyList<BudgetItem> requested)
+    {
+        ulong sum = 0;
+        var pools = new Dictionary<Guid, (ulong Planning, ulong? Used)>();
+        void Add(BudgetItem item, bool active)
+        {
+            var planning = PlanningOf(policy, item);
+            if (item.Kind != "git" && item.PoolId is { } id && item.PoolLimit is > 0)
+            {
+                // The same pool can appear in both sets. Charge member planning once and use only its own
+                // live measurement; a requested item's own claimed usage never offsets the charge.
+                var previous = pools.GetValueOrDefault(id);
+                ulong? used = previous.Used;
+                if (active && item.PoolCommitBytes is { } measured) used = used is { } known ? Math.Max(known, measured) : measured;
+                pools[id] = (AddSaturating(previous.Planning, planning), used);
+                return;
+            }
+            var hedge = !active ? planning : item.CurrentCommitBytes is { } usedCommit ? planning - Math.Min(planning, usedCommit) : planning;
+            sum = AddSaturating(sum, hedge);
+        }
+        foreach (var item in reserved) Add(item, true);
+        foreach (var item in requested) Add(item, false);
+        foreach (var pool in pools.Values) sum = AddSaturating(sum, pool.Used is { } used ? pool.Planning - Math.Min(pool.Planning, used) : pool.Planning);
+        return sum;
+    }
+
+    static string ShortfallGiB(ulong need, ulong available) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{(need - Math.Min(need, available)) / (double)GiB:0.0}");
+
+    static string GiBText(ulong bytes) => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{bytes / (double)GiB:0.0}");
+
+    static ulong AddSaturating(ulong left, ulong right) => left > ulong.MaxValue - right ? ulong.MaxValue : left + right;
 
     static ulong SumCap(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> items)
     {
@@ -475,20 +555,13 @@ public static class ResourcePolicy
         return sum;
     }
 
-    static bool CombinedCapExceeds(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> reserved, IReadOnlyList<BudgetItem> requested, ulong cap)
+    static bool CombinedCapExceeds(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> reserved, IReadOnlyList<BudgetItem> requested, ulong cap, out ulong unionCap)
     {
         var union = new List<BudgetItem>(reserved.Count + requested.Count);
         union.AddRange(reserved);
         union.AddRange(requested);
-        return SumCap(policy, union) > cap;
-    }
-
-    static bool HasRoom(ulong available, ulong first, ulong second, ulong floor)
-    {
-        if (first > ulong.MaxValue - second) return false;
-        var used = first + second;
-        if (used > ulong.MaxValue - floor) return false;
-        return available >= used + floor;
+        unionCap = SumCap(policy, union);
+        return unionCap > cap;
     }
 
     static ulong Min(ulong left, ulong right) => left < right ? left : right;
