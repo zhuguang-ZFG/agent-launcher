@@ -983,3 +983,175 @@ powershell -NoProfile -File scripts/test.ps1
 - `JsonIo.Read` 现在对 `FileNotFoundException` 最多重试 20 次、间隔 10 ms，与原有共享冲突窗口一致；不读取 `.bak`，窗口结束后持续缺失仍返回 null 并使活动观察失败。损坏 JSON、持续共享冲突、活动超时与退出核验保持 fail-closed。
 - 新回归覆盖旧进度文件删除后在重试窗口内出现的新进度值，以及持续缺失仍无结果；此前共享锁恢复、持续锁失败和损坏 JSON 检查继续通过。当前本机 `scripts/test.ps1 -SkipBrowser -RuntimeDirectory artifacts/test-runtime-soak-retry-04cac32` exit 0：原生 144/144、修复 35/35、集成 0 失败、WPF 258 项及原型 5/5 通过；浏览器因本机 Edge 权限限制跳过。此构建包含未提交源码变更，不能代替最终提交 SHA 的 CI。
 - 04cac32 的完整 CI run `43370925269` 已成功，但不含本次读取重试；该版本长稳 run `43370989701` 仍在执行。修复后的最终提交仍须重新完成完整 CI 与 3 × 1800 秒长稳，成功前不把 S0.6 记为完成。
+
+## 48. 并发退出的 GitHub 上游调查（2026-11-13，Asia/Shanghai）
+
+- 用户要求先查 GitHub 上别人如何处理多 Agent 并发退出。已核对 Omp #8324、#8004、#16067/#16078、#9908 的实际关闭提交，以及 OpenCode #58820、#59205、#63030 的合并状态、实现方式和验证范围。完整来源和适用边界见 [并发内存调查](CONCURRENT-AGENT-MEMORY-RESEARCH.md)。
+- 纠正早先只看开放 PR 的不足：Omp #13785 仍开放，但共享嵌入模型已通过 `a608a9ca07c9443634e80d877d61c602099dab91` 合入，按模型/缓存目录复用服务并空闲 15 分钟退出。#9908 关闭不能被解读为全部跨会话内存准入已完成。
+- 本机只读查询为 Omp 18.20.0、当前工作目录有效 `task.maxConcurrency=4`；已核对该 tag 含子会话释放、WASM store 回收、共享嵌入服务。原生 PID 12088 报告仍只有 1024-byte 失败申请和 unknown 栈，不能凭上游另一个 40 GiB 事故给本机归因。用户提供的 2053/2048 MiB 峰值和内核拒绝分配证据与启动器 768 MiB 规划之间的失配需要后续实测处理。
+- 本节对应先行调查阶段。后续生产修复和测试见下一节；未用其他项目的 PR 基准替代本项目的并发与长稳验收。
+
+## 49. 并发内存增长准入及 Omp 工具前置保护（2026-11-13，Asia/Shanghai）
+
+- 提交准入从规划量改为剩余硬上限增长；共享池只计一次，已运行 Job 的当前提交量和私有工作集分别抵扣相应预留。未知数据不抵扣。使用内核 `JobObjectMemoryUsageInformation`（私有信息类 28，失败返回未知）及 `PROCESS_MEMORY_COUNTERS_EX2`，不用峰值冒充当前值；本机原生测试验证分配、释放和父池计数。空 Job 仍可能因退出进程句柄保留少量记账，因此空成员不提供存活用量抵扣。查询前后取较小系统余量，采样不再顺带改变账本/回收 Job。
+- 低提交余量进入同一压力恢复逻辑。快速的准入/状态查询不被当作多个两秒采样区间。`status.Budgets` 随短响应刷新，界面、启动授权及队列预检查使用同一用量；分页混合读数拒绝接收，旧监控器缺少读数时保守处理。
+- `Commands.Resolve("omp", …)` 将本包扩展插入结构化 argv，保留用户参数和 Node 入口；该命令参加冻结摘要。Runner 启动当前用户限定管道并通过独立 Unicode 环境块传给受保护子进程。保护扩展检查每次新工具的本项、池及系统余量，将 Omp 自有 task 并发仅在运行时限制为最多 2（保留更低用户值）；不改共享 async manager。断连、超时、未知读数和不支持的设置接口都拒绝新工具，`wait` 可继续收尾。没有更改用户全局 Omp 配置。
+- 新增显式多工具预设：独立 Job 4 GiB、物理规划 1536 MiB，应用到新批次；没有修改旧配置默认值、冻结队列或运行中 Job。受控 2180 MiB 原生提交在旧 2 GiB 限额被拒绝，在 4 GiB 通过；这只是对已知限额悬崖的回归，不是所有真实工作负载的内存校准。
+- 本机本轮原生/模型回归 **156/156**，证据 `artifacts/memory-guard-full-gate-3.log`，数据根 `D:/Temp/User/AgentLauncher-tests-f17ccf5d0f264e2192dda27e9d0578bb`。前两次门禁暴露两处只替换缓存 sample 的测试夹具；新准入会重新采样，已改为在测试专用采样边界提供原来的大机器/无效样本，保留原拒绝和账本断言。完整门禁和最终 SHA CI 结果在后续追加。
+- 真实 Omp **18.20.0** 的主会话及真实 task 子会话均验证：第一次工具被模拟压力拦截，下一次余量恢复后实际执行一次，进程正常退出，存储的并发 4 保持不变而运行时读数为 2。最后两项同时运行通过，分别保存于 `artifacts/omp-memory-guard-71c0067d-3601-4ee2-9867-4f0bdafd834e` 和 `artifacts/omp-memory-guard-c5ed9748-33ef-4d5c-af89-d599756f32ce`。使用隔离配置、自定义无网络模型 provider、真实 agent-loop，未将直接 RPC bash 当作 Hook 验收。本机未安装或升级 Bun。
+- CI 增加经 GitHub release digest 核对的 Omp 18.20.0 主/子会话检查；发布清单强制包含同版本扩展。旧排队计划不自动注入组件或改变额度，须重新入队才采用新保护；运行中的 Agent 不会热加载本次修改。
+- 边界：前置检查不包办已经开始的单工具突发分配、多个同时获准工具的后续增长，以及模型/扩展后台非工具分配；不宣称任意任务永不退出。共享嵌入服务的具体 Job 归属、PID 8652 与原生 unknown 栈的精确关联仍未证实。GitHub `stability` run **43374610843** 已在旧提交 **0c5d834** 成功，但不含本轮保护，不能将其当作本轮重负载/长稳通过。
+
+## 49. 评审收口：保护加载披露、谓词下沉与探测剥离（2026-11-13）
+
+- 评审确认早期五项界面问题（状态竞态、关闭收尾、路径 Enter、提示状态机、查找按钮锁定）与队列领取三缺陷均已在工作区落地；本轮处理的是内存保护改动自身的遗留项。
+- 扩展加载经同一管道 `0x02` 通告确认；Runner 恢复初始线程后最多等待 3 秒，未确认时在 Started 回执追加「Omp 内存保护未确认加载：工具不受提前限流（硬上限仍生效）」，fail-open 且披露。JS 新增 2 个 ACC-R07 用例（hello 发送、失败重试一次且不阻塞注册）。
+- 版本探测剥离守卫参数执行（`OmpMemoryGuard.Detach`）：ACC-B08 暴露 `--version` 探测被注入参数改变位置语义，shim 把探测误记为真实执行。程序身份指纹仍覆盖含注入的启动计划。
+- 终态谓词下沉为 `ControlEntryStates.IsTerminal`（Core），`Store.IsTerminal` 单行委托，`ReservedFor` 及两处账本迁移副本同源；全仓库该三态集合只剩一处字面量。
+- 多工具预设按钮在低内存/只读时禁用并给出 ToolTip 与 HelpText 原因；`ApplyMultiToolPreset` 早退写入 ValidationMessage，不再静默。
+- begin（恢复预约）在压力拒绝时文案改为「暂不恢复运行。已保留预约，可撤销此项。」；CONTRACTS 补充握手披露、探测剥离与旧条目 2 GiB 回退说明。
+- 测试基线变更新增/修改（需评审）：`tests/omp-memory-guard.test.mjs` 新增 ACC-R07 两用例；`TaskUiChecks.cs` ACC-B08/ACC-B10 期望更新为「守卫 flag+组件路径 + 原始 argv 恰好一次」，钉住注入契约而非放宽断言。
+- 验证：Release 发布构建通过（warnings-as-errors）；原生/模型回归 **156/156**；WPF `--ui-check` 全套通过；JS 守卫协议 **6/6**。task_verify 对本项目返回 unverified（无可用基线配置）。
+
+## 50. 准入预约改为 requests 模型（2026-11-13）
+
+问题：用户报告「总是报错内存不够」。本机实测（16 GiB 物理 / 34 GiB 提交，3 个 Omp 会话 commit 1.78/0.83/1.01 GiB，提交余量 3.83 GiB、物理可用 2.47 GiB）下旧模型必拒：提交预约按「剩余硬上限全额」Σ(2 GiB−已用)≈2.4 GiB + 新请求 2.0 GiB + 保留 2.0 GiB = 6.4 GiB > 3.83 GiB；物理保留 2.75 GiB > 2.47 GiB。
+
+修正（参考 Kubernetes requests/limits 与 earlyoom 10% 惯例，见 docs/CONCURRENT-AGENT-MEMORY-RESEARCH.md）：
+
+- 提交预约改为按规划增长记账 `Σmax(0, 规划−实测)`，新请求按规划量计；用量未知按全额规划，不抵扣。硬 Job 上限（默认 2 GiB）仍由内核强制执行，是兜底而非预约额度（ResourcePolicy.RemainingCommit 重写）。
+- 默认保留线下调：物理 `max(1.5 GiB, 总量/12)`、提交 `max(1.5 GiB, 提交上限/24)`（原 2 GiB、1/8 与 1/20）。
+- 共享池按「成员规划量之和−池实测提交」记账一次；未知池读数按成员规划全额计；请求自报用量不获信任（不变）。
+- 拒绝文案给出缺口 GiB 数并指引「按资源依次启动」；各项 Job 上限加总溢出（饱和）直接拒绝，不再落到软预算 waiver。
+- 软预算、CPU、压力闩锁、豁免门禁逻辑不变；CONTRACTS 准入公式同步更新。
+
+限制：requests 模型承认过度订阅风险。注意 Windows 提交上限已含 RAM+页面文件，换页只缓解物理压力、不释放提交记账——多个已获准会话同时增长时，即使没有任何 Job 触及自身硬上限，整机提交仍可能耗尽并导致分配失败（等同 OOM）。本轮修复的是**启动准入误拒**，不是运行时 OOM 保证；缓解层为工具级提前背压（Omp 内存保护按实测 Job/池/整机提交拒绝新工具）、压力闩锁与每项 Job 上限对最坏情况的封顶。准入仍非未来空闲内存保证。
+
+测试基线变更（需评审）：
+- `MemoryAdmissionChecks.cs` ACC-R02 改写为 requests 断言（规划增长边界，waiver 视为准入通过）、ACC-R04 校准边界（未知用量按全额规划而非硬上限差额）、ACC-S3P 改为池「规划−实测」精确边界（原「limit−used」公式不再成立）、新增 ACC-R09 真实机器画像（提交余量 3.8 GiB 准入、2.0 GiB 拒绝且文案含 GiB 与「按资源依次启动」、物理 2.2 GiB 拒绝）。
+- `ResourcePolicyChecks.cs` ACC-C02 大机器默认保留值断言改为 `总量/12`、`提交/24`（旧钉点 16 GiB/20 GiB 随公式过期）。
+- RED 证据：旧实现上恰好上述 5 用例失败（152 通过）；GREEN：157/157。
+
+## 51. 界面简化落地（2026-11-13）
+
+用户指示「要简单易用，不要搞得复杂」。据此交付：
+
+- **保留**：卡片样式收敛为共享 `Card` 样式（圆角 10，去除重复内联属性）；主按钮强调色含悬停/按下态（`AccentSoft`/`AccentPressed`，浅/深/高对比三路赋值）；按钮、输入框、下拉框圆角模板；项目标题超长时中间省略并悬停显示完整路径；底部提示按状态分级着色（阻塞/拒绝→`WarningInk`、进行→`Muted`、可启动→`Ink`），`LaunchHintState` 取代单表达式链；650 窄宽度下按钮行上移、提示换行于下方，不再挤压「启动」。
+- **剔除**：自定义标题栏（WindowChrome 玻璃边框与自绘最小化/最大化/关闭按钮）——窗口管理复杂度高、与「简单」目标冲突，已整体回退为原生标题栏；`CaptionButton` 样式与三个窗口命令处理器一并删除。
+- UI 预览准入改用 monitor 下发的 `status.Budgets` 口径（与监控器记账一致），保留共享池只计一次的既有注释。
+- 验证：`scripts/test.ps1` 全门禁（原生/集成/WPF/原型/浏览器）与发布构建以本轮实际结果为准；窗口截图 `artifacts/ui-after-revert.png` 人工核对：原生标题栏、卡片、暗色主题、长名槽位与新拒绝文案（含缺口 GiB 与「按资源依次启动」指引）均正常。
+
+## 52. 用户发起 worktree 清理（2026-11-13）
+
+动机：「启动器不删除目录」原立场没有配套出口，自动创建的 worktree 长期堆积占盘。参考 BloopAI/vibe-kanban（`crates/worktree-manager`：编排器对自己创建的 worktree 做 best-effort 回收），取保守变体：
+
+- 「工作目录」窗口每条记录新增「清理目录」。门禁（Core 纯函数 `WorkspaceCleanup.Evaluate`）：无活动会话占用（实时 monitor 状态，非显示缓存）+ `git status --porcelain`（含 `--ignored=matching`）完全为空；任何已跟踪修改、未跟踪或被忽略内容都拒绝并明示「分支会保留」。无法确认占用或 Git 状态一律拒绝。清理与启动互斥（对话期间队列泵停派发、在途启动拒绝清理、确认后二次核验）。
+- 执行（`WorkspaceCleanupShell`，走 ReviewGit.CaptureAsync 既定约束配置/有界输出/超时）：不带 `--force` 的 `git worktree remove`——git 自身拒绝脏树作第二道防线；成功后仅删除启动器 workspaces 记录文件；分支与已提交内容始终保留。
+- 验证：ACC-WC01 四项 Core 判定回归（RED→GREEN）；INTEGRATION 构建 + 隔离 `AGENT_LAUNCHER_TEST_ROOT` + 真实 git 夹具的 pywinauto E2E：脏树拒绝（目录/记录保留、文案含分支保留）→ 干净树确认（文案含 worktree remove 与分支保留）→ 目录与记录移除、仓库分支仍存在。E2E 脚本为一次性验证物，已删除。
+- 注意：曾因对生产预览包（不读 `AGENT_LAUNCHER_TEST_ROOT`）跑验证脚本被 advisory 阻断；已确认当时对话框从未打开、零点击、真实配置零损害。E2E 只应使用 INTEGRATION_TESTS 构建。
+- 阻断修正（advisory）：porcelain 最初用 `--untracked-files=normal`，看不到被 .gitignore 忽略的内容；Git 的 check_clean_worktree 同样不看 ignored，无 `--force` 并不能保护本地 `.env`/数据。已加 `--ignored=matching`，被忽略内容一律阻止清理（含构建产物——代价是构建过的目录需用户先手动处理，文案已明示）。
+- 阻断修正二（advisory）：占用判定原读轮询显示缓存（可为预览/null 当无占用），且确认框期间队列泵仍可派发同路径任务。已改为：①占用一律用 `Ipc.EnsureAsync` 实时查询（按需拉起 monitor；不可用/超时/取消即占用未知→拒绝。`Evaluate` 签名改 `bool?`，未知占用拒绝）；②`workspaceCleanupActive` 标志使工作目录窗口打开期间队列泵不派发，有启动/派发在途时清理拒绝；③确认框后删除前二次实时核验占用与 porcelain，变化即取消。回归：ACC-WC02（未知占用拒绝、确认期出现会话再核验仍拒绝）、ACC-WC03（对话打开期间泵不派发，WPF 级）。注意轮询读账本快照不保证 monitor 存活，故不能用显示缓存或裸 `SendAsync`。
+- 评审修正三（code review）：占用比对原为原始字符串相等——监控条目的 `Workspace.Path` 是 `PhysicalDirectory.Resolve` 的规范物理路径（含 volume:index 键），记录 `Target` 保留原始拼写；拼写差异或子目录锚定的会话会漏检。新增 `WorkspaceCleanupShell.OccupiedByLiveSession`：`Resolve`+`Overlaps` 身份比对，覆盖子目录锚定；不可解析即未知→拒绝（`Win32Exception` 不再逃逸处理器过滤器）。另修：记录文件删除失败曾中断刷新留下指向已删目录的陈旧条目，现移除后必刷新并仅提示手动删记录。回归：ACC-WC04（子目录锚定检出、拼写差异、终态/无关会话、null=未知、空=空闲）。
+- 测试基线变更（需评审）：新增 `tests/AgentLauncher.Tests/WorkspaceCleanupChecks.cs`（ACC-WC01 四用例含 `!! .env`/`!! bin/` 忽略条目 + ACC-WC02 占用未知/确认期再核验两用例 + ACC-WC04 物理身份占用五断言），`Program.cs` 注册一行；`TaskUiChecks.cs` 新增 ACC-WC03（对话期间泵不派发）。
+
+## 53. 工作目录清理的提交保留与隐藏修改检查（2026-11-14，Asia/Shanghai）
+
+- 延续第 52 节的人工清理流程，补查三个边界：干净的游离 HEAD 可能持有未被分支引用的提交；`assume-unchanged` / `skip-worktree` 会让普通状态检查漏掉文件修改；调用删除入口时，先前检查通过的目录可能已新增忽略文件。
+- `WorkspaceCleanupShell` 在状态检查前确认 HEAD 指向实际存在的本地分支，拒绝游离 HEAD；读取 NUL 分隔的索引条目，发现上述隐藏标记即拒绝并提示核对。不会自动切换分支、修改索引标记或稀疏检出设置。Git 查询超时、失败、输出截断均拒绝清理。
+- `RemoveAsync` 自身重新执行分支、索引和文件状态检查，避免仅依赖调用方先前的检查；仍使用无 `--force` 的移除，保留分支。UI 对 Git 启动产生的 `Win32Exception` 显示错误并恢复按钮；说明和提示同步更新。
+- 测试新增 ACC-WC05～ACC-WC07 四项真实 Git 回归：干净目录删除后分支及提交内容仍在；初检后新增 `.env` 保留；游离 HEAD 的未引用提交保留；两种索引标记隐藏的修改保留。每项使用独立 `AgentLauncher-tests-workspace-cleanup-*` 临时仓库，不操作用户项目或配置。
+- Windows x64 / .NET SDK 8.0.419 本机 RED：原实现 **165 通过、3 失败**，失败恰为新增的三个拒绝场景；修复后原生/模型 **168/168 通过**。证据：`artifacts/cleanup-review-20261114/native-red.log`、`artifacts/cleanup-review-20261114/full-gate.log`。默认构建最初受用户级 NuGet.Config 读取权限限制，改用 artifacts 内的空源配置（项目无第三方 NuGet 依赖）；未修改用户 NuGet 配置。
+- 边界：含隐藏索引标记的目录即便实际无修改也需人工核对后再清理；索引输出超过 256 KiB 会保守拒绝。占用核验仍由既有 UI/monitor 流程负责，Git 检查与删除不是跨进程文件系统事务，本轮不宣称能排除外部程序在最后检查后写入的竞态。完整门禁及候选包结果另在本节追加，不以定向回归替代长稳或最终提交 CI。
+- 首次统一门禁完成原生 **168/168**、修复 **36/36** 及全部集成（0 失败），但 WPF 在 ACC-R01 文案断言失败：先前文案已经改为「不能转给其他批次」「比参考线」，断言仍要求「不可复用」「软超差额」。后续把这两个断言更新为当前的等价表述，保留批次范围、有效期、硬保护、采样、差额及不泄漏敏感内容检查。此首轮不记为完整通过。初版候选包构建及启动检查通过，后续 UI 改动以第 54 节的新包为准。
+
+## 54. 简化主界面与 Omp / Qoder 长任务配置（2026-11-14，Asia/Shanghai）
+
+- 用户反馈主界面复杂，Omp 和 Qoder 在执行一段时间后退出。只读核对真实记录：Omp 尝试 `8a682c1c-7d00-4ebb-b8cd-66dff8e4e1da` 于 2026-11-13 15:27:22（本地时间）以 `0xC0000409` 退出，`JobMemory.LimitReached=true`、上限 2 GiB、峰值约 2053 MiB；Qoder 尝试 `1bfbc5fb-e12f-457b-9b64-9fde9bb98b40` 于 2026-11-12 13:48:50 出现同异常码，峰值约 2056 MiB / 2 GiB，但没有内核触限通知，不能仅凭此断言同因。脱敏证据 `artifacts/cleanup-review-20261114/reported-exits.json` 不含启动参数或对话。
+- 当前保存配置仍为每项 2 GiB、规划 768 MiB。新增直接的「新任务上限改为 4 GiB」入口，仅在启用的 Omp/Qoder 上限低于 4 GiB 时提示。用户点击后，对新草稿采用独立 4 GiB 上限、1536 MiB 规划量；不降低已有更大额度，保留 CPU 和自定义系统保留线。执行前刷新采样、检查草稿版本及可编辑状态，通过原资源验证后原子保存。只读、过期采样或机器容量不足均不能应用。
+- 主页面采用单列：项目、Agent 列表与启动操作。资源表、分屏预览和目录策略移入默认折叠的「启动选项」，模板、搜索及规模预设移入「组合与批量设置」，工作目录及诊断移到顶部「更多」。Agent 行保留程序/目录状态，预算说明放入悬停提示；错误和资源拒绝原因仍在底部可见。
+- 新增 ACC-R10 两项模型检查和 ACC-U04 界面检查，覆盖提示触发、保留 CPU/系统保留线/原始对象/较大额度、小机器拒绝、只读禁用、草稿保存、冻结队列不改、折叠面板仍可访问。既有宽窄屏断言更新为新的单列布局及默认收起资源面板，仍检查启动按钮在窗口内。原生/模型 **170/170 通过**；完整门禁、截图及最终候选以本节后续实测记录为准。
+- 限制：4 GiB 是对已观察到的 2 GiB 限额问题提供的更大配置，不是任意长任务绝不退出的保证；Qoder 暂无与 Omp 同样的工具前置背压接入。旧进程和冻结队列仍用原限额，需结束后重新启动/重新入队。没有改写真实用户配置、终止用户进程、自动重放未知任务，亦未完成真实 Omp/Qoder 长时间模型任务验收。
+- 第 54 节完整门禁（最终整机提前量修正前）：原生 **170/170**、修复 **36/36**、集成 **0 失败**、WPF **266/266**、原型 **5/5**、Omp 协议 **6/6**、浏览器 **5/5**，退出码 0。记录 `artifacts/cleanup-review-20261114/simple-full-gate.log`。
+
+## 55. 触顶前预留工具增长空间与方案核对（2026-11-14，Asia/Shanghai）
+
+- 用户明确要求参考 GitHub 和社区解决“2 GiB 后退出”，不把 4 GiB 扩容当作根治。重新核对微软 Job 硬/软限额文档、Omp #8324/#16078、OpenCode #63030、Qoder 官方 PreToolUse 协议与本机 Qoder 1.1.89 CLI 帮助。来源、适用范围及未实现部分记在 `CONCURRENT-AGENT-MEMORY-RESEARCH.md` 顶部补充。
+- 修正 `ToolMemoryPolicy.Check`：新增工具前，整机物理和提交余量均必须覆盖系统保留线加 `max(512 MiB, JobLimit/4)`。此前只判断系统是否已低于保留线，新工具可能立即吃掉该余量。使用先比较再相减，避免极大保留值溢出。任务/共享池原有限额、未知采样拒绝、已有工具继续、Omp 等待工具通路保持原行为。
+- 新增 ACC-R07 边界回归：恰好足够时放行、物理/提交少 1 字节拒绝、4 GiB 配置预留增至 1 GiB、恢复后放行、极端保留值不能溢出绕过。界面按钮明确为「新任务上限改为 4 GiB」，展开项只显示数值，不再将大于 4 GiB 自动称作“长任务配置”。
+- 本次为提前量修正，未实现可事务预约的全局工具内存调度、运行中 Job 弹性扩容或 Qoder Hook 注入。硬限额拒绝分配后 Agent 仍可能崩溃；真实 Omp/Qoder 的代表性长任务验证尚未完成。
+- 最终界面截图 `artifacts/AgentLauncher-tests-simple-capture/simple-final.png`，920×760、120 DPI，独立测试根、两条示例 Agent、真实资源采样；截图时可用物理内存低于保护线约 1.5 GiB，启动按钮按规则禁用，没有假造充足资源或启动真实 Agent。
+- 最终统一门禁 `scripts/test.ps1 -RuntimeDirectory artifacts/simple-reliability-20261114/final-test-runtime` **退出码 0**：原生/模型 **171/171**，修复 **36/36**，启动队列、直接 16 Worker、真实 Terminal 16 窗格及其余集成 **0 失败**，WPF **266/266**，原型 **5/5**，Omp 协议 **6/6**，浏览器 **5/5**。日志 `artifacts/cleanup-review-20261114/final-full-gate.log`，WPF 结果副本 `final-ui-checks.json`。
+- 正式编译候选 `artifacts/simple-reliability-20261114/preview/` 构建及包启动检查通过（`final-build.log`），构建时间 2026-11-14 11:56:30（Asia/Shanghai），基于 `0c5d8345a79647a7d93912d86dd73320b334320a` 的未提交工作树；发布脚本验证测试开关不存在。未覆盖当前运行包、未修改真实配置、未宣称已有会话自动获得新保护。`git diff --check` 通过，仅报告工作树已有行尾转换提示。
+
+## 56. Qoder 工具前置内存检查（2026-11-14，Asia/Shanghai）
+
+- 新增 `QoderMemoryGuard`，通过单次启动的 `--plugin-dir` 叠加独立插件。命令参数参与冻结计划；Node 入口、用户参数和已有插件原样保留，版本探测去掉注入参数。插件在启动器数据目录按 Worker 路径及程序集构建身份分目录，命名互斥串行生成、Store 原子写入；已有文件内容不符拒绝，不覆盖用户编辑。构建/位置变化的冻结队列必须重新入队。
+- 新增 `QoderMemoryHook` 及 Worker `qoder-memory-hook` 入口。同步 SessionStart 握手，PreToolUse 查询现有 Omp 管道服务的实际 Job/池/整机余量。压力时返回明确 deny；健康时 `{}`，继续原有权限流程。工具输入不写日志、不传给内存服务；输入限 1 MiB、深度 32，管道响应限 4 KiB，读取与连接总期限 2 秒。断线、缺失端点、无效/超长输入及响应均拒绝新增工具，不退出 Agent、不重放工具。
+- ACC-R11 新增九项原生回归：argv/冻结身份、插件不可覆盖、普通权限不被放行结果绕过、压力/恢复、不泄漏参数、异常响应、异常事件、握手、期限和真实 Job 余量；另外增加 Runner 启动链路回归，验证插件生成、子进程传递管道、实际 Worker Hook 握手和正常完成。前九项包含多断言；真实 Runner 使用受控 CLI 替身，不能当作 Qoder 的实际工具调度验收。
+- 首轮原生 179 通过、1 失败：测试服务在客户端按上限主动关闭后 Flush 遇到 broken pipe；去掉无缓冲管道多余 Flush，超长帧写入仅容忍客户端按预期提前关闭，产品拒绝条件未放宽。修正后的完整门禁原生 **180/180**、修复 **36/36**、集成 **0 失败**、WPF **266/266**、原型 **5/5**、Omp 协议 **6/6**、浏览器 **5/5**，退出码 0（`qoder-full-gate.log`）。新增 Runner 回归后的最终门禁另追加结果。
+- `scripts/test-qoder-memory-guard.mjs` 使用本机 **Qoder 1.1.89**、独立 `--config-dir` 与项目，模型调用 **0**。Qoder `plugins validate` 接受生产生成的两项同步 Hook；重复 `--plugin-dir` 同时列出内存插件与既有插件，测试 settings 内容保持原样。直接启动真实 Worker Hook 验证握手、允许/拒绝/恢复、端点丢失、stdin 一直不关闭仍有界拒绝。通过证据 `artifacts/AgentLauncher-tests-qoder-3fa331de-9181-4a16-915b-bceb160526f1/result.json`。此脚本作为有本机 Qoder 时的额外契约测试，不把外部 CLI 安装设为所有 CI 的依赖。
+- 真实会话探测在隔离目录返回 `NonInteractiveAuthRequiredError`，发生在任何 Hook 之前，事件记录为空。证据 `artifacts/AgentLauncher-tests-qoder-probe-a88a74f2-2e46-417f-9229-52c41e81bdc7/`；没有复制真实凭据或发送用户对话。因此仍未证明：登录后 PreToolUse 实际拒绝工具、子 Agent 覆盖、与用户 Hook 的执行结果合并、超过 2 GiB 的真实长任务稳定性。插件清单共存不等于这些路径已验收。
+- Qoder 的非阻断 Hook 错误是明确边界：本程序能运行时将错误转成结构化 deny，但宿主无法创建 Hook 进程、宿主超时或插件未加载不在该保证内。Runner 缺少握手时明示保护未确认；握手成功也仅证明加载通路。没有猜测等待/取消工具名或设置绕过规则，没有实现 Qoder 内部并发控制或弹性扩容。当前运行会话、真实配置和桌面入口未改动。
+- 最终统一门禁（含新增 Runner 启动链路）**退出码 0**：原生 **180/180**、修复 **36/36**、真实 Terminal/Worker/启动队列及其余集成 **0 失败**、WPF **266/266**、原型 **5/5**、Omp 协议 **6/6**、浏览器 **5/5**。证据 `artifacts/cleanup-review-20261114/qoder-final-gate.log`、`qoder-final-ui.json`；最新外部 Qoder 契约证据 `artifacts/AgentLauncher-tests-qoder-cf7e26cf-f420-4317-8f2c-09da62894524/result.json`，通过且模型调用为 0。
+- 最终候选 `artifacts/qoder-guard-20261114/preview/` 构建及启动文件检查通过，测试开关不存在；构建时间 2026-11-14 13:25:00（Asia/Shanghai），源码基于 `0c5d8345a79647a7d93912d86dd73320b334320a` 的未提交工作树。日志 `artifacts/cleanup-review-20261114/qoder-build.log`。只生成新包，不替换活动包或热改现有任务。`git diff --check` 通过，已有行尾提示保留。
+
+## 57. 登录后的真实调度与持续内存负载验收（2026-11-14，Asia/Shanghai）
+
+- 本机 Qoder `status` 确认已登录，版本 **1.1.89**。此前空 `--config-dir` 隔离了登录状态；本轮由 CLI 正常读取现有登录，在新建的 `artifacts/AgentLauncher-tests-*` 工作目录测试，关闭用户/项目设置来源、外部 MCP 和会话持久化。没有读取或复制凭据，没有向模型发送真实项目内容，没有改写用户配置或既有会话。
+- `QoderLiveChecks` 使用真实模型和生产 Worker Hook，以文件是否落地及内存服务请求数核对执行结果。压力拒绝、恢复恰好执行一次、端点断线拒绝、已有项目 Hook 拒绝四项通过：`artifacts/AgentLauncher-tests-qoder-auth-ea950fdb9c1b410c952ddb03cdb5491d/result.json`。原测试同时禁用配置来源并注入 settings overlay，导致用户 Hook 未加载；改为明确启用独立测试项目配置后通过，不把这个测试配置错误归为产品的权限绕过。
+- 同一进程恢复：用 `--input-format stream-json` 保持同一个 Qoder 进程，两轮真实模型交互先拒绝写入、再解除压力，文件仅落地一次，随后正常关闭 stdin 并以 0 退出。证据 `artifacts/AgentLauncher-tests-qoder-auth-025b99d9022642c6a08c574bf3df552f/result.json`。先前一次模型请求返回 `network_failure`、没有执行工具，保留在 `...-adfa4d21c2924e9db107177abd7fe514/`，没有当作工具保护失败或成功。
+- 子 Agent：本机实际委派工具为 `Agent`，不是 `Task`。真实父任务允许派发、子任务 Write 被第二次内存检查拒绝；恢复后父/子各检查一次，子任务写入一次。证据 `artifacts/AgentLauncher-tests-qoder-auth-58fbdd67338e479d91573bb58d4922cd/result.json`。错误使用 Task 的尝试未真正委派，保留失败记录 `...-ad566b50017a4f56a31fa91a72287c45/`，不计入子 Agent 覆盖。
+- 新增 `LiveMemorySoak`、`memory-workload.mjs`、`omp-memory-soak.mjs`，将真实 CLI、工具及一个 **2180 MiB 的合成提交内存进程**置于同一个原生 4 GiB Job，另有 35% CPU 根 Job。保留实际物理/提交保护线及 1 GiB 工具增长余量；每轮独立工具连续读文件/校验 SHA-256 至少 60 秒，要求 30 轮、有效工作至少 1800 秒、正常退出、握手已确认、Job 峰值超过 2 GiB、全部测试进程清理。每两秒记录原生 Job 和整机余量，最终重新读取工作日志，避免最后一步落在采样间隙而少计。Omp 使用离线确定性模型驱动真实 agent-loop；Qoder 使用已登录模型与同一流式进程。该负载验证的是 Job 子树越过旧上限后的持续执行，不冒充 Agent 自身堆泄漏复现或用户实际项目任务。
+- **Omp 18.20.0 通过**：总运行 **2288.76 秒**，有效工作 **1802.06 秒**，30/30 轮，**3479** 次哈希校验，Job 峰值 **2872.09 MiB**，退出码 0、Job 已清空。证据 `artifacts/AgentLauncher-tests-omp-soak-16059adff61847a4b1e330c80b93511c/{result,summary,memory,workload}.json*`。期间真实整机内存曾不足；只对明确的执行前内存拒绝等待后再试，未重放已执行/结果不明的工具。自动等待是验收驱动行为，产品 Hook 本身返回拒绝，不宣称生产 Agent 会自动重试。
+- 早期持续测试未通过的记录完整保留：并行 Omp 在整机余量不足时被工具闸门拒绝，CLI 正常结束（`...omp-soak-6d0d22dc52074ab0a74fa0840ebb1673/`）；Qoder 约 772 秒被验收程序在物理保护线处主动终止（`...qoder-soak-9b27d514de0740938106cbfb3b5ad7ee/`），不是 Agent 自发崩溃。调整验收驱动使“生产保护线阻止新工具、已有工具结束并等待恢复”能被观察；产品门槛保持不变，测试仍有极低系统余量和 40 分钟紧急终止边界。一次流式 Qoder 测试提示词把步数紧接句号，模型漏传参数，工作脚本拒绝后没有重试（`...qoder-soak-76082e5abe774469946a6d91fe675cc8/`）；修正为代码块完整命令。
+- 重跑入口：`scripts/test-live-memory.ps1 -Scenario qoder-hooks|qoder-session|qoder-subagent|qoder|omp -AgentPath <绝对 exe 路径> -PackageDirectory <完整生产包>`。持续测试默认 30 轮，不能以短校准替代；`scripts/summarize-live-memory.ps1 -EvidenceDirectory <测试目录>` 独立核对原始工作步骤、时长、采样及 SHA-256 证据摘要。外部登录/CLI 不作为普通 CI 的依赖。
+- **Qoder 1.1.89 通过**：同一进程总运行 **2152.93 秒**，有效工作 **1802.42 秒**，30/30 轮，**3480** 次哈希校验，Job 峰值 **3024.41 MiB**，退出码 0、握手确认、Job 已清空。真实模型为本机默认 DeepSeek-Flash。证据 `artifacts/AgentLauncher-tests-qoder-soak-054c162095b049e8a2e778bb2dba6b3e/`。日志记录 **13 次**执行前内存拒绝，测试驱动确认没有执行后等待再试，最终每步只完成一次；Omp 通过轮记录 **32 次**此类拒绝。此次证明这套受控负载可持续执行及恢复，不是任意并发/任意工具分配绝不 OOM 的保证，也不替代原 S0.6 三轮稳定性门禁。
+- 最终统一门禁 `scripts/test.ps1 -RuntimeDirectory artifacts/qoder-live-20261114/final-gate-runtime` **退出码 0**：原生 **180/180**、修复 **36/36**、真实 Terminal/Worker/启动队列及其余集成 **0 失败**、WPF **266/266**、原型 **5/5**、Omp 协议 **6/6**、浏览器 **5/5**。证据 `artifacts/qoder-live-20261114/final-gate.log`、`final-ui.json`。新增 C# 验收入口编译无警告，两个 JavaScript 负载语法检查及 PowerShell 脚本解析通过，`git diff --check` 通过（已有行尾提示保留）。
+- 最终可运行包：`artifacts/memory-validated-20261114/preview/Start-AgentLauncher.cmd`，构建及包完整性/运行时检查通过，日志 `artifacts/qoder-live-20261114/final-build.log`。最终包的 Worker exe/dll、Windows/Core 库及 Omp 扩展与实际长测所用生产包 **SHA-256 全部一致**，对照 `package-equivalence.json`；本轮主要补齐外部验收设施和证据，产品实现未另行改动。真实运行会话、配置、活动发布目录和桌面入口未覆盖，需从新包启动新任务才能使用该版本；低于 4 GiB 的草稿可用主界面「新任务上限改为 4 GiB」。
+- 保留边界：Qoder 宿主无法创建 Hook、宿主超时或插件未加载仍可能不阻断；握手缺失提示和硬限额继续保留。单次已开始工具大幅分配、Agent 内部泄漏或非工具分配仍可触顶。未宣称自动续接或自动重放生产任务，未修改现有运行 Job。此次闭环范围为：实际登录拦截、恢复、用户 Hook/子 Agent 覆盖、超过旧 2 GiB Job 上限的 30 分钟有效负载、正常结束和可用候选包。
+
+## 58. 日常使用收口：续接、内存恢复提示与本机采用（2026-11-14）
+
+- 在保留 Omp 18.18.8 预设的基础上，增加 **Omp 18.20.0 / Qoder 1.1.89** 的精确版本预设：继续最近会话、恢复指定会话及模型参数。逐项核对本机 `--help` / `--version`，未知版本继续禁用预设。Qoder 的会话指引明确从原项目命令行执行 `qodercli --list-sessions`；临时未保存会话不能续接。
+- **真实跨进程续接通过**：Omp 用隔离 Windows profile / 会话目录与离线确定性 provider，三个独立进程分别新建、按会话路径恢复、继续最近会话，验证原随机标记保留、用户轮数递增且只存在一个会话文件。证据 `artifacts/AgentLauncher-tests-omp-resume-82912992-785b-4027-aca6-a46afbb2c8ee/result.json`；入口 `node scripts/test-omp-resume.mjs <omp.exe>`。首次尝试仅隔离 `PI_CODING_AGENT_DIR`，Omp daemon 仍尝试写用户目录并被环境拒绝；随后连同离线测试 profile 一起隔离，没有改用户目录权限。
+- **Qoder 真实登录模型续接通过**：新建唯一测试会话，再分别用 `--resume <id>` 和 `--continue` 启动独立进程；后两轮不携带随机标记，实际回答仍能找回它，结果 session ID 一致、退出码均为 0、保护插件握手成功。禁用工具和外部 MCP，仅使用现有登录，未复制凭据。证据 `artifacts/AgentLauncher-tests-qoder-resume-20261114-a/result.json`；验收入口 `AgentLauncher.Tests.exe --qoder-resume-check <qodercli.exe> <Worker.exe> <新隔离目录>`。这些新建测试会话不冒充用户原任务的恢复结果。
+- 工具检查结果通过线程安全快照交给 Runner；检查结果变化时更新已有回执，Monitor 保留该状态。运行记录标题提示受影响项数，当前 Omp/Qoder 记录显示具体拒绝原因及「复制继续提示」。该提示只要求对明确在执行前拒绝的步骤串行重试一次；不自动发送、不自动重放，已经执行或结果不明的操作必须先核对。后续工具通过检查或尝试结束后，按钮移除。剪贴板占用时显示可重试提示。状态描述的是上次检查，不能作为现在仍有余量或任务已完成的证据。
+- 新增真实 Runner/Hook 集成断言：临时降低隔离测试 Job 限额，使 PreToolUse 拒绝；检查拒绝文本经过回执和 Monitor 状态到达 UI 数据源；恢复测试限额后确认成功检查清除旧提示。整机采样沿用测试构建的 `AGENT_LAUNCHER_FAKE_SAMPLE` 边界，Job 读数仍来自原生对象；生产程序集不含此开关，硬限额和保护阈值未降低。WPF 覆盖按钮出现、恢复后消失及已退出尝试不出现，截图 `artifacts/usability-20261114/final-ui-visible/memory-recovery.png`。
+- 初次完整门禁失败于旧集成断言只承认 Omp 18.18.8；第二轮的新增恢复测试在整机真实内存仍不足时正确继续拒绝，不能算恢复。两次原始日志分别保留为 `full-gate.log` / `full-gate-v2.log`。修正版本表断言及测试系统采样边界后，**完整门禁退出码 0**：原生 **180/180**、修复 **36/36**、集成 **0 失败**（含真实 16 窗格、Runner/Hook 状态链路、实际 Omp/Codex/Qoder 能力探测）、WPF **269/269**、原型 **5/5**、Omp 协议 **6/6**、浏览器 **5/5**。最终日志 `artifacts/usability-20261114/full-gate-v3.log`。随后剪贴板错误处理及截图可视区修正单独复跑 WPF；生产包按最终实现构建，日志 `final-build.log`。本轮没有重复 §57 的两场 30 分钟有效负载，不将新包声称为逐字节等同于那一轮长测包。
+- 最终包为 `artifacts/usability-20261114/preview`，仓库根目录 `Start-AgentLauncher.cmd` 指向它（尚未生成该包的源码环境回退到普通 `artifacts/preview`）。配套文件哈希、运行时和生产包无测试开关检查通过。`scripts/use-validated-preview.ps1` 先检查包、备份已有桌面入口，再以临时快捷方式替换；支持 `-CheckOnly` 和显式 `-DesktopDirectory`。`Activate-AgentLauncher.cmd` 可由用户本机双击完成入口切换后打开新版。
+- **实际新任务配置已经采用**：从最终包打开真实配置窗口，通过原有「新任务上限改为 4 GiB」操作保存，修订 **76 → 77**，独立上限 **4 GiB**、规划量 **1536 MiB**、CPU **35%**。旧值为 2 GiB / 768 MiB；不改冻结计划。核对一条旧 Qoder 预约的回执为 `FailedBeforeStart`、PID 0 后，通过原有 `revoke` 协议撤销，返回「已撤销，迟到请求不会执行」；旧监控器 PID 27668 随后自然退出。实际账本无活动预约；没有结束用户 Agent 进程。证据 `artifacts/usability-20261114/adoption.json`。
+- **桌面入口仍未切换**：当前执行环境在保存桌面临时快捷方式时抛出 `UnauthorizedAccessException`，旧的 `D:/Desktop/多 Agent 启动器.lnk` 仍指向 `artifacts/preview/AgentLauncher.App.exe`。未绕过权限、未改原快捷方式。可直接使用仓库根目录的新入口；桌面切换需在用户本机运行 `Activate-AgentLauncher.cmd`，或执行切换脚本并传 `-DesktopDirectory D:/Desktop`。这是剩余部署动作，不记为已完成。
+
+- 桌面替换再次核验：显式传入实际路径 D:/Desktop 后，包检查通过，但保存临时快捷方式仍抛出 UnauthorizedAccessException。回读原快捷方式仍指向旧 preview，未完成替换；不是仅由先前桌面路径解析差异导致。
+
+## 59. 主界面启动路径与固定桌面入口（2026-11-14）
+
+- 用户确认问题为“能打开，但操作困难、启动不了任务”。只读核验发现桌面仍指向旧 `artifacts/preview/AgentLauncher.App.exe`，任务队列积压 11 项；其中旧记录含目录占用、资源不足、程序指纹变化。真实生产界面复现本次启动内存差额约 0.8 GiB，部署后再次检查约 0.9 GiB；这些历史原因不冒充当前实时状态。
+- 每行工作目录可直接点击选择文件夹，无需进入详情或等待 CLI 版本探测；右键可明确恢复默认项目。顶部说明哪些勾选项使用各自目录，避免修改默认项目却误以为全部任务已切换。只读、处理中及关闭状态仍禁止修改。保留配置保存、命令解析和资源准入检查。
+- 旧队列重开时保持折叠，独立提示只继续上次范围；本次勾选项仍由底部按钮启动。资源不足时强调“等待资源后启动”，即时启动继续禁用；增加“重新检查”，无需等下一轮定时采样。没有修改保留线或自动释放未知占用，也没有派发用户旧队列。
+- 新增目录按钮的长路径曾在放大字号下触发行宽断点反馈，导致布局循环。通过逐项测试进度定位后，改为按窗口逻辑宽度选布局，并限制紧凑目录按钮宽度。初始几次 WPF 超时证据保留；粗粒度进度曾停在参数对话框之前，进一步逐步记录证明真正卡点是后续 125% 字号布局，并非参数对话框关闭失败。测试进度现逐项保存。
+- 验证：`artifacts/startup-usability-20261114/full-gate.log` 中原生 180/180、修复 36/36、各集成 0 失败（包含真实 16 Terminal 窗格）；该脚本本次因上述 WPF 超时退出非 0，不将原日志标为全绿。修复后完整 WPF 单独复跑 **280/280**，证据 `layout-fixed-ui/ui-checks.json`，包含 125%/150% 字号、文件夹保存/只读、旧队列保持折叠、低内存拒绝与资源恢复，以及实际主按钮 → Terminal → Worker → 子进程 → Finished/0 回执。子进程为隔离测试程序，核对中文空格参数和实际工作目录，未调用用户模型或更改用户项目。测试系统采样使用已有集成开关，不能代替当前整机内存足够的证明。原型/协议 11/11、浏览器 5/5 分别见 `node-tests.log` / `browser-tests.log`；截图 `layout-fixed-ui/simple-start.png`。
+- 生产构建通过文件哈希、配套文件、运行时、无测试开关检查；发布到固定 `artifacts/preview`。旧包保存在 `artifacts/preview.before-119fc804e4c14697be52036c99ef5b9c`，部署日志 `deploy-build.log`。仓库根启动脚本和快捷方式切换脚本默认值也统一到固定目录。没有再次写受限桌面目录；原快捷方式文件保持原样，但它指向的整套程序已更新。因此无需再执行切换脚本即可使用新版。
+- 按实际桌面快捷方式目标启动生产 App，UI Automation 验证新版四个工作目录按钮、重新检查、可用的等待资源按钮、真实内存拒绝提示；证据 `artifacts/startup-usability-20261114/desktop-adoption.json`，包构建时间 `2026-11-14T14:38:06.2095489Z`。未强行启动真实 Agent，未停止用户进程，当前约 0.9 GiB 的准入缺口仍需释放内存或等待恢复。本轮未重跑 §57 的 30 分钟模型长任务，不宣称所有退出原因均已消除。
+
+## 60. 实用模式不拦截内存读数与 8 窗格并发上限（2026-11-15，Asia/Shanghai）
+
+- 用户反馈：界面过度设计不实用；内存占用一大应用就不可用。代码定位证实主因是资源读数在所有模式下都硬拒（物理/提交下限、CPU、共享池、软预算任一不足即 Deny），豁免（waiver）机制只覆盖软预算一项且链路复杂；App 空闲约 130.8 MiB 不是原因。
+- 决策（用户确认 scope=both、gate_mode=allow、ui_depth=remove）：实用（practical）/自定义（custom）模式内存读数不足一律 `Allow`+`Advisory`（提示「实用模式不拦截，进程内存硬上限仍然生效」）；保守（conservative）模式保留全部硬拦截（物理/提交下限、CPU、共享池、软预算）；采样无效、策略校验失败、加总溢出两种模式都拒。压力（pressure）门控同样仅 conservative；`LoadAuthority` 读取失败 fail-closed 视作 conservative。
+- 同时运行的 Agent 窗格运行时上限 16→8（`ResourcePolicy.MaxConcurrentAgents`），参考 Ray 并发上限、Kubernetes requests/limits、earlyoom 的分级响应；`MaxSlots=16` 保存容量不变，不影响已保存配置。Worker 在 reserve/reserve-task 拒绝超出：请求已覆盖的 Id 不重复计数、git 项不计数、两种模式一致；固定文案「同时运行的 Agent 窗格最多 8 个；请先结束或撤销部分 Agent 后再启动。」与 App 启动提示共用。
+- 豁免机制全链路移除：`AdmissionKind` 收敛为 `{Allow, Deny}` 加 `Advisory` 字段；`WaiverTable.cs` 删除；`Request`/`Response`/`ControlEntry` 的 `WaiverId`/`WaiverExpiresAt`/`Confirmed` 移除；Worker 的 waiver 操作、consumeToken、ValidateStableSlots 删除；Windows 层 `ReserveWithCleanupAsync` 去 waiverId 参数、`WorkspacePreparer`/`ControlledCommand` 去 authorize 回调。保留：Job 内存硬上限、ToolMemoryPolicy 工具背压、LongTaskResources 建议、根 Job CPU 封顶、账本损坏/根 CPU 阻塞。
+- UI 简化：删除常驻资源卡与四项计数，「更多」菜单保留「资源设置」，ReconcileButton 移入页脚；`AuthorizePlansAsync` 简化为 Task；`ConfirmResourceWaiver` 删除；启动提示增加 Advisory 与并发预检分支。
+- 测试基线变更（待评审；均按新语义翻转或收紧，不弱化断言）：
+  - `ResourcePolicyChecks`：实用模式 floor/CPU/提交不足断言翻转 `Allow`+`Advisory`+固定文案，conservative 保持 Deny；软预算两模式各自断言；加总溢出两模式 Deny；新增「waiver 协议成员已移除」的正向断言；删除 RunWaivers、稳定槽、容量等死用例。
+  - `MemoryAdmissionChecks`：文件级 policy 改为 conservative（建模边界断言本属严格模式）；ACC-R02 提交边界用 `includeSoftBudget:false` 隔离软预算；ACC-R09 拆为 practical `Allow`+`Advisory` 与 conservative Deny+「按资源依次启动」指引两段。
+  - `Program.cs`「P low memory rejects without spawning」：拆为 practical `Allow`+`Advisory` 与 conservative Deny 两断言（本轮首跑即由该用例按旧语义失败定位）。
+  - `RepairChecks`：R11 去掉 op「waiver」；R07 共享池不足改为 `Allow`+`Advisory`+「共享池」文案（原 RequireWaiver）。
+  - `RuntimeReviewChecks`：FutureMemoryAsync 改为直接 reserve（原 waiver→reserve 两步）；NativeSamplingAsync 扩到 9 个窗格（超过 8 窗格并发上限），使每次 reserve 被确定性拒绝、只验证真实 CPU 采样下 status/reserve 帧的可读性且不落账本；PressureReasonAsync 重写为 conservative 暴露「压力」blocker、practical 无 blocker、切回 conservative 验证压力未提前清除、5 个正常采样后清除。
+  - `AdmissionIntegration.cs` 重写：R21 并发 8 上限（第 9 个拒绝、精确重放幂等「请求已记录」、git 不计数、撤销全部后 17 项只报数量错）、模式矩阵（conservative 物理覆盖 8 GiB/软预算拒绝并验证无「实用模式不拦截」字样、practical 客户端策略不能越过 authority）、陈旧 PlanDigest/DraftRevision 拒绝、目录占用释放后重试、监控器重启保留账本（重用原「重启丢弃 waiver」用例框架）。
+  - `Integration.cs`：Terminal 夹具 16→8 窗格（`terminal-8-*.json`），与运行时上限一致。
+  - `Integration.cs` P04 begin 复查用例：入口改用条目冻结的 `Mode="conservative"`（`PolicyFromEntry` 从条目推导策略而非 configuration.json），owned 目录配置仅保证 `LoadAuthority` 可加载；否则条目 Mode 缺省 practical 会把提交/物理不足放行为 Advisory 并消耗授权。
+  - `RepairChecks` R12 账本容量用例：10 条占用容量的既有记录改为 `Kind="git"`（git 项不计入并发窗格上限），保持「容量拒绝先于建池/写账本」原断言；否则该夹具会先撞上 8 窗格上限、以窗格文案而非「容量」拒绝。修复后 repair-checks 单独复跑 **36/36**。
+  - UI 检查：ACC-U06 实用模式提示与 conservative「等待资源后启动」禁用分支、ACC-S01 资源卡移除断言、waiver 对话框用例删除、ACC-U08 并发预检、`MainWindow.xaml.cs:113` 截图元数据去 Resource 字段（INTEGRATION_TESTS 测试代码，已批准的范围例外）。
+  - UI 检查夹具（INTEGRATION_TESTS 测试代码）：`TaskUsabilityUiChecks` UX05 的队尾任务与 `QuickQueueUiChecks` 的快捷队列资源夹具由 custom 改为 `Mode="conservative"`——这两条链路（受限派发不消耗队首、压力下快捷排队）原本依赖 custom 硬拒；practical/custom 放行后夹具会真实派发、破坏「不产生 attempt」断言。单独复跑 UI 检查 **274/274**（`--ui-check`，46.9 秒）。
+  - Soak `ObserverRunner.cs:53` 协议说明措辞去掉 waiver。
+- 验证：`scripts/build.ps1` 通过（App+Worker 发布、钩子扫描、manifest；源码提交 `0c5d8345…`，AGENTS.md「无 Git 元数据」注记已过时）。原生/模型测试 **177/177**（修复「P low memory」翻转后单独复跑 0 失败；首轮 176/1 的失败即该用例按旧语义断言 Deny）。最终 `scripts/test.ps1` 全量门禁 **GATE_EXIT=0**（权威日志 `artifacts/gate-20261115-final2.log`，零 `FAIL` 行）：日志载明原生 177/0、修复检查 36/0、`Integration failures: 0`（integration 段 250–373 行共 122 项 PASS，与单独复跑一致）；startup-queue/parallel-batch/terminal-batch 与 UI/node/浏览器各段由 test.ps1 逐段检查 `$LASTEXITCODE`（任一失败即抛错退出非 0）。集成套件 P04/P01 修复后单独复跑 **122/122**、UI 检查单独复跑 **274/274**（46.9 秒）、浏览器 5/5。本轮门禁共三轮迭代：第一轮 176/1（P low memory 旧语义）、第二轮 repair 35/1（R12 容量夹具撞 8 窗格上限）+integration 2 例旧语义夹具（P04 begin 条目 Mode、P01 采样批次 4→9 窗格）、第三轮 UI 2 例 custom 硬拒夹具（UX05 队尾、QuickQueue 资源）改 conservative 后全绿；全部夹具改动已列上方待评审清单。task_verify 无法核验本仓库（`project-or-git-baseline-unavailable`），以 build.ps1/test.ps1 实际输出为证。
