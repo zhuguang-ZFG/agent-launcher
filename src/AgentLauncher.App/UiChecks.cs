@@ -315,14 +315,19 @@ public partial class MainWindow
             var focusButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="聚焦终端 rail-session-probe");
             Check("active session offers terminal window recall",focusButton!=null);
             if(focusButton!=null){ProgressText.Text="";focusButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check("missing terminal window reports instead of failing",ProgressText.Text.Contains("未找到该批次"));}
-            // P2 session-card wiring: settled agent entries expose read-only change summary; review routing needs a linked task run.
+            // P2 session-card wiring: settled agent entries expose read-only change summary; review routing follows the linked run's terminal transition without any monitor-entry change.
             var settledAttempt=Guid.NewGuid();var settledTask=Guid.NewGuid();
             status=new(true,"settled probe",[new(){Plan=new LaunchItem(settledAttempt,Guid.NewGuid(),1,"settled-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Settled"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
-            taskBook=new(){Revision=1,Tasks=[new(){Id=settledTask,Revision=1,Name="settled-task-probe",Project=Store.Root}],Attempts=[new(){TaskId=settledTask,TaskRevision=1,AttemptId=settledAttempt,BatchId=Guid.NewGuid(),State="Review",At=DateTimeOffset.UtcNow}]};
+            taskBook=new(){Revision=1,Tasks=[new(){Id=settledTask,Revision=1,Name="settled-task-probe",Project=Store.Root}],Attempts=[new(){TaskId=settledTask,TaskRevision=1,AttemptId=settledAttempt,BatchId=Guid.NewGuid(),State="Running",At=DateTimeOffset.UtcNow}]};
             RenderMonitorStatus();
             var viewChanges=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="查看变更 settled-session-probe");
+            Check("settled session offers change summary while run is not terminal",viewChanges!=null);
+            Check("review routing hidden while linked run is still running",Find<Button>(Sessions).All(b=>AutomationProperties.GetName(b)!="审阅改动 settled-session-probe"));
+            // The run alone turns terminal (FinishRun); the monitor entries stay identical, so only the signature's review bit may flip.
+            taskBook=new(){Revision=2,Tasks=[new(){Id=settledTask,Revision=1,Name="settled-task-probe",Project=Store.Root}],Attempts=[new(){TaskId=settledTask,TaskRevision=1,AttemptId=settledAttempt,BatchId=Guid.NewGuid(),State="Review",At=DateTimeOffset.UtcNow}]};
+            RenderMonitorStatus();
             var reviewLink=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="审阅改动 settled-session-probe");
-            Check("settled session offers change summary and review routing",viewChanges!=null&&reviewLink!=null);
+            Check("review routing appears when linked run turns terminal",reviewLink!=null);
             if(viewChanges!=null)
             {
                 ErrorText.Text="";viewChanges.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));

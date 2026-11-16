@@ -510,7 +510,7 @@ public partial class MainWindow : Window
     private void RenderMonitorStatus(){RenderSessions();RenderRail();UpdateLaunch();SessionNotifier.For(this).Observe(status?.Entries,config.NotifyOnSessionEventsEnabled);}
     private void RenderSessions()
     {
-        var entries=status?.Entries??[];var signature=string.Join("|",entries.Select(e=>$"{e.Plan.Id}:{e.State}:{e.Detail}:{(e.State=="Pending"&&DateTimeOffset.UtcNow-e.Created>TimeSpan.FromSeconds(10))}"));
+        var entries=status?.Entries??[];var signature=string.Join("|",entries.Select(e=>$"{e.Plan.Id}:{e.State}:{e.Detail}:{(e.State=="Pending"&&DateTimeOffset.UtcNow-e.Created>TimeSpan.FromSeconds(10))}:{(e.State=="Settled"&&e.Plan.Kind=="agent"&&FindLinkedRun(e.Plan.Id)!=null)}"));
         var blockedTools=entries.Count(ToolRecovery.CanOffer);
         SessionHeading.Text=blockedTools>0?$"运行记录 · {blockedTools} 项工具曾被内存拦截":"运行记录";
         var retryable=taskBook is null?[]:entries.Where(e=>e.State is "FailedBeforeStart" or "Revoked")
