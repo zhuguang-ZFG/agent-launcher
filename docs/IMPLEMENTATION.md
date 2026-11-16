@@ -1296,3 +1296,10 @@ powershell -NoProfile -File scripts/test.ps1
 - GitChanges 入口改 public（WorktreeChanges/GhStatus/GetWorktreeChanges/GetGhStatus），csproj 只保留 InternalsVisibleTo(Tests)，App 不再靠 IVT 穿透程序集边界。
 - 环境事件：机器物理空闲一度跌到 0.32 GiB（edge/chrome/UPDF 为用户进程未动），ACC-R07/R11（真实 Job+系统余量依赖）拒止属正确行为；关闭 dotnet build server 后 4.66 GiB，原生 188 项全绿。期间曾误启生产预览 App（--ui-check 只在 INTEGRATION_TESTS 构建可用；已停掉其拉起的真实 store monitor，control.json 未被改写）。test.ps1 的 UI 阶段必须用 artifacts/test-runtime + AGENT_LAUNCHER_TEST_ROOT（scripts/run-ui-check-once.ps1 为单跑 UI 阶段的窄工具，本轮新增并保留）。通知的已知边界：App 关闭期间 Worker 继续运行但不投递通知，重开不补播（已写入 C9）。
 - 测试基线变更（只增不削）：UiChecks +通知组 10 项、设置对话框断言、P2 两项（变更摘要+审阅路由、非 git 目录错误）、P4 队列拒斥；ReviewChecks +3 项 GitChanges fail-closed；Integration +1（共享池恢复链，§73）。隔离 UI 重跑 298 项全绿（EXIT=0）。
+
+## 75. 核对释放补启动时间证明；池文案纠谎（2026-11-16 夜，Asia/Shanghai）
+
+- 动因：用户报「启动不了」——账本条目 e171e4da（今早 08:23 Omp 会话，10:38 触发 Job 内存上限 0xC0000409 崩溃，10:52 时 Job 内仍有工具进程存活）在 Job 句柄丢失后永久阻塞准入；「核对并释放占用」按 fail-closed 设计拒绝（父死+无句柄无法枚举后代）。横幅文案「系统重启后可核对释放」与实现不符（ReconcileRequests 无启动时间特例，重启后仍拒）。
+- 根因归属坦承：句柄丢失时段在 10:52–21:37 之间；19:28 用户打开预览 App（监控 PID 29132 接管该 Job 句柄），19:36 本轮清理误杀该监控——很可能是最后句柄被关闭的时刻。用户账本未做任何手工改写。
+- 修复：ReconcileRequests 增加启动时间证明——回执记录的进程启动 FILETIME 早于本次系统引导（GetTickCount64 反推）即可放行并写审计 Detail（重启后进程不可能由重启前进程派生，整树必已随重启结束）。Entry 级横幅「系统重启后可核对释放」自此为真；池级文案改为与另一处一致的「需人工核对后释放」（池核对路径不存在，记录为已知缺口）。
+- 测试：既有 `R-handle-lost reconcile …` 用例新增第四条目（Exited 回执+死 PID+启动时间早于引导 30 天 → 放行）；旧代码下该断言失败（落拒斥分支）。Integration 全套件 0 失败。
