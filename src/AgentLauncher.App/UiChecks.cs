@@ -19,6 +19,7 @@ public partial class MainWindow
         // The harness owns an isolated, possibly non-existent test root. The app's preview-first startup no longer writes
         // monitor state there, so create it before the first configuration write (a missing root surfaces as a silent UI-only error).
         System.IO.Directory.CreateDirectory(Store.Root);
+        SessionNotifier.For(this).TestMode = true;
         void Check(string name,bool value)
         {
             if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}
@@ -128,10 +129,11 @@ public partial class MainWindow
         settingsDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>{
             var theme=FindLogical<ComboBox>(settingsDialog).Single(c=>AutomationProperties.GetName(c)=="主题");theme.SelectedIndex=2;
             var scale=FindLogical<ComboBox>(settingsDialog).Single(c=>AutomationProperties.GetName(c)=="文字与控件大小");scale.SelectedIndex=2;
-            FindLogical<CheckBox>(settingsDialog).Single().IsChecked=true;
+            FindLogical<CheckBox>(settingsDialog).Single(c=>AutomationProperties.GetName(c)=="启动全部确认后最小化窗口").IsChecked=true;
+            FindLogical<CheckBox>(settingsDialog).Single(c=>AutomationProperties.GetName(c)=="会话状态变化时显示桌面通知");
             FindLogical<Button>(settingsDialog).Single(b=>b.Content as string=="应用").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         }));
-        Check("settings apply selected theme scale and minimize values",settingsDialog.ShowDialog()==true&&settingsDialog.Values["theme"]=="dark"&&settingsDialog.Values["scale"]=="150"&&settingsDialog.Values["minimize"]=="true");
+        Check("settings apply selected theme scale minimize and notify values",settingsDialog.ShowDialog()==true&&settingsDialog.Values["theme"]=="dark"&&settingsDialog.Values["scale"]=="150"&&settingsDialog.Values["minimize"]=="true"&&settingsDialog.Values["notify"]=="true");
         config.Theme="dark";ApplyTheme();Render();var darkInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var darkPage=((SolidColorBrush)Background).Color;
         Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1F3B66")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#313438")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
         Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#C5C5C5"));
@@ -304,12 +306,29 @@ public partial class MainWindow
             taskBook=new(){Revision=1,Tasks=[new(){Id=railTaskId,Revision=1,Name="rail-queue-probe",Project=Store.Root}],Queue=[new(){Id=Guid.NewGuid(),TaskId=railTaskId,TaskRevision=1,Priority=1,Sequence=1,EnqueuedAt=DateTimeOffset.UtcNow,Project=Store.Root}]};
             RenderTasks();
             Check("rail queue follows task render",FindLogical<TextBlock>(RailQueue).Any(t=>t.Text.Contains("rail-queue-probe")));
+            // P4 compare-group wiring: queued tasks are refused before any dialog or write.
+            var compareButton=Find<Button>(TaskList).FirstOrDefault(b=>AutomationProperties.GetName(b)=="复制为对比组 rail-queue-probe");
+            if(compareButton!=null){ErrorText.Text="";compareButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check("queued task is refused from compare grouping",ErrorText.Text.Contains("正在队列中"));}
             status=new(true,"rail probe",[new(){Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"rail-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Started"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
             RenderMonitorStatus();
             Check("rail sessions follow monitor refresh",FindLogical<TextBlock>(RailSessions).Any(t=>t.Text.Contains("rail-session-probe")));
             var focusButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="聚焦终端 rail-session-probe");
             Check("active session offers terminal window recall",focusButton!=null);
             if(focusButton!=null){ProgressText.Text="";focusButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check("missing terminal window reports instead of failing",ProgressText.Text.Contains("未找到该批次"));}
+            // P2 session-card wiring: settled agent entries expose read-only change summary; review routing needs a linked task run.
+            var settledAttempt=Guid.NewGuid();var settledTask=Guid.NewGuid();
+            status=new(true,"settled probe",[new(){Plan=new LaunchItem(settledAttempt,Guid.NewGuid(),1,"settled-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Settled"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
+            taskBook=new(){Revision=1,Tasks=[new(){Id=settledTask,Revision=1,Name="settled-task-probe",Project=Store.Root}],Attempts=[new(){TaskId=settledTask,TaskRevision=1,AttemptId=settledAttempt,BatchId=Guid.NewGuid(),State="Review",At=DateTimeOffset.UtcNow}]};
+            RenderMonitorStatus();
+            var viewChanges=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="查看变更 settled-session-probe");
+            var reviewLink=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="审阅改动 settled-session-probe");
+            Check("settled session offers change summary and review routing",viewChanges!=null&&reviewLink!=null);
+            if(viewChanges!=null)
+            {
+                ErrorText.Text="";viewChanges.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                var waitCycles=0;while(ErrorText.Text.Length==0&&waitCycles++<50)await Task.Delay(100);
+                Check("non-git worktree reports a readable change-summary error",ErrorText.Text.Contains("查看变更失败"));
+            }
             // The dot must resolve the shared state brushes, not a snapshot color, and the summaries must stay bounded to three rows plus one overflow row.
             bool SameBrush(Brush? actual,Brush expected)=>ReferenceEquals(actual,expected)||actual is SolidColorBrush actualColor&&expected is SolidColorBrush expectedColor&&actualColor.Color==expectedColor.Color;
             var dotSlot=config.Draft.Slots.First(s=>s.Enabled);var dotWasEnabled=dotSlot.Enabled;
@@ -339,6 +358,44 @@ public partial class MainWindow
             taskBook=savedBook;RenderTasks();
             status=savedStatus;RenderMonitorStatus();
         }
+        // P1 session notifications: runtime transitions only, deduped, rate-limited and path-safe.
+        var notifier = SessionNotifier.For(this);
+        notifier.Reset(); notifier.TestMode = true;
+        var notifyAt = DateTimeOffset.UtcNow;
+        notifier.Now = () => notifyAt;
+        ControlEntry N(Guid id, string state, string detail) => new()
+        {
+            Plan = new LaunchItem(id, Guid.NewGuid(), 1, "会话A", Store.Root, PhysicalDirectory.Workspace(Store.Root), false, new("cmd.exe", ["--secret-arg"], "exe"), ResourcePolicy.AgentBudget),
+            State = state, Detail = detail, Created = notifyAt
+        };
+        var nId = Guid.NewGuid(); const string finishedDetail = "全部受管进程已退出。退出码 3；目录 C:\\Users\\me\\proj；参数 --secret-arg";
+        notifier.Observe([N(nId, "Started", "已启动进程")], true);
+        Check("notification baseline refresh is silent", notifier.Delivered.Count == 0);
+        notifier.Observe([N(nId, "Settled", finishedDetail)], true);
+        Check("finished session notifies once with exit code", notifier.Delivered.Count == 1 && notifier.Delivered[0].Category == "finished" && notifier.Delivered[0].Message.Contains("退出码 3"));
+        var toastText = string.Join(" ", notifier.Delivered.Select(d => d.Title + " " + d.Message));
+        Check("notification text excludes arguments and full paths", !toastText.Contains("--secret-arg") && !toastText.Contains("C:\\") && !toastText.Contains(@"\Users\") && !toastText.Contains(Store.Root));
+        notifier.Observe([N(nId, "Settled", finishedDetail)], true);
+        Check("identical session event is not notified twice", notifier.Delivered.Count == 1);
+        var mId = Guid.NewGuid();
+        notifier.Observe([N(nId, "Settled", finishedDetail), N(mId, "Started", "已启动进程")], true);
+        notifier.Observe([N(nId, "Settled", finishedDetail), N(mId, "Started", "共享池内存分配触及上限；分配被拒绝")], true);
+        Check("memory touch notifies with shared pool wording", notifier.Delivered.Count == 2 && notifier.Delivered[1].Category == "memory" && notifier.Delivered[1].Message.Contains("共享池"));
+        var f1 = Guid.NewGuid(); var f2 = Guid.NewGuid();
+        notifier.Observe([N(f1, "Pending", "等待资源"), N(f2, "Pending", "等待资源")], true);
+        notifier.Observe([N(f1, "FailedBeforeStart", "未启动：失败A"), N(f2, "Pending", "等待资源")], true);
+        notifier.Observe([N(f2, "FailedBeforeStart", "未启动：失败B")], true);
+        Check("same-category notifications are rate limited to one per two seconds", notifier.Delivered.Count(d => d.Category == "failed") == 1);
+        var qId = Guid.NewGuid();
+        notifier.Observe([N(qId, "Pending", "等待资源")], true);
+        notifier.Observe([N(qId, "Started", "已启动进程")], true);
+        Check("queue wait release notifies started", notifier.Delivered.Any(d => d.Category == "started"));
+        var offId = Guid.NewGuid();
+        notifier.Observe([N(offId, "Pending", "等待资源")], false);
+        var beforeOff = notifier.Delivered.Count;
+        notifier.Observe([N(offId, "FailedBeforeStart", "未启动：失败C")], false);
+        Check("disabled setting suppresses notifications", notifier.Delivered.Count == beforeOff);
+        notifier.Now = () => DateTimeOffset.UtcNow; notifier.TestMode = false;
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});Close();
     }

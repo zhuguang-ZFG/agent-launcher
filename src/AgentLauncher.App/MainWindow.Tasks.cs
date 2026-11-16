@@ -111,7 +111,7 @@ public partial class MainWindow
         if (queueEnabled && queueScopeTaskIds is not null) QueueStatusText.Text = "仅执行本批次 · 并发 1；其他等待项保持原状。" + (hold is null ? "" : " " + hold.Detail);
         var search = TaskSearch.Text.Trim();
         var visible = book.Tasks.Where(task => (TaskFilter.SelectedIndex == 2 || task.Archived == (TaskFilter.SelectedIndex == 1))
-            && (search.Length == 0 || task.Name.Contains(search, StringComparison.OrdinalIgnoreCase) || task.Project.Contains(search, StringComparison.OrdinalIgnoreCase) || Agents.Get(task.AgentId).Name.Contains(search, StringComparison.OrdinalIgnoreCase))).ToArray();
+        && (search.Length == 0 || task.Name.Contains(search, StringComparison.OrdinalIgnoreCase) || task.Project.Contains(search, StringComparison.OrdinalIgnoreCase) || task.Note.Contains(search, StringComparison.OrdinalIgnoreCase) || Agents.Get(task.AgentId).Name.Contains(search, StringComparison.OrdinalIgnoreCase))).ToArray();
         if (visible.Length == 0 && book.Tasks.Count > 0) { TaskEmptyText.Text = "当前范围没有匹配任务，可更换范围或清空搜索。"; TaskEmptyText.Visibility = Visibility.Visible; }
         foreach (var task in visible.OrderByDescending(task => task.Priority).ThenBy(task => task.UpdatedAt))
             TaskList.Children.Add(TaskCardView(book, task));
@@ -145,6 +145,7 @@ public partial class MainWindow
         DockPanel.SetDock(priority, Dock.Right); header.Children.Add(priority);
         stack.Children.Add(header);
         stack.Children.Add(new TextBlock { Text = task.Project, ToolTip = task.Project, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = (System.Windows.Media.Brush)FindResource("Muted"), Margin = new Thickness(0, 4, 0, 0) });
+        if (task.Note.Length > 0) stack.Children.Add(new TextBlock { Text = "备注：" + task.Note, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0), Foreground = (System.Windows.Media.Brush)FindResource("Muted") });
         if (task.Archived) { AddTaskUtilityActions(stack, task); card.Child = stack; return card; }
         if (queued is not null)
             stack.Children.Add(new TextBlock { Text = queued.Detail.Length > 0 ? $"队列：{queued.Detail}" : "队列：等待执行", FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0), Foreground = (System.Windows.Media.Brush)FindResource("Muted") });
@@ -175,6 +176,9 @@ public partial class MainWindow
             dequeue.Click += async (_, _) => await GuardAsync(async () => { if (await UpdateTasksAsync(editor => TaskBookOps.Dequeue(editor, task.Id), "移出队列失败")) QueueStatusText.Text = "已移出队列。"; });
             actions.Children.Add(dequeue);
         }
+        var compare = TaskButton("复制为对比组 " + task.Name, "复制为对比组");
+        compare.Click += async (_, _) => await GuardAsync(() => CopyAsCompareGroupAsync(task.Id));
+        actions.Children.Add(compare);
         if (last is { State: "Review" })
         {
             var complete = TaskButton("完成验收 " + task.Name, "标记完成");

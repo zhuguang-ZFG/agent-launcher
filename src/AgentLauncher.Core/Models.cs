@@ -81,6 +81,8 @@ public sealed class Configuration
     public int TextScalePercent { get; set; } = 100;
     public List<string> RecentProjects { get; set; } = [];
     public List<string> RecentAgents { get; set; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? NotifyOnSessionEvents { get; set; }
+    [JsonIgnore] public bool NotifyOnSessionEventsEnabled => NotifyOnSessionEvents ?? true;
     public void Edit(Action<Draft> change)
     {
         var next = Draft.Copy(); change(next); next.Validate(); next.Revision++; Draft = next; ManuallyEdited = true;

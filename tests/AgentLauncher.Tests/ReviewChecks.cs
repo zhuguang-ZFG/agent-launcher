@@ -227,6 +227,68 @@ internal static class ReviewChecks
             Throws<IOException>(()=>service.CreatePullRequestAsync(snapshot,"title","body").GetAwaiter().GetResult(),"无远程仓库仍允许创建 PR");
             Throws<IOException>(()=>service.PreviewPortsAsync(Guid.NewGuid()).GetAwaiter().GetResult(),"不存在的尝试任务组未可读失败");
         });
+        test("P3 GitChanges reports branch, baseline, uncommitted, stat and ahead/behind",()=>
+        {
+            var repo=NewRepo("git-changes");
+            File.WriteAllText(Path.Combine(repo,"base.txt"),"base\n");Commit(repo,"base");
+            ReviewFixtureGit.Require(git,repo,"checkout","-q","-b","feature/x");
+            File.WriteAllText(Path.Combine(repo,"base.txt"),"changed\n");Commit(repo,"first feature");
+            File.WriteAllText(Path.Combine(repo,"third.txt"),"third\n");Commit(repo,"second feature");
+            File.WriteAllText(Path.Combine(repo,"base.txt"),"dirty\n");
+            File.WriteAllText(Path.Combine(repo,"loose.txt"),"loose\n");
+            var changes=GitChanges.GetWorktreeChanges(repo,git);
+            Assert(changes.Ok,"read-only changes failed: "+changes.Error);
+            Assert(changes.Branch=="feature/x","branch mismatch: "+changes.Branch);
+            Assert(!changes.HasUpstream,"local-only branch was reported as having an upstream");
+            Assert(changes.UncommittedCount==2,"uncommitted count mismatch: "+changes.UncommittedCount);
+            Assert(changes.DiffStat.Contains("base.txt"),"diff stat missing changed file: "+changes.DiffStat);
+            Assert(changes.Ahead==2,"ahead mismatch: "+changes.Ahead);
+            Assert(changes.Behind==0,"behind mismatch: "+changes.Behind);
+            Assert(changes.Baseline is "master" or "main","fallback baseline mismatch: "+changes.Baseline);
+        });
+
+        test("P3 GitChanges resolves upstream baseline and counts against a bare remote",()=>
+        {
+            var bare=Path.Combine(fixtureRoot,"git-changes-remote-"+Guid.NewGuid().ToString("N")+".git");Directory.CreateDirectory(bare);
+            ReviewFixtureGit.Require(git,bare,"init","-q","--bare");
+            var repo=NewRepo("git-changes-upstream");
+            File.WriteAllText(Path.Combine(repo,"a.txt"),"a\n");Commit(repo,"initial");
+            ReviewFixtureGit.Require(git,repo,"remote","add","origin",bare);
+            var branch=ReviewFixtureGit.Require(git,repo,"rev-parse","--abbrev-ref","HEAD").Trim();
+            ReviewFixtureGit.Require(git,repo,"push","-q","-u","origin",branch);
+            var changes=GitChanges.GetWorktreeChanges(repo,git);
+            Assert(changes.Ok,"upstream changes failed: "+changes.Error);
+            Assert(changes.HasUpstream,"upstream not detected");
+            Assert(changes.Baseline=="origin/"+branch,"upstream baseline mismatch: "+changes.Baseline);
+            Assert(changes.Ahead==0&&changes.Behind==0,"ahead/behind mismatch: "+changes.Ahead+"/"+changes.Behind);
+            Assert(changes.UncommittedCount==0,"clean tree reported uncommitted: "+changes.UncommittedCount);
+        });
+
+        test("P3 GitChanges refuses missing and non-git directories with structured errors",()=>
+        {
+            var missing=Path.Combine(fixtureRoot,"git-changes-missing-"+Guid.NewGuid().ToString("N"));
+            var absent=GitChanges.GetWorktreeChanges(missing,git);
+            Assert(!absent.Ok&&absent.Error.Contains("不存在"),"missing directory not refused: "+absent.Error);
+            Assert(absent.Branch.Length==0&&absent.DiffStat.Length==0,"failure leaked default change data");
+            var plain=Path.Combine(fixtureRoot,"git-changes-plain-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(plain);
+            var nonGit=GitChanges.GetWorktreeChanges(plain,git);
+            Assert(!nonGit.Ok&&nonGit.Error.Contains("Git"),"non-git directory not refused: "+nonGit.Error);
+        });
+
+        test("P3 GitChanges gh status fails closed when gh is unavailable",()=>
+        {
+            var original=Environment.GetEnvironmentVariable("PATH");
+            var empty=Path.Combine(fixtureRoot,"git-changes-no-gh-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(empty);
+            try
+            {
+                Environment.SetEnvironmentVariable("PATH",empty);
+                var missingGh=Path.Combine(empty,"gh.exe");
+                var status=GitChanges.GetGhStatus(missingGh);
+                Assert(!status.Available&&!status.Authenticated,"missing gh reported as available: "+status.Detail);
+                Assert(status.Detail.Contains("gh"),"missing gh detail lacks guidance: "+status.Detail);
+            }
+            finally{Environment.SetEnvironmentVariable("PATH",original);}
+        });
     }
 }
 

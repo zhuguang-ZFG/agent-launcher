@@ -507,7 +507,7 @@ public partial class MainWindow : Window
         try{await task;}finally{if(ReferenceEquals(resourceRefreshTask,task))resourceRefreshTask=null;}
     }
     // Monitor-status fan-out: the polling seam refreshes sessions, the rail summary and the launch gate together.
-    private void RenderMonitorStatus(){RenderSessions();RenderRail();UpdateLaunch();}
+    private void RenderMonitorStatus(){RenderSessions();RenderRail();UpdateLaunch();SessionNotifier.For(this).Observe(status?.Entries,config.NotifyOnSessionEventsEnabled);}
     private void RenderSessions()
     {
         var entries=status?.Entries??[];var signature=string.Join("|",entries.Select(e=>$"{e.Plan.Id}:{e.State}:{e.Detail}:{(e.State=="Pending"&&DateTimeOffset.UtcNow-e.Created>TimeSpan.FromSeconds(10))}"));
@@ -540,6 +540,7 @@ public partial class MainWindow : Window
                 focus.Click+=(_,_)=>FocusTerminalWindow(e.Plan.BatchId);
                 row.Children.Add(focus);
             }
+            AddChangeActions(row,e);
             if(e.State=="Pending"){var revoke=new Button{Content="撤销未启动项",HorizontalAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(revoke,$"撤销未启动项 {e.Plan.Name}");revoke.Click+=async(_,_)=>await GuardAsync(async()=>{var result=await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:e.Plan.Id));ProgressText.Text=result.Message;await RefreshAsync();});row.Children.Add(revoke);}
             if(e.State is "FailedBeforeStart" or "Revoked"&&!entries.Any(next=>next.Plan.RetryOf==e.Plan.Id))
             {
@@ -793,16 +794,16 @@ public partial class MainWindow : Window
         catch(InvalidDataException e){MessageBox.Show(owner,e.Message,"参数预设",MessageBoxButton.OK,MessageBoxImage.Warning);}
     }
     private async void ResourceClick(object sender,RoutedEventArgs e)=>await GuardAsync(ShowResourceSettingsAsync);
-    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates});
+    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates});
     private async void SettingsClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
     {
         if(applyingSettings)return;applyingSettings=true;
         try
         {
             var dialog=CreateSettingsDialog();if(dialog.ShowDialog()!=true)return;if(readOnly||busy){ErrorText.Text="当前配置不可编辑，设置未保存。";return;}
-            if(!new[]{"system","light","dark"}.Contains(dialog.Values["theme"])||!bool.TryParse(dialog.Values["minimize"],out var minimize)||!int.TryParse(dialog.Values["scale"],out var scale)||scale is not (100 or 125 or 150)){ErrorText.Text="设置值无效，未应用。";return;}
+            if(!new[]{"system","light","dark"}.Contains(dialog.Values["theme"])||!bool.TryParse(dialog.Values["minimize"],out var minimize)||!bool.TryParse(dialog.Values["notify"],out var notify)||!int.TryParse(dialog.Values["scale"],out var scale)||scale is not (100 or 125 or 150)){ErrorText.Text="设置值无效，未应用。";return;}
             var destination=dialog.Values["worktree"].Trim();if(destination.Length>0)destination=await Task.Run(()=>PhysicalDirectory.Resolve(destination).Path);
-            if(readOnly||busy)return;config.WorktreeDirectory=destination;config.TerminalPath=dialog.Values["terminal"].Trim();config.Theme=dialog.Values["theme"];config.TextScalePercent=scale;config.MinimizeAfterLaunch=minimize;QueueSave();ApplyTheme();Render();
+            if(readOnly||busy)return;config.WorktreeDirectory=destination;config.TerminalPath=dialog.Values["terminal"].Trim();config.Theme=dialog.Values["theme"];config.TextScalePercent=scale;config.MinimizeAfterLaunch=minimize;config.NotifyOnSessionEvents=notify;QueueSave();ApplyTheme();Render();
         }
         finally{applyingSettings=false;}
     });
