@@ -120,7 +120,7 @@ public partial class MainWindow
                 if (started is not null && Store.IsTerminal(started)) break;
                 await Task.Delay(100);
             }
-            check("ACC-U07 launch button reaches a real Terminal child and exit receipt", started is not null && Store.IsTerminal(started) && Store.Read<Receipt>(Store.ReceiptPath(started.Plan.Id)) is { Phase: "Finished", ExitCode: 0 } && System.IO.File.Exists(output));
+            check("ACC-U07 launch button reaches a real Terminal child and exit receipt", started is not null && Store.IsTerminal(started) && ReadStoreSettled<Receipt>(Store.ReceiptPath(started.Plan.Id)) is { Phase: "Finished", ExitCode: 0 } && System.IO.File.Exists(output));
             using var result = JsonDocument.Parse(System.IO.File.ReadAllText(output));
             check("ACC-U07 child uses the visible per-agent folder and exact arguments", PhysicalDirectory.Resolve(result.RootElement.GetProperty("Cwd").GetString()!).Key == PhysicalDirectory.Resolve(directory).Key && result.RootElement.GetProperty("Args").EnumerateArray().Select(value => value.GetString()).SequenceEqual(["中文 with spaces"]));
             check("ACC-U07 direct launch leaves old queued tasks untouched", JsonSerializer.Serialize(taskBook, Store.Json) == queueBefore);

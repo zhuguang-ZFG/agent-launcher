@@ -12,6 +12,16 @@ namespace AgentLauncher.App;
 
 public partial class MainWindow
 {
+    private static string FileMutexFor(string path) => "Local\\AgentLauncher-file-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(path).ToUpperInvariant())));
+    // The store guard means "retry later"; a poll must not treat a concurrent writer as a fatal check error.
+    private static T? ReadStoreSettled<T>(string path) where T : class
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { return Store.Read<T>(path); }
+            catch (IOException e) when (attempt < 3 && e.Message.Contains("记录正在写入", StringComparison.Ordinal)) { Thread.Sleep(50); }
+        }
+    }
     private async Task RunTaskChecksAsync(Action<string, bool> check)
     {
         var originalSample = Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE");
@@ -192,8 +202,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
                 check($"ACC-B08 shim dispatch {index + 1} consumes the queue and creates a new attempt",
                     stored.Queue.All(entry => entry.TaskId != taskId) && run is { Terminal: false } && runs.All(prior => prior.AttemptId != run.AttemptId));
                 runs.Add(run!);
-                for (var i = 0; i < 100 && Store.Read<Receipt>(Store.ReceiptPath(run!.AttemptId))?.Phase != "Finished"; i++) await Task.Delay(100);
-                check($"ACC-B08 shim dispatch {index + 1} finishes the real pane successfully", Store.Read<Receipt>(Store.ReceiptPath(run!.AttemptId)) is { Phase: "Finished", ExitCode: 0 });
+                for (var i = 0; i < 100 && ReadStoreSettled<Receipt>(Store.ReceiptPath(run!.AttemptId))?.Phase != "Finished"; i++) await Task.Delay(100);
+                check($"ACC-B08 shim dispatch {index + 1} finishes the real pane successfully", ReadStoreSettled<Receipt>(Store.ReceiptPath(run!.AttemptId)) is { Phase: "Finished", ExitCode: 0 });
                 await ReconcileTaskRunsAsync();
                 check($"ACC-B08 shim dispatch {index + 1} reaches review", TaskBookOps.LastRun(taskStore.Load(), taskId)?.State == "Review");
             }
@@ -245,8 +255,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
                 await Task.Delay(50);
             }
             check("ACC-B10 resume creates a linked new attempt", resumed?.ResumeOf == runs[1].AttemptId && resumed.SessionRef == session && resumed.AttemptId != runs[1].AttemptId);
-            for (var i = 0; i < 100 && Store.Read<Receipt>(Store.ReceiptPath(resumed!.AttemptId))?.Phase != "Finished"; i++) await Task.Delay(100);
-            check("ACC-B10 resumed shim finishes through the real Terminal pane", Store.Read<Receipt>(Store.ReceiptPath(resumed!.AttemptId)) is { Phase: "Finished", ExitCode: 0 });
+            for (var i = 0; i < 100 && ReadStoreSettled<Receipt>(Store.ReceiptPath(resumed!.AttemptId))?.Phase != "Finished"; i++) await Task.Delay(100);
+            check("ACC-B10 resumed shim finishes through the real Terminal pane", ReadStoreSettled<Receipt>(Store.ReceiptPath(resumed!.AttemptId)) is { Phase: "Finished", ExitCode: 0 });
             for (var i = 0; i < 100 && queuePumping; i++) await Task.Delay(50);
             queueEnabled = false; taskTimer.Stop();
             await ReconcileTaskRunsAsync();

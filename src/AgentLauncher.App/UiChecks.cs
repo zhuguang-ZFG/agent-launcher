@@ -201,7 +201,7 @@ public partial class MainWindow
         using(var gateRunner=Process.Start(gateStart)!)
         {
             gateRunner.StandardInput.Close();
-            Receipt? gateReceipt=null;for(var i=0;i<50;i++){await Task.Delay(100);gateReceipt=Store.Read<Receipt>(Store.ReceiptPath(gateItem.Id));if(gateReceipt?.Phase=="Started")break;}
+            Receipt? gateReceipt=null;for(var i=0;i<50;i++){await Task.Delay(100);gateReceipt=ReadStoreSettled<Receipt>(Store.ReceiptPath(gateItem.Id));if(gateReceipt?.Phase=="Started")break;}
             Check("gate runner started",gateReceipt?.Phase=="Started");
             await RefreshAsync();
             Check("confirmed running attempt releases launch gate",submittedAttempts.Length==0&&submittedRevision==-1);
@@ -254,6 +254,14 @@ public partial class MainWindow
         var liveTrack=liveBar?.Template?.FindName("PART_Track",liveBar) as System.Windows.Controls.Primitives.Track;
         var liveThumb=liveTrack?.Thumb?.Background as SolidColorBrush;var tokenThumb=(Brush)FindResource("InputLine") as SolidColorBrush;
         Check("scrollbars follow the theme tokens",liveThumb!=null&&tokenThumb!=null&&liveThumb.Color==tokenThumb.Color);
+        var lockProbePath=Store.ReceiptPath(Guid.NewGuid());
+        Store.Save(lockProbePath,new Receipt("Finished",0,0,0,"lock probe",DateTimeOffset.UtcNow));
+        using var lockHeld=new ManualResetEventSlim(false);
+        var lockHolder=Task.Run(()=>{using var held=new Mutex(false,FileMutexFor(lockProbePath));held.WaitOne();lockHeld.Set();Thread.Sleep(2300);held.ReleaseMutex();});
+        lockHeld.Wait();
+        var lockProbe=await Task.Run(()=>ReadStoreSettled<Receipt>(lockProbePath));
+        await lockHolder;
+        Check("transient store write lock is retried instead of aborting checks",lockProbe is {Phase:"Finished"});
         config=new Configuration();config.Draft.Slots.ForEach(s=>s.Enabled=false);Render();var projectBefore=config.Draft.Project;var targetSlot=config.Draft.Slots[2].Id;
         var dropDirectory=System.IO.Path.Combine(Store.Root,"drop-directory");System.IO.Directory.CreateDirectory(dropDirectory);
         await ApplyDroppedDirectoriesAsync([dropDirectory],targetSlot,config.Draft.Revision);

@@ -1257,3 +1257,12 @@ powershell -NoProfile -File scripts/test.ps1
 - 内存：无新定时器/轮询/动画/常驻渲染；同口径（同机同夹具背靠背）ui-idle-memory：本轮 PrivateBytes 138.97 MiB / WorkingSet 208.29 MiB，对修复前基线 137.42 / 210.08 → PrivateBytes +1.5 MiB、WorkingSet −1.8 MiB，噪声带内（artifacts/ui-final 与 artifacts/ui-baseline）。
 - 门禁：`scripts/test.ps1` 全量 GATE_EXIT=0（2026-11-16，artifacts/gate-20261116-ui-usability.log）：native 183/0、repair 36/0、Integration failures: 0、UI 295/295（artifacts/ui/ui-checks.json，Dpi=120，含本轮 +6 断言）、node --test prototype 5/0 与 omp-memory-guard 6/0、browser F15/F16/F17 全 PASS；日志 `^FAIL` 计数 0。
 - 待评审：滚动条样式与尺寸、compact 行重排、JumpTo 落点、单行去分隔线、+6 断言与截图基线替换。
+
+## 71. CI 间歇红根因：UI harness 轮询读把瞬时文件锁当致命错误（2026-11-16，Asia/Shanghai）
+
+- 现象：main `ee5261b` 的 gate 运行 43806327442 在集成全过（Integration failures: 0）后于 UI 段抛 `System.IO.IOException`「记录正在写入，请稍后核对。」（`Store.WithFileLock`，Services.cs:57），test.ps1:49 判 `UI checks failed`；取证 artifacts/ci-fail-ee5261b/ui/ui-exception.json。同代码本地全门禁 GATE_EXIT=0 → 时序竞态，不是断言失败。
+- 根因：`WithFileLock` 对命名 mutex 等待 2000ms 未获锁即抛「请稍后核对」的瞬时守卫；生产读取方（TaskHistoryReader.cs:78、TaskRecoveryReader.cs:48）已 catch IOException 降级为提示，唯独 UI harness 的回执轮询（TaskUiChecks.cs:195/248、UiChecks.cs:204、SimpleUiChecks.cs:123）把守卫当致命错误抛出。CI 磁盘/杀软/调度时序下撞锁即整轮红，本地不易复现。
+- 修复：harness 新增 `ReadStoreSettled<T>`——仅对「记录正在写入」重试 ≤3 次、间隔 50ms，其余 IOException 原样抛；替换上述 5 处读。断言不变（仍要求 `Finished`/`ExitCode 0`），生产语义零改动（守卫与 2000ms 预算保留）。
+- 新闸门 +1（295→**296**）：「transient store write lock is retried instead of aborting checks」——后台线程持同名文件 mutex 2300ms（超过 2000ms 等待预算）期间读回执，断言重试后仍读到 `Finished`；mutex 名复用 tests 既有 `FileMutexFor` 算法。
+- 变异证红：重试上限改 0（等价旧单次读）→ `--ui-check` UI_RED_EXIT=1，ui-exception.json 正是「记录正在写入」IOException（artifacts/ui-redlock），与 CI 失败同因；恢复后 296/296 绿（artifacts/ui-lockgreen），未变异对照 296 绿（artifacts/ui-lock）。
+- 门禁：待本轮 CI 运行回填。
