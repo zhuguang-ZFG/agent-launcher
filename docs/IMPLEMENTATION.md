@@ -1218,7 +1218,7 @@ powershell -NoProfile -File scripts/test.ps1
 ## 67. 真机反馈轮：内存提示去刷屏、握手陈旧警告、窄态溢出菜单（2026-11-16，Asia/Shanghai）
 
 - 真机取证（用户授权查 log）：`control.json` 34 条会话（30 Settled / 3 Started / 1 Revoked）。已验证事实：①无头探针（`qoder -p` + `--plugin-dir` 指向真机守卫目录）下 PreToolUse hook 真实触发并 fail-closed 拦截全部工具——插件加载与分发机制完好；②真机一条会话显示「最近一次工具已通过内存检查」、另一条显示工具被内存检查拦截——准入管道在真实会话中工作过；③多条会话同时残留「内存保护未确认加载」；④一条会话收据记录峰值 4106 MiB / 上限 4096 MiB；⑤用户保存的资源配置（custom / 4 GiB / 1536 MiB / independent）与 `LongTaskResources.Create()` 的输出逐项一致（用户点选动作本身未观测）。代码事实（修复前）：握手位翻转不在 `ObserveMemory` 的 changed 触发器内，迟到的 hello 不会重写收据；`Drain()` 返回非空即触发重写，同一 PID 的重复通知会反复重写。**推测（待验证，修复不依赖其成立）**：真机 hello 迟于 3 秒启动窗口到达（对立假设：交互式会话不触发 SessionStart，hello 从未到达）；内核在持续压限期间重复通知导致刷屏（对立假设：用户看到的是多条会话各自残留一条警告）。
-- 修复（Worker `Program.cs`）：`ObserveMemory` 增加握手翻转触发（hello 无论何时到达都清除警告；若 SessionStart 从不触发，警告保留为真实信号）；违规 PID 去重（同一 PID 的重复通知不再重写收据，首犯与换进程照常记录）。保护语义不变：硬上限照常拒绝分配。提示语补调节入口（「设置 → 资源」提高该项上限，`ExitDiagnostics`）。
+- 修复（Worker `Program.cs`）：`ObserveMemory` 增加握手翻转触发（监控循环存活期间——子进程及其 Job 成员退出前——迟到的 hello 会重写收据清除警告；循环结束后到达的 hello 不再清除，该情形与 SessionStart 从不触发同样保留警告为真实信号；`da901ce` 提交说明中「无论何时到达」的措辞以本条为准）；违规 PID 去重（同一 PID 的重复通知不再重写收据，首犯与换进程照常记录）。保护语义不变：硬上限照常拒绝分配。提示语补调节入口（「设置 → 资源」提高该项上限，`ExitDiagnostics`）。
 - 窄态能力缺口修复：Rail 底部新增窄态（<900 逻辑 px）可见的「⋯」菜单（AutomationProperties.Name=窄屏菜单），复用 ChooseClick/ResourceClick/WorkspacesClick/TaskRecoveryClick/TaskHistoryClick/RestoreBackupClick 既有 handler，零新逻辑；恢复备份项经 `RailOverflowMenuOpened` 跟随 readOnly。「设置」本就在品牌行可达。设计 §6 能力损失段落改写为「命令不丢失」。
 - 验证：UI 检查 282→**287**（4 变体窄态可见性 + 1 菜单内容结构）；窄态截图人工核对（⋯ 在底、圆点条正常）。变更面：Core 1 文案、Worker 2 行为、App 3（XAML 菜单 + ArrangePanels 一行 + handler 一行）。
 - 待评审：提示文案变更；收据重写频率语义变化（减少）；新增 5 项 UI 检查。
