@@ -533,6 +533,13 @@ public partial class MainWindow : Window
                 AutomationProperties.SetName(copy,$"复制继续提示 {e.Plan.Name}");
                 copy.Click+=(_,_)=>{try{Clipboard.SetText(ToolRecovery.ContinuePrompt);ProgressText.Text="已复制。等待内存释放后，粘贴到该任务原终端继续；不会新建会话。";}catch(System.Runtime.InteropServices.COMException){ProgressText.Text="剪贴板正忙，请稍后再点「复制继续提示」。";}};row.Children.Add(copy);
             }
+            if(e.State=="Started"&&e.Plan.Kind=="agent")
+            {
+                var focus=new Button{Content="聚焦终端",HorizontalAlignment=HorizontalAlignment.Left,Style=(Style)FindResource("QuietButton"),Margin=new(0,4,0,0),ToolTip="把本次启动所在的分屏终端窗口切到前台；找不到说明窗口已关闭。"};
+                AutomationProperties.SetName(focus,$"聚焦终端 {e.Plan.Name}");
+                focus.Click+=(_,_)=>FocusTerminalWindow(e.Plan.BatchId);
+                row.Children.Add(focus);
+            }
             if(e.State=="Pending"){var revoke=new Button{Content="撤销未启动项",HorizontalAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(revoke,$"撤销未启动项 {e.Plan.Name}");revoke.Click+=async(_,_)=>await GuardAsync(async()=>{var result=await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:e.Plan.Id));ProgressText.Text=result.Message;await RefreshAsync();});row.Children.Add(revoke);}
             if(e.State is "FailedBeforeStart" or "Revoked"&&!entries.Any(next=>next.Plan.RetryOf==e.Plan.Id))
             {
@@ -702,10 +709,11 @@ public partial class MainWindow : Window
             var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
-            try{await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout,launchCancellation.Token));}
+            var profileHint="";
+            try{var paneProfile=TerminalProfile.TryPrepare(out var profileDeferred);await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout,launchCancellation.Token,paneProfile));if(profileDeferred)profileHint="（窗格美化将在 Windows Terminal 重启后生效）";}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
             if(launchCancellation.Token.IsCancellationRequested)return;
-            ProgressText.Text="已交给 Windows Terminal 打开，正在等每个窗口确认。进程出现不代表 Agent 已就绪。";
+            ProgressText.Text="已交给 Windows Terminal 打开，正在等每个窗口确认。进程出现不代表 Agent 已就绪。"+profileHint;
             for(var i=0;i<10;i++)
             {
                 if(launchCancellation.Token.IsCancellationRequested)break;

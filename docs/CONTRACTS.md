@@ -94,6 +94,8 @@ Prepared → Claimed → SpawnIntent → CreatedSuspended → ResumeIntent → S
 
 Terminal 返回 0 只证明命令提交，不证明全部窗格已打开。10 秒回执观察期到期后显示 Unknown，之后允许继续核对；不自动补发整组。
 
+窗格美化走 Windows Terminal 官方 JSON fragment 扩展点（`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\AgentLauncher\`），只写本产品自有 fragment 文件，从不读写用户 settings.json；fragment 仅在 Terminal 进程启动时加载，因此仅当所有运行中的 Terminal 进程都晚于 fragment 写入时间启动才在窗格命令携带 `--profile AgentLauncher`，否则本次启动不带 profile（行为与此前一致），并在启动提示中声明美化延后生效。profile 缺失或解析失败必须表现为窗格外观回退默认，绝不能导致启动失败。`closeOnExit: graceful` 只改变窗格收尾：退出码 0 自动关闭，非 0 保留现场；不改变任何准入、回执或资源语义。
+
 选择器解析只检查受控 PATH/PATHEXT 与显式程序位置，排除将项目当前目录当作隐式命令来源。PowerShell 函数/别名不属于可执行程序支持范围。
 
 `.exe` 使用结构化参数；`.cmd` 只支持经验证的 npm shim 适配，必须保留其正确调用语义。不能只靠 `ArgumentList` 宣称已经解决 CMD、Windows Terminal 分号和脚本多层解析。任意 `.cmd/.bat/.ps1` 不在首版通用支持范围，不静默用 shell 执行。Node 运行时选择镜像各模板自身语义：npm shim 模板优先相邻 `node.exe`，Pi shim 模板（`SET "node=node"`）走 PATH；适配器不得统一替换其一。

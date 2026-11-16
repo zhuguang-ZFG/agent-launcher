@@ -27,11 +27,13 @@ public static class TerminalAppearance
         }
     }
 
-    public static void AddPaneArguments(ProcessStartInfo start,LaunchItem item,bool useSystemColors)=>AddPaneArguments(start.ArgumentList,item,useSystemColors);
+    public static void AddPaneArguments(ProcessStartInfo start,LaunchItem item,bool useSystemColors,string? profile=null)=>AddPaneArguments(start.ArgumentList,item,useSystemColors,profile);
 
-    internal static void AddPaneArguments(ICollection<string> arguments,LaunchItem item,bool useSystemColors)
+    internal static void AddPaneArguments(ICollection<string> arguments,LaunchItem item,bool useSystemColors,string? profile=null)
     {
-        // Command-line overrides affect only this pane. Do not install fragments or rewrite the user's Terminal settings.
+        // Command-line overrides affect only this pane. The named profile ships as an app-owned JSON fragment
+        // (TerminalProfile); the user's own settings.json is never read or written.
+        if(profile!=null){arguments.Add("--profile");arguments.Add(profile);}
         arguments.Add("--title");
         var folder=Path.GetFileName(item.Cwd.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar));
         arguments.Add($"{item.Position:00}  {DisplayText(item.Name,40)} · {DisplayText(folder,40)}".Replace(";","\\;"));

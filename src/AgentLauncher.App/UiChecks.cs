@@ -307,6 +307,9 @@ public partial class MainWindow
             status=new(true,"rail probe",[new(){Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"rail-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Started"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
             RenderMonitorStatus();
             Check("rail sessions follow monitor refresh",FindLogical<TextBlock>(RailSessions).Any(t=>t.Text.Contains("rail-session-probe")));
+            var focusButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="聚焦终端 rail-session-probe");
+            Check("active session offers terminal window recall",focusButton!=null);
+            if(focusButton!=null){ProgressText.Text="";focusButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check("missing terminal window reports instead of failing",ProgressText.Text.Contains("未找到该批次"));}
             // The dot must resolve the shared state brushes, not a snapshot color, and the summaries must stay bounded to three rows plus one overflow row.
             bool SameBrush(Brush? actual,Brush expected)=>ReferenceEquals(actual,expected)||actual is SolidColorBrush actualColor&&expected is SolidColorBrush expectedColor&&actualColor.Color==expectedColor.Color;
             var dotSlot=config.Draft.Slots.First(s=>s.Enabled);var dotWasEnabled=dotSlot.Enabled;

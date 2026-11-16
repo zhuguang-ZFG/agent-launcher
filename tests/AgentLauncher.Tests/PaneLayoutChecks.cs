@@ -103,6 +103,15 @@ internal static class PaneLayoutChecks
             var custom=Items(3);custom[0]=custom[0] with{AgentId="custom",Name="Codex"};custom[1]=custom[1] with{AgentId="unknown",Name="Pi"};custom[2]=custom[2] with{AgentId=null,Name="User-defined agent"};
             Assert(PaneCommands(Commands.ComposeTerminalArguments(custom,"vertical")).All(c=>Value(c,"--tabColor")==colors["custom"]),"explicit/unknown/custom identity was guessed from display name");
         });
+        Test("ACC-T01 named profile rides every pane only when supplied",()=>
+        {
+            var items=Items(4);
+            var withProfile=PaneCommands(Commands.ComposeTerminalArguments(items,"vertical",profile:"AgentLauncher"));
+            Assert(withProfile.Count==4&&withProfile.All(p=>Value(p,"--profile")=="AgentLauncher"),"profile missing from a pane");
+            Assert(PaneCommands(Commands.ComposeTerminalArguments(items,"vertical")).All(p=>!p.Contains("--profile")),"profile leaked into profile-less compose");
+            // --profile must precede the CLI title/color arguments so the explicit overrides keep winning over profile defaults.
+            Assert(withProfile.All(p=>Array.IndexOf(p,"--profile")<Array.IndexOf(p,"--title")),"profile must precede the CLI overrides it supplies defaults for");
+        });
         Test("ACC-T01 system colors suppress both Terminal color overrides on every pane",()=>
         {
             var items=Items(16);var ordinary=Commands.ComposeTerminalArguments(items,"vertical");var system=Commands.ComposeTerminalArguments(items,"vertical",true);

@@ -5,7 +5,7 @@ namespace AgentLauncher.Windows;
 
 public static partial class Commands
 {
-    public static IReadOnlyList<string> ComposeTerminalArguments(IReadOnlyList<LaunchItem> items,string layout,bool useSystemColors=false)
+    public static IReadOnlyList<string> ComposeTerminalArguments(IReadOnlyList<LaunchItem> items,string layout,bool useSystemColors=false,string? profile=null)
     {
         ArgumentNullException.ThrowIfNull(items);
         var map=PaneLayout.Map(items.Count,layout);var enabledByCreation=new int[items.Count];
@@ -17,7 +17,7 @@ public static partial class Commands
         {
             if(step==";"&&panePending)
             {
-                var item=items[enabledByCreation[creation++]];TerminalAppearance.AddPaneArguments(arguments,item,useSystemColors);
+                var item=items[enabledByCreation[creation++]];TerminalAppearance.AddPaneArguments(arguments,item,useSystemColors,profile);
                 arguments.Add(worker);arguments.Add("pane");arguments.Add(item.Id.ToString("D"));panePending=false;
             }
             arguments.Add(step);if(step is "new-tab" or "split-pane")panePending=true;
@@ -38,9 +38,9 @@ public static partial class Commands
         return checked(length+slashes);
     }
 
-    public static void SubmitTerminal(string terminal,IReadOnlyList<LaunchItem> items,string layout,CancellationToken cancellationToken=default)
+    public static void SubmitTerminal(string terminal,IReadOnlyList<LaunchItem> items,string layout,CancellationToken cancellationToken=default,string? profile=null)
     {
-        var arguments=ComposeTerminalArguments(items,layout,TerminalAppearance.UseSystemColors);
+        var arguments=ComposeTerminalArguments(items,layout,TerminalAppearance.UseSystemColors,profile);
         _ = CreateTerminalStartInfo(terminal,arguments); // Keep the complete-batch limit and validate before opening any pane.
         var prefix=arguments.TakeWhile(argument=>argument!="new-tab").ToArray();var headerLength=prefix.Length;
         var fragments=new List<List<string>>();var pending=new List<string>(prefix);var command=new List<string>();
