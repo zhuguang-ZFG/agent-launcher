@@ -291,6 +291,25 @@ public partial class MainWindow
             status=new(true,"rail probe",[new(){Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"rail-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Started"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
             RenderMonitorStatus();
             Check("rail sessions follow monitor refresh",FindLogical<TextBlock>(RailSessions).Any(t=>t.Text.Contains("rail-session-probe")));
+            // The dot must resolve the shared state brushes, not a snapshot color, and the summaries must stay bounded to three rows plus one overflow row.
+            bool SameBrush(Brush? actual,Brush expected)=>ReferenceEquals(actual,expected)||actual is SolidColorBrush actualColor&&expected is SolidColorBrush expectedColor&&actualColor.Color==expectedColor.Color;
+            var dotSlot=config.Draft.Slots.First(s=>s.Enabled);var dotWasEnabled=dotSlot.Enabled;
+            // Render() rebuilds railDots; each mapping is read synchronously so a trailing command check cannot overwrite the probe.
+            dotSlot.Enabled=true;Render();
+            var dotMappedOk=SameBrush(railDots[dotSlot.Id].Fill,(Brush)FindResource("StatusOk"));
+            dotSlot.Enabled=false;Render();
+            var dotMappedOff=SameBrush(railDots[dotSlot.Id].Fill,(Brush)FindResource("StatusOff"));
+            dotSlot.Enabled=dotWasEnabled;Render();
+            Check("rail status dot maps to state brushes",dotMappedOk&&dotMappedOff);
+            var railNow=DateTimeOffset.UtcNow;
+            status=new(true,"rail summary probe",Enumerable.Range(0,5).Select(i=>new ControlEntry{Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),i+1,$"rail-summary-{i}",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget,Kind:"agent"),State="Started",Created=railNow.AddMinutes(-i)}).ToArray(),new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,railNow));
+            RenderMonitorStatus();
+            var sessionsTruncated=RailSessions.Children.Count==4&&RailSessions.Children[3] is Button sessionsMore&&sessionsMore.Content is string sessionsLabel&&sessionsLabel.Contains("全部");
+            var summaryTasks=Enumerable.Range(0,5).Select(i=>new TaskCard{Id=Guid.NewGuid(),Revision=1,Name=$"rail-summary-task-{i}",Project=Store.Root}).ToArray();
+            taskBook=new(){Revision=1,Tasks=[..summaryTasks],Queue=[..summaryTasks.Select((task,i)=>new QueueEntry{Id=Guid.NewGuid(),TaskId=task.Id,TaskRevision=1,Priority=1,Sequence=i+1,EnqueuedAt=railNow,Project=Store.Root})]};
+            RenderTasks();
+            var queueTruncated=RailQueue.Children.Count==4&&RailQueue.Children[3] is Button queueMore&&queueMore.Content is string queueLabel&&queueLabel.Contains("全部");
+            Check("rail summaries truncate with overflow entry",sessionsTruncated&&queueTruncated);
         }
         finally
         {

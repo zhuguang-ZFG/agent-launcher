@@ -1224,3 +1224,11 @@ powershell -NoProfile -File scripts/test.ps1
 - 待评审：提示文案变更；收据重写频率语义变化（减少）；新增 5 项 UI 检查。
 - 容量指引边界（评审修正）：真机快照提交上限 34.3 GiB、已用约 22.2、可用约 12.1。上限配额是拒绝阈值而非预占，但配额之和不能与整机上限直接比较；5-6 个并发在 6 GiB 上限下的同时峰值无现成证据。对用户的指引因此限定为「可逐步试」：调高上限后观察资源 pill 的可用读数与整机响应，发现变慢即降回或减少并发——不承诺任何并发档位安全。
 - 门禁：本树 `scripts/test.ps1` 全绿（native 183/0、Integration failures: 0、UI 287/287，2026-11-16，`artifacts/gate-20261116-fixes.log`）。生产实例运行中，预览发布至 `artifacts/preview-next`（替换需先关闭正在运行的旧实例）。
+
+## 68. 改进小轮：握手计时遥测、CI zip 产物、§9 断言补齐（2026-11-16，Asia/Shanghai）
+
+- 握手计时（解决 §67 待验证假设的取证手段）：`OmpMemoryGuard` 新增 `firstHelloTicks`（`Interlocked.CompareExchange` 写一次，后续 hello 不改写）+ `FirstHelloAt`；`Receipt` 尾部加 `HandshakeAt`/`HandshakeWaitMs`（WhenWritingNull，旧收据兼容）；Worker 在 3 秒等待前记 `handshakeWaitBegin`，`Write` 时落盘等待毫秒。真机换上后：收据出现 HandshakeWaitMs>3000 → 「hello 迟到」成立；始终不出现 → 「SessionStart 未触发」成立。两种结果都不影响保护语义。
+- CI zip：`ci.yml` 末尾追加（仅 main push）：复用既有 `artifacts/ci-preview` 完整发布包 → `Compress-Archive` 为 `agent-launcher-<sha8>.zip` → upload-artifact v4（30 天保留，sha8 经 `$GITHUB_OUTPUT` 单点计算；artifact 名不带 .zip 后缀避免下载套娃）。PR 与既有步骤不受影响。
+- §9 断言补齐（282+5+2=289）：`rail status dot maps to state brushes`（Ok/Off 映射 + 还原）、`rail summaries truncate with overflow entry`（5 条合成会话/队列 → 恰 4 行且末行为含「全部」的 Button）。采用既有 savedStatus/savedBook try/finally 恢复模式，末位守卫不受影响。
+- 过程记录：SliceTiming 子代理进程死于上游网络中断，但其编辑已落盘并经主代理逐行审查（写一次语义、收据兼容性、断言有界性均复核）；SliceZip 的 artifact 命名套娃问题在集成时修正。崩溃取证：真机一次 Bun 1.4.4 进程在 4117/4096 MiB 压限后被拒分配崩溃（退出码 3）——保护按设计生效，已指引用户调 6 GiB。
+- 待评审：Receipt 字段新增（序列化兼容）、Integration 握手计时断言（≤5000ms 宽松界）、2 条 UI 断言、ci.yml 发布步骤。

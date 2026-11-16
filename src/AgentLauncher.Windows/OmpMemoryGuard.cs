@@ -14,12 +14,16 @@ public sealed class OmpMemoryGuard : IDisposable
     private readonly CancellationTokenSource stop = new();
     private readonly Task server;
     private long handshakeTicks;
+    private long firstHelloTicks;
     private Admission? lastDecision;
     public Admission? LastDecision => Volatile.Read(ref lastDecision);
     public string PipeName { get; } = "AgentLauncher-memory-" + Guid.NewGuid().ToString("N");
 
     /// <summary>True once the extension's load hello reached this endpoint; the Runner discloses fail-open tools when false.</summary>
     public bool HandshakeConfirmed => Volatile.Read(ref handshakeTicks) != 0;
+
+    /// <summary>When the extension's first load hello reached this endpoint; later hellos do not move it. Null until then.</summary>
+    public DateTimeOffset? FirstHelloAt => Volatile.Read(ref firstHelloTicks) is var t && t != 0L ? new DateTimeOffset(t, TimeSpan.Zero) : null;
 
     public static CommandSpec Attach(CommandSpec command)
     {
@@ -79,6 +83,7 @@ public sealed class OmpMemoryGuard : IDisposable
                     if (length == 1 && request[0] == 2)
                     {
                         // Load hello: the extension is active. Acknowledge without querying memory or gating tools.
+                        Interlocked.CompareExchange(ref firstHelloTicks, DateTimeOffset.UtcNow.Ticks, 0L);
                         Interlocked.Exchange(ref handshakeTicks, DateTimeOffset.UtcNow.Ticks);
                         var hello = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { allowed = true, reason = "内存保护已加载" }) + "\n");
                         await pipe.WriteAsync(hello, deadline.Token);

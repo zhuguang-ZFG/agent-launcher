@@ -56,3 +56,26 @@ jobs:
             artifacts/production-pane-*/result.json
             artifacts/omp-memory-guard-*/
           if-no-files-found: ignore
+      # Release: zip the verified portable package and publish it for main commits only.
+      - name: Zip portable preview package
+        id: package
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = 'artifacts/ci-preview'
+          if (-not (Test-Path -LiteralPath (Join-Path $package 'distribution.json'))) { throw "Preview package not found: $package" }
+          $sha8 = $env:GITHUB_SHA.Substring(0,8)
+          $zip = "artifacts/agent-launcher-$sha8.zip"
+          Get-ChildItem -LiteralPath $package | Compress-Archive -DestinationPath $zip -Force
+          if (-not (Test-Path -LiteralPath $zip)) { throw "Zip was not created: $zip" }
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "sha8=$sha8`n", [Text.UTF8Encoding]::new($false))
+          Write-Output "Zipped $package to $zip"
+      - name: Upload agent-launcher zip
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-launcher-${{ steps.package.outputs.sha8 }}
+          path: artifacts/agent-launcher-${{ steps.package.outputs.sha8 }}.zip
+          retention-days: 30
+          if-no-files-found: error

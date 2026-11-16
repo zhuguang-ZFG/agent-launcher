@@ -130,6 +130,8 @@ internal static class Program
         ProtectedProcess? child=null;Job? root=null;Job? pool=null;Job? job=null;JobMemoryWatch? memoryWatch=null;var resumeIntent=false;var claimCreated=false;int? memoryOffender=null;
         OmpMemoryGuard? toolGuard=null;Admission? observedToolDecision=null;var observedHandshake=false;
         JobMemoryEvidence? exitMemory=null;int? poolOffender=null;Guid? panePoolId=null;DateTimeOffset? poolNoticeAt=null;string poolNoticeDetail="";string? memoryNotificationError=null;var poolCheck=Stopwatch.StartNew();
+        // Set immediately before the bounded handshake wait, so the receipt can report how long the hello took.
+        DateTimeOffset handshakeWaitBegin=default;
         try
         {
             var claim=Path.Combine(Store.Root,"attempts",id.ToString("N"),"claim");Directory.CreateDirectory(Path.GetDirectoryName(claim)!);
@@ -178,6 +180,7 @@ internal static class Program
             catch(System.ComponentModel.Win32Exception){resumeIntent=false;throw;}
             var startedDetail="已启动进程（不代表任务完成）";
             // Fail open: an unconfirmed extension load weakens only the pre-limit, never the Job hard caps.
+            handshakeWaitBegin=DateTimeOffset.UtcNow;
             if(toolGuard is not null&&!toolGuard.WaitForHandshake(TimeSpan.FromSeconds(3)))
                 startedDetail+=$"；{(qoderGuard?"Qoder":"Omp")} 内存保护未确认加载：工具可能不受提前限流（硬上限仍生效），请核对版本与插件加载提示";
             Write("Started",child.Process.Id,child.CreationTime,null,startedDetail);
@@ -261,7 +264,10 @@ internal static class Program
         }
         void Write(string phase,int pid,long time,int? code,string detail)
         {
-            Store.Save(Store.ReceiptPath(id),new Receipt(phase,pid,time,code,detail,DateTimeOffset.UtcNow,exitMemory,PoolEvidence()));
+            // Handshake evidence: the first hello is written once, so repeat hellos cannot shorten the reported wait.
+            var helloAt=toolGuard?.FirstHelloAt;
+            var helloWaitMs=helloAt is{} h&&handshakeWaitBegin!=default?(long?)Math.Max(0L,(long)(h-handshakeWaitBegin).TotalMilliseconds):null;
+            Store.Save(Store.ReceiptPath(id),new Receipt(phase,pid,time,code,detail,DateTimeOffset.UtcNow,exitMemory,PoolEvidence(),helloAt,helloWaitMs));
 #if INTEGRATION_TESTS
             if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")==phase)Environment.Exit(97);
 #endif

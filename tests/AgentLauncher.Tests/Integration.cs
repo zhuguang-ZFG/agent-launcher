@@ -205,6 +205,8 @@ internal static class Integration
                 Assert(!decision.RootElement.TryGetProperty("hookSpecificOutput",out var blocked)||blocked.GetProperty("permissionDecision").GetString()=="deny","unexpected permission grant");
                 var receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id));
                 Assert(receipt is{Phase:"Started"}&&!receipt.Detail.Contains("未确认加载"),"Runner did not confirm handshake");
+                var handshakeAt=receipt?.HandshakeAt;var handshakeWait=receipt?.HandshakeWaitMs;
+                Assert(handshakeAt is not null&&handshakeWait is{} waitMs&&waitMs>=0&&waitMs<=5000,"Started 收据缺少握手计时（HandshakeAt 或 HandshakeWaitMs 为空，或等待超过 5000ms 的宽松上限）：字段未落盘即回归");
                 Assert(Environment.GetEnvironmentVariable(OmpMemoryGuard.PipeEnvironment)==before,"child environment leaked");
                 using var job=new Job(Store.JobName(item.Id),openOnly:true);
                 job.SetMemoryLimit(256*ResourcePolicy.MiB);
