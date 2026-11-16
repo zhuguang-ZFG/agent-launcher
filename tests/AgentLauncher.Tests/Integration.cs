@@ -566,6 +566,57 @@ else:
                 finally{try{survivor.Process.Kill();await survivor.Process.WaitForExitAsync();}catch(System.InvalidOperationException){}}
             }
         });
+        await Test("R-pool-handle-lost reconcile keeps unprovable pool charged and discloses retention",async()=>{
+            var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
+            const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            System.Reflection.FieldInfo Field(string name)=>type.GetField(name,flags)??throw new MissingFieldException(type.FullName,name);
+            var handle=type.GetMethod("Handle",flags)??throw new MissingMethodException(type.FullName,"Handle");
+            var poolId=Guid.NewGuid();var poolLimit=2*ResourcePolicy.AgentBudget;
+            var finItem=Item("pool-lost-finished",["--hold","1"]) with{PoolId=poolId,Shared=true};
+            var isolatedRoot=Store.RootJob+"-reconcile-pool-"+Guid.NewGuid().ToString("N");
+            using var rootJob=new Job(isolatedRoot,root:true);
+            using(var poolJob=new Job(Store.PoolName(poolId),poolLimit))
+            {
+                // ACC-S3B03 class: a direct pool member with no item job and no ledger entry survives the handle loss.
+                using var direct=new ProtectedProcess(new(Environment.ProcessPath!,["--hold","60000"],"exe"),cwd,rootJob,poolJob);
+                direct.Resume();
+                for(var i=0;i<50&&poolJob.Members().Length<1;i++)await Task.Delay(100);
+                Assert(poolJob.Members().Length==1,"pool fixture did not contain the direct member");
+                var directPid=direct.Process.Id;var directTime=direct.CreationTime;
+                poolJob.Dispose();
+                var openFailed=false;try{using var probe=new Job(Store.PoolName(poolId),openOnly:true);}catch(System.ComponentModel.Win32Exception e)when(e.NativeErrorCode==2){openFailed=true;}
+                Assert(openFailed,"scenario broken: pool object still openable after last handle closed");
+                Assert(!direct.Process.HasExited,"scenario broken: surviving direct member exited with the pool object");
+                try
+                {
+                    var sharedStatus=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+                    Assert(sharedStatus.Ok,"reconcile fixture contaminated the shared monitor: "+sharedStatus.Message);
+                    var finEntry=new ControlEntry{Plan=finItem,Digest=Store.Digest(finItem),State="Creating",Detail="正在创建进程"};
+                    Store.Save(Store.ReceiptPath(finItem.Id),new Receipt("Finished",directPid,directTime,0,"全部受管进程已退出，退出码 0",DateTimeOffset.UtcNow));
+                    using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;
+                    Field("sample").SetValue(monitor,new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow));
+                    var ledger=new Ledger{Entries=[finEntry],Pools=[new PoolRecord{Id=poolId,MemoryLimit=poolLimit,PolicyHash="fixture",BatchId=finItem.BatchId}]};
+                    Field("ledger").SetValue(monitor,ledger);
+                    Field("ledgerPath").SetValue(monitor,Path.Combine(Store.Root,"reconcile-pool-"+Guid.NewGuid().ToString("N")+".json"));
+                    Field("root").SetValue(monitor,new Job(isolatedRoot,root:true));
+                    var response=(Response)handle.Invoke(monitor,[new Request("reconcile",Guid.NewGuid())])!;
+                    Assert(finEntry.State=="Settled"&&finEntry.Detail.Contains("核对释放"),"finished member entry was not released: "+finEntry.State+" "+finEntry.Detail);
+                    Assert(ledger.Pools.Count==1,"pool record dropped while its direct member survives (ACC-S3B03 invariant)");
+                    Assert(response.AdmissionBlockedReason?.Contains("资源池")==true,"lost pool stopped charging admission: "+response.AdmissionBlockedReason);
+                    Assert(response.AdmissionBlockedReason?.Contains("自动释放")==true,"lost-pool guidance does not state the truthful reboot retirement: "+response.AdmissionBlockedReason);
+                    Assert(response.Message.Contains("资源池")&&response.Message.Contains("重启"),"reconcile did not disclose retained pools: "+response.Message);
+                    Assert(!direct.Process.HasExited,"reconcile killed the surviving direct member");
+                    // Death is no more provable than survival without the handle: retention must outlive the member.
+                    direct.Process.Kill();await direct.Process.WaitForExitAsync();
+                    var second=(Response)handle.Invoke(monitor,[new Request("reconcile",Guid.NewGuid())])!;
+                    Assert(ledger.Pools.Count==1,"pool record dropped after its direct member died unprovably (retain until boot rollover)");
+                    Assert(second.AdmissionBlockedReason?.Contains("资源池")==true,"pool hold cleared without proof of member exit: "+second.AdmissionBlockedReason);
+                    Assert(second.Message.Contains("资源池")&&second.Message.Contains("重启"),"post-death reconcile lost the retention disclosure: "+second.Message);
+                    Assert(finEntry.State=="Settled","settled member entry was rewritten: "+finEntry.State+" "+finEntry.Detail);
+                }
+                finally{try{direct.Process.Kill();await direct.Process.WaitForExitAsync();}catch(System.InvalidOperationException){}}
+            }
+        });
         await Test("R13 synchronous ResumeThread rejection reclaims never-run child",async()=>{
             var output=Path.Combine(Store.Root,"resume-rejection-must-not-exist.json");var item=Item("resume-rejected",["--echo",output]);var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserved.Ok,reserved.Message);
             try

@@ -504,7 +504,7 @@ internal sealed class Monitor : IDisposable
             try{pools[record.Id]=new Job(Store.PoolName(record.Id),openOnly:true);WatchPool(record.Id,pools[record.Id]);}
             catch(System.ComponentModel.Win32Exception ex) when(ex.NativeErrorCode==2)
             {
-                blocked="资源池句柄丢失，无法证明整池成员已退出；保留池与预算，需人工核对后释放。";
+                blocked="资源池句柄丢失，无法证明整池成员已退出；保留池与预算，系统重启后自动释放。";
                 reconcileOffered=true;
             }
         }
@@ -521,7 +521,7 @@ internal sealed class Monitor : IDisposable
                     try{pools[poolId]=new Job(Store.PoolName(poolId),openOnly:true);WatchPool(poolId,pools[poolId]);}
                     catch(System.ComponentModel.Win32Exception ex) when(ex.NativeErrorCode==2)
                     {
-                        blocked="资源池句柄丢失，无法证明整池成员已退出；保留池与预算，需人工核对后释放。";
+                        blocked="资源池句柄丢失，无法证明整池成员已退出；保留池与预算，系统重启后自动释放。";
                         e.Detail=blocked;reconcileOffered=true;continue;
                     }
                 }
@@ -816,6 +816,11 @@ internal sealed class Monitor : IDisposable
         var message=settled>0||refusals.Count>0
             ?$"已核对释放 {settled} 条占用"+(refusals.Count>0?$"；{refusals.Count} 条保持阻塞："+string.Join("；",refusals.Select(r=>r.Reason)):"。")
             :"没有需要核对释放的占用。";
+        // A lost pool handle can hide surviving direct members no entry proves dead (ACC-S3B03), so reconcile never
+        // retires pools within a boot — boot rollover does. Disclose what this pass cannot release instead of
+        // letting "已核对释放" read as if the pool hold were cleared too.
+        var retainedPools=ledger.Pools.Count(p=>!pools.ContainsKey(p.Id));
+        if(retainedPools>0)message=message.TrimEnd('。')+$"；{retainedPools} 个资源池句柄丢失：成员无法枚举核对，保留至系统重启自动释放。";
         if(!ok&&refusals.Count==0&&snapshot.AdmissionBlockedReason!=null)message+="当前仍阻塞："+snapshot.AdmissionBlockedReason;
         return snapshot with{Ok=ok,Message=message};
     }
