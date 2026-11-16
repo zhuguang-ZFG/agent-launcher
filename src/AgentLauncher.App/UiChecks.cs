@@ -243,9 +243,17 @@ public partial class MainWindow
         {
             config.TextScalePercent=scale;config.Theme="dark";ApplyTheme();Render();await ResizeForCheckAsync(650,700);
             var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth*UiScale.Value<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight*UiScale.Value<=ActualHeight);
+            var scaleCombo=Find<ComboBox>(SlotList).FirstOrDefault();
+            if(scaleCombo!=null){var comboOrigin=scaleCombo.TranslatePoint(new Point(),SlotList);Check($"detail combo stays inside the detail card at {scale}% text scale",comboOrigin.X>=-0.5&&comboOrigin.X+scaleCombo.ActualWidth<=SlotList.ActualWidth+0.5);}
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-text-{scale}.png"));encoder.Save(file);
         }
         config.TextScalePercent=100;ApplyTheme();
+        Check("single detail row draws no leftover separator",SlotList.Children.Count==1&&SlotList.Children[0] is Border{BorderThickness:{Bottom:0}});
+        var liveBar=ContentScroll.Template.FindName("PART_VerticalScrollBar",ContentScroll) as System.Windows.Controls.Primitives.ScrollBar;
+        liveBar?.ApplyTemplate();
+        var liveTrack=liveBar?.Template?.FindName("PART_Track",liveBar) as System.Windows.Controls.Primitives.Track;
+        var liveThumb=liveTrack?.Thumb?.Background as SolidColorBrush;var tokenThumb=(Brush)FindResource("InputLine") as SolidColorBrush;
+        Check("scrollbars follow the theme tokens",liveThumb!=null&&tokenThumb!=null&&liveThumb.Color==tokenThumb.Color);
         config=new Configuration();config.Draft.Slots.ForEach(s=>s.Enabled=false);Render();var projectBefore=config.Draft.Project;var targetSlot=config.Draft.Slots[2].Id;
         var dropDirectory=System.IO.Path.Combine(Store.Root,"drop-directory");System.IO.Directory.CreateDirectory(dropDirectory);
         await ApplyDroppedDirectoriesAsync([dropDirectory],targetSlot,config.Draft.Revision);
@@ -310,6 +318,10 @@ public partial class MainWindow
             RenderTasks();
             var queueTruncated=RailQueue.Children.Count==4&&RailQueue.Children[3] is Button queueMore&&queueMore.Content is string queueLabel&&queueLabel.Contains("全部");
             Check("rail summaries truncate with overflow entry",sessionsTruncated&&queueTruncated);
+            var sessionExpandBefore=SessionExpander.IsExpanded;var taskExpandBefore=TaskExpander.IsExpanded;
+            if(RailSessions.Children[3] is Button jumpSessions){jumpSessions.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);var sessionPoint=SessionExpander.TranslatePoint(new Point(),ContentScroll);Check("rail session overflow jumps to the session list",SessionExpander.IsExpanded&&sessionPoint.Y>=-4&&sessionPoint.Y<=ContentScroll.ViewportHeight-36);}
+            if(RailQueue.Children[3] is Button jumpQueue){jumpQueue.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);var queuePoint=TaskExpander.TranslatePoint(new Point(),ContentScroll);Check("rail queue overflow jumps to the task queue",TaskExpander.IsExpanded&&queuePoint.Y>=-4&&queuePoint.Y<=ContentScroll.ViewportHeight-36);}
+            SessionExpander.IsExpanded=sessionExpandBefore;TaskExpander.IsExpanded=taskExpandBefore;
         }
         finally
         {

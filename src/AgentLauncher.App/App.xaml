@@ -140,5 +140,40 @@
   <Style TargetType="ContextMenu"><Setter Property="Background" Value="{DynamicResource Surface}"/><Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="BorderBrush" Value="{DynamicResource Line}"/></Style>
   <Style TargetType="MenuItem"><Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="Padding" Value="8,6"/></Style>
   <Style TargetType="ToolTip"><Setter Property="Background" Value="{DynamicResource Surface}"/><Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="MaxWidth" Value="560"/><Setter Property="Padding" Value="12"/></Style>
+  <Style x:Key="ScrollPage" TargetType="RepeatButton">
+   <Setter Property="Background" Value="Transparent"/><Setter Property="Focusable" Value="False"/><Setter Property="IsTabStop" Value="False"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RepeatButton"><Border Background="{TemplateBinding Background}"/></ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="ScrollThumb" TargetType="Thumb">
+   <Setter Property="Background" Value="{DynamicResource InputLine}"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb"><Border Background="{TemplateBinding Background}" CornerRadius="5" Margin="2,1"/></ControlTemplate></Setter.Value></Setter>
+   <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource Muted}"/></Trigger><Trigger Property="IsDragging" Value="True"><Setter Property="Background" Value="{DynamicResource Muted}"/></Trigger></Style.Triggers>
+  </Style>
+  <Style TargetType="ScrollBar">
+   <Setter Property="Background" Value="Transparent"/><Setter Property="Width" Value="10"/><Setter Property="MinWidth" Value="10"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+    <Grid Background="{TemplateBinding Background}">
+     <Track x:Name="PART_Track" IsDirectionReversed="True">
+      <Track.DecreaseRepeatButton><RepeatButton Command="ScrollBar.PageUpCommand" Style="{StaticResource ScrollPage}"/></Track.DecreaseRepeatButton>
+      <Track.IncreaseRepeatButton><RepeatButton Command="ScrollBar.PageDownCommand" Style="{StaticResource ScrollPage}"/></Track.IncreaseRepeatButton>
+      <Track.Thumb><Thumb Style="{StaticResource ScrollThumb}"/></Track.Thumb>
+     </Track>
+    </Grid>
+   </ControlTemplate></Setter.Value></Setter>
+   <Style.Triggers>
+    <Trigger Property="Orientation" Value="Horizontal">
+     <Setter Property="Width" Value="Auto"/><Setter Property="MinWidth" Value="0"/><Setter Property="Height" Value="10"/><Setter Property="MinHeight" Value="10"/>
+     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+      <Grid Background="{TemplateBinding Background}">
+       <Track x:Name="PART_Track" IsDirectionReversed="False">
+        <Track.DecreaseRepeatButton><RepeatButton Command="ScrollBar.PageLeftCommand" Style="{StaticResource ScrollPage}"/></Track.DecreaseRepeatButton>
+        <Track.IncreaseRepeatButton><RepeatButton Command="ScrollBar.PageRightCommand" Style="{StaticResource ScrollPage}"/></Track.IncreaseRepeatButton>
+        <Track.Thumb><Thumb Style="{StaticResource ScrollThumb}"/></Track.Thumb>
+       </Track>
+      </Grid>
+     </ControlTemplate></Setter.Value></Setter>
+    </Trigger>
+   </Style.Triggers>
+  </Style>
  </Application.Resources>
 </Application>

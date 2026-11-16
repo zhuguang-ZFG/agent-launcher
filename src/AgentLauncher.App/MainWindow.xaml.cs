@@ -307,8 +307,11 @@ public partial class MainWindow : Window
         Grid.SetColumn(directoryButton,3);row.Children.Add(directoryButton);
         // Base the breakpoint on the window, not the row that this handler rearranges: long folder labels in
         // Auto columns can otherwise push the row across its own breakpoint repeatedly at larger text scales.
-        row.SizeChanged+=(_,_)=>{var compact=ActualWidth/UiScale.Value<650;directoryButton.MaxWidth=compact?160:double.PositiveInfinity;Grid.SetColumnSpan(choice,compact?4:1);Grid.SetRow(detail,compact?1:0);Grid.SetColumn(detail,compact?2:4);Grid.SetRow(actions,compact?1:0);Grid.SetRow(command,compact?2:1);Grid.SetRow(directoryButton,compact?1:0);Grid.SetColumn(directoryButton,compact?0:3);Grid.SetColumnSpan(directoryButton,compact?2:1);};
-        var container=new Border{BorderBrush=(Brush)FindResource("Line"),BorderThickness=new(0,0,0,position<config.Draft.Slots.Count?1:0),Child=row};AttachSlotDrag(container,number,directory,slot,position);SlotList.Children.Add(container);
+        // Compact stacks the directory button on its own span including the star column: two Auto-only spans
+        // (directory + agent combo) otherwise inflate the Auto columns past the row width at 150% text scale.
+        row.SizeChanged+=(_,_)=>{var compact=ActualWidth/UiScale.Value<650;directoryButton.MaxWidth=compact?160:double.PositiveInfinity;choice.MinWidth=compact?110:180;Grid.SetColumnSpan(choice,compact?4:1);Grid.SetRow(detail,compact?1:0);Grid.SetRow(actions,compact?1:0);Grid.SetRow(command,compact?2:1);Grid.SetRow(directoryButton,compact?1:0);Grid.SetColumn(directoryButton,compact?0:3);Grid.SetColumnSpan(directoryButton,compact?4:1);};
+        // v0.8 renders exactly the selected row, so a "separator before the next row" would draw a stray line.
+        var container=new Border{BorderBrush=(Brush)FindResource("Line"),BorderThickness=new(0),Child=row};AttachSlotDrag(container,number,directory,slot,position);SlotList.Children.Add(container);
     }
     // One read-only index row per slot in the rail. The whole row is a Button so the click target matches the visual row;
     // the status dot reuses the shared theme brushes through resource references (no per-row brush allocation).

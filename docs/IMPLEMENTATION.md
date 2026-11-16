@@ -1242,3 +1242,17 @@ powershell -NoProfile -File scripts/test.ps1
 - 验证：Integration 全绿（0 failures，`gate-20261116-recovery-final` 轮）；bg_46 一次 S4 失败复跑通过=时序抖动。探针目录已删。
 - 待评审/限制：①共享池路径对称实现但未做 pane 级实证（需 PoolLimitNotice 治具）；②85%/4 次为工程取值；③.NET 子进程无内核通知→其超限只能靠峰值读数与守卫证据，文档级限制；④恢复注记是「当前提交量」事实陈述，不证明拒绝已停止。
 - 顺带核实：CI zip 产物 691 KB 属正常（框架依赖型打包，21 项完整），此前「0 MB」为 MiB 取整误读。
+
+## 70. UI 实用性修复轮：主题化滚动条、150% 详情行裁切、Rail 摘要跳转与孤立分隔线（2026-11-16，Asia/Shanghai）
+
+- 来源：用户要求「改进这个项目的 UI；消除使用 bug；提升实用性」。基线 v0.8（§64～69）。本轮不改行为契约（启动门禁、队列与并发、只读保护、自动化名称、底栏），仅修视觉与交互缺陷；无 WebView、无新定时器/轮询/动画。
+- 缺陷与修复（4 项，均先截图/代码取证后修）：
+  1. **滚动条回退系统默认**：App.xaml 此前无 ScrollBar 样式，深/浅色下都是系统灰条带箭头，与主题脱节（深色尤其突兀）。新增隐式 `ScrollBar` 样式 + 键控 `ScrollThumb`/`ScrollPage`：圆角细条（竖/横均 10 逻辑像素）、Thumb 背景 `DynamicResource InputLine`、hover/drag 换 `Muted`、页区为透明 RepeatButton；横竖两套 Template 经 Orientation 触发器切换；高对比经 ApplyTheme 对 InputLine/Muted 的映射自动跟随。画笔全为共享令牌，无每行分配。
+  2. **150% 文字缩放详情行溢出裁切**：compact（<650 逻辑宽）分支原让目录按钮 span cols0-1（纯 Auto）与 Agent 下拉 span cols2-5 同排，两个 Auto-only span 的宽度下限/上限（160+180=340）在 150%/650 窗（行宽约 297）下超过可用宽，被 ContentScroll 水平裁切，下拉右缘贴卡边缺失。改 compact 为目录按钮独占一行 span cols0-3（含星列吸收余量）、详情/⋯ 移 col4/col5 同行、下拉 MinWidth 在 compact 降为 110；非 compact 布局不变。125%/150% 截图核对下拉完整落在卡内。
+  3. **Rail「查看全部会话/队列」跳转落点错误**：会话原用 `ContentScroll.ScrollToEnd()` 滚到最底（任务区）而非运行记录；队列仅展开不滚动（位于折叠线以下不可见）。新增 `JumpTo(section)`：展开后以 Dispatcher.Loaded 优先级 `BringIntoView()`，落点对应折叠区顶部。
+  4. **v0.8 单行详情残留分隔线**：SlotList 恒渲染选中 1 行，但行容器仍按「position<Slots.Count」画底分隔线，卡内出现孤立横线。改 `BorderThickness=0`。
+  另：`RailResourceText` 截断无 tooltip，补 `ToolTip=同文`（项目名已有 tooltip，未重复加）。
+- 回归（RED→GREEN，逐个变异证明会红）：UiChecks 289→**295**（+6）：125%/150% 各 1「detail combo stays inside the detail card at N% text scale」、1「single detail row draws no leftover separator」、1「scrollbars follow the theme tokens」（读 ContentScroll 活垂直滚动条 `PART_Track.Thumb` 背景与 InputLine 令牌同色，能抓住回退默认灰）、2「rail session/queue overflow jumps to …」（点溢出按钮后断言对应 Expander 展开且顶部落在 ContentScroll 视口内）。变异对照（每次单独改坏→非零退出→恢复）：①还原 compact 旧 span→150% 裁切检查红；②ScrollBar 隐式样式改键控→活滚动条检查红；③还原条件分隔线→分隔线检查红；④会话跳转还原 ScrollToEnd→会话跳转检查红。恢复后 295/295 绿。队列跳转与会话共用 JumpTo，由会话变异覆盖同一机制。
+- 截图与布局基线重新出图（native-{theme}-{width} ×4、native-text-{125,150}、layout-*.json，见 artifacts/ui-final），人工核对深/浅/窄/放大：滚动条圆角细条跟随主题、150% 下拉完整、孤立分隔线消失、compact 目录独占行、窄态圆点条与⋯菜单不变。
+- 内存：无新定时器/轮询/动画/常驻渲染；同口径（同机同夹具背靠背）ui-idle-memory：本轮 PrivateBytes 138.97 MiB / WorkingSet 208.29 MiB，对修复前基线 137.42 / 210.08 → PrivateBytes +1.5 MiB、WorkingSet −1.8 MiB，噪声带内（artifacts/ui-final 与 artifacts/ui-baseline）。
+- 待评审：滚动条样式与尺寸、compact 行重排、JumpTo 落点、单行去分隔线、+6 断言与截图基线替换。

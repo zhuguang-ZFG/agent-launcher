@@ -31,7 +31,7 @@ public partial class MainWindow
             RailSessions.Children.Add(new TextBlock { Text = text, ToolTip = text, FontSize = 12, Foreground = muted, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 2, 0, 2) });
         }
         if (active.Length == 0) RailSessions.Children.Add(new TextBlock { Text = "无活动会话", FontSize = 12, Foreground = muted, Margin = new Thickness(0, 2, 0, 2) });
-        if (active.Length > RailSummaryRows) RailSessions.Children.Add(RailMoreButton("查看全部会话", () => { SessionExpander.IsExpanded = true; ContentScroll.ScrollToEnd(); }));
+        if (active.Length > RailSummaryRows) RailSessions.Children.Add(RailMoreButton("查看全部会话", () => JumpTo(SessionExpander)));
     }
 
     private void RenderRailQueue(Brush muted)
@@ -49,7 +49,14 @@ public partial class MainWindow
             RailQueue.Children.Add(new TextBlock { Text = text, ToolTip = entry.Detail.Length > 0 ? $"{text}\n{entry.Detail}" : text, FontSize = 12, Foreground = muted, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 2, 0, 2) });
         }
         if (waiting.Length == 0) RailQueue.Children.Add(new TextBlock { Text = "队列为空", FontSize = 12, Foreground = muted, Margin = new Thickness(0, 2, 0, 2) });
-        if (waiting.Length > RailSummaryRows) RailQueue.Children.Add(RailMoreButton("查看全部队列", () => TaskExpander.IsExpanded = true));
+        if (waiting.Length > RailSummaryRows) RailQueue.Children.Add(RailMoreButton("查看全部队列", () => JumpTo(TaskExpander)));
+    }
+
+    // Expanding alone leaves the section below the fold; scroll it into view once the new content has been arranged.
+    private void JumpTo(FrameworkElement section)
+    {
+        if (section is Expander expander) expander.IsExpanded = true;
+        Dispatcher.BeginInvoke(new Action(() => section.BringIntoView()), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     private void RenderRailResource()
@@ -58,6 +65,7 @@ public partial class MainWindow
         RailResourceText.Text = status?.Memory is { } sample
             ? $"{RailResourceMode(config.Draft.Resource?.Mode)} · 可用 {GiB(sample.Available)} GiB"
             : "资源：未读取 · 打开设置";
+        RailResourceText.ToolTip = RailResourceText.Text;
     }
 
     private Button RailMoreButton(string name, Action open)
