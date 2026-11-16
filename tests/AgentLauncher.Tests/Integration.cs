@@ -182,7 +182,7 @@ internal static class Integration
         if(terminalOnly)
         {
             if(!directBatch)await Test("Terminal two panes exact child cwd and arguments",TerminalPair);
-            await Test("Terminal sixteen panes all become ready before any fixture exits",TerminalBatch);
+            await Test("Terminal eight panes (MaxConcurrentAgents cap) all become ready before any fixture exits",TerminalBatch);
             Store.Save(Store.FilePath("integration-results.json"),evidence);
             return evidence.Any(e=>e.GetType().GetProperty("passed")?.GetValue(e) is false)?1:0;
         }
@@ -333,6 +333,159 @@ time.sleep(2)
                     var frame=await Ipc.SendAsync(new("status",Guid.NewGuid()));
                     var entry=frame.Entries?.FirstOrDefault(e=>e.Plan.Id==item.Id);
                     if(entry is null||(entry.State!="Started"&&entry.State!="Pending"))break;
+                    await Task.Delay(200);
+                }
+            }
+            }
+            finally{try{Store.Save(Store.FilePath("configuration.json"),original??new Configuration());}catch{}}
+        });
+        await Test("Shared pool memory recovery note tracks commit fall and rebound across panes",async()=>{
+            var readyA=Path.Combine(Store.Root,"pool-pressure.ready.a");var readyB=Path.Combine(Store.Root,"pool-pressure.ready.b");
+            var go=Path.Combine(Store.Root,"pool-pressure.go");var quiet=Path.Combine(Store.Root,"pool-pressure.quiet");
+            var released=Path.Combine(Store.Root,"pool-pressure.released");var rehold=Path.Combine(Store.Root,"pool-pressure.rehold");
+            var stats=Path.Combine(Store.Root,"pool-pressure.stats");var finish=Path.Combine(Store.Root,"pool-pressure.finish");
+            foreach(var marker in new[]{readyA,readyB,go,quiet,released,rehold,stats,finish})if(File.Exists(marker))File.Delete(marker);
+            // VirtualAlloc commits immediately and refuses with NULL instead of throwing; the old bytearray+page-touch
+            // fixture stalled for 40 s under paging pressure and MemoryError is unsafe under commit refusal.
+            var script=Path.Combine(Store.Root,"pool-pressure.py");
+            File.WriteAllText(script,"""
+import os,sys,time,ctypes
+which,ready,go,quiet,released,rehold,stats,finish=sys.argv[1:9]
+k=ctypes.windll.kernel32
+k.VirtualAlloc.restype=ctypes.c_void_p
+k.VirtualAlloc.argtypes=[ctypes.c_void_p,ctypes.c_size_t,ctypes.c_uint,ctypes.c_uint]
+k.VirtualFree.argtypes=[ctypes.c_void_p,ctypes.c_size_t,ctypes.c_uint]
+def commit(mib):
+    return k.VirtualAlloc(None,mib*1024*1024,0x3000,0x04) or None
+def release(p):
+    if p: k.VirtualFree(p,0,0x8000)
+if which=='a':
+    base=commit(500)
+    if not base: sys.exit(3)
+    open(ready,'w').write('ready')
+    while not os.path.exists(go): time.sleep(0.05)
+    attempts=0;refused=0;end=time.time()+4
+    while time.time()<end:
+        attempts+=1
+        spike=commit(150)
+        if spike is None: refused+=1
+        else: release(spike)
+        time.sleep(0.3)
+    open(stats,'w').write('attempts=%d;refused=%d'%(attempts,refused))
+    open(quiet,'w').write('quiet')
+    time.sleep(3)
+    release(base);base=None
+    open(released,'w').write('released')
+    time.sleep(15)
+    base=commit(500)
+    if not base: sys.exit(4)
+    open(rehold,'w').write('rehold')
+    time.sleep(3)
+else:
+    held=commit(500)
+    if not held: sys.exit(3)
+    open(ready,'w').write('ready')
+    while not os.path.exists(finish): time.sleep(0.1)
+    release(held)
+""");
+            // MinJobMemoryLimit is 1 GiB: a literal 700 MiB item cap cannot pass ValidateSettings/ValidateLaunchItem.
+            // 1 GiB is behaviorally inert here (a peaks at 500+150=650 MiB); the pool cap and 85% window are unchanged.
+            var original=Store.Read<Configuration>(Store.FilePath("configuration.json"));
+            var settings=new ResourceSettings{Mode="custom",Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=1100*ResourcePolicy.MiB,PlanningBytes=ResourcePolicy.MinPlanningBytes};
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
+            var python=(Environment.GetEnvironmentVariable("PATH")??"").Split(';').Select(dir=>Path.Combine(dir,"python.exe")).FirstOrDefault(File.Exists)??throw new Exception("python.exe not on PATH");
+            var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
+            LaunchItem Make(string which,int position)=>new(Guid.NewGuid(),batch,position,"pool pressure "+which,cwd,PhysicalDirectory.Workspace(cwd),true,new CommandSpec(python,[script,which,which=="a"?readyA:readyB,go,quiet,released,rehold,stats,finish],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:settings.PlanningBytes,ResourceMode:settings.Mode,PoolId:poolId);
+            var a=Make("a",1);var b=Make("b",2);
+            Receipt? ReceiptOf(LaunchItem item)=>Store.Read<Receipt>(Store.ReceiptPath(item.Id));
+            string? aDetail=null,bDetail=null;
+            void Sample(){if(ReceiptOf(a) is{} ra)aDetail=ra.Detail;if(ReceiptOf(b) is{} rb)bDetail=rb.Detail;}
+            string Diag()=>" a="+(aDetail??"<none>")+" b="+(bDetail??"<none>")+" stats="+(File.Exists(stats)?File.ReadAllText(stats):"<none>");
+            var runners=new List<Process>();
+            try
+            {
+            var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[a,b]));Assert(reserve.Ok,reserve.Message);
+            var ra=Start("run",a.Id);runners.Add(ra);var rb=Start("run",b.Id);runners.Add(rb);
+            try
+            {
+            var wait=Stopwatch.StartNew();
+            while((!File.Exists(readyA)||!File.Exists(readyB)||ReceiptOf(a)?.Phase!="Started"||ReceiptOf(b)?.Phase!="Started")&&!ra.HasExited&&!rb.HasExited&&wait.Elapsed<TimeSpan.FromSeconds(30))await Task.Delay(100);
+            Sample();
+            Assert(File.Exists(readyA)&&File.Exists(readyB)&&ReceiptOf(a)?.Phase=="Started"&&ReceiptOf(b)?.Phase=="Started","pool pressure panes did not start with baseline held;"+Diag());
+            using(var poolJob=new Job(Store.PoolName(poolId),openOnly:true))Assert(poolJob.QueryMemory() is{LimitBytes:1100*ResourcePolicy.MiB},"monitor-created pool job lacks the 1100 MiB kernel cap");
+            File.WriteAllText(go,"go");
+            var deadline=Stopwatch.StartNew();var aNotice=false;var bNotice=false;
+            while(!File.Exists(quiet)&&deadline.Elapsed<TimeSpan.FromSeconds(25))
+            {
+                Sample();
+                // The offending pane (a) sees its own PID attributed; only the peer pane (b) sees the unconfirmed notice.
+                if(aDetail?.Contains("内核已报告该共享池的内存分配触及 Job 上限")==true)aNotice=true;
+                if(bDetail?.Contains("同一共享池已收到内核分配拒绝通知")==true)bNotice=true;
+                await Task.Delay(100);
+            }
+            Sample();
+            Assert(File.Exists(quiet)&&File.Exists(stats)&&File.ReadAllText(stats) is{} counters&&counters.Contains("refused=")&&!counters.Contains("refused=0"),"spike allocations were never refused;"+Diag());
+            Assert(aNotice&&bNotice,"pool limit notice missing on a pane (a="+aNotice+" b="+bNotice+");"+Diag());
+            // Hold phase: 500+500 MiB baseline sits above 85% of 1100 MiB (935 MiB), so no recovery note may appear.
+            var holdWait=Stopwatch.StartNew();string? earlyRecovery=null;
+            while(!File.Exists(released)&&holdWait.Elapsed<TimeSpan.FromSeconds(20))
+            {
+                Sample();
+                if(aDetail?.Contains("共享池当前已回落")==true)earlyRecovery="a";
+                else if(bDetail?.Contains("共享池当前已回落")==true)earlyRecovery="b";
+                await Task.Delay(100);
+            }
+            Assert(File.Exists(released),"fixture never reached the release phase;"+Diag());
+            Assert(earlyRecovery is null,"recovery note appeared while the above-threshold baseline was still held ("+earlyRecovery+");"+Diag());
+            // After a releases its 500 MiB the pool drops to ~500 MiB. Only the offending pane latches poolOffender
+            // (Program.cs:273), so only its poolRecovered can converge (Program.cs:278); the peer consumes the notice but
+            // never holds a pool offender. Record b as diagnostic instead of demanding a note the Worker cannot produce.
+            DateTimeOffset? aRecoveredAt=null,bRecoveredAt=null;
+            deadline.Restart();
+            while(deadline.Elapsed<TimeSpan.FromSeconds(12)&&aRecoveredAt is null)
+            {
+                Sample();
+                if(aDetail?.Contains("共享池当前已回落")==true&&aRecoveredAt is null)aRecoveredAt=DateTimeOffset.UtcNow;
+                if(bDetail?.Contains("共享池当前已回落")==true&&bRecoveredAt is null)bRecoveredAt=DateTimeOffset.UtcNow;
+                await Task.Delay(100);
+            }
+            var aQuiet=ReceiptOf(a);
+            Assert(aRecoveredAt is not null,"offender pane recovery note missing after release (aAt="+(aRecoveredAt?.ToString("O")??"<none>")+" bAt="+(bRecoveredAt?.ToString("O")??"<none>")+");"+Diag());
+            Assert(aQuiet?.PoolMemory is{LimitReached:true},"pool hit history was not latched on the offending pane;"+Diag());
+            // Rebound: a recommits 500 MiB. The offender note must withdraw while its receipt is still Started, and both
+            // latched notice texts must remain (a Finished receipt would withdraw notes vacuously).
+            var reboundWait=Stopwatch.StartNew();
+            while(!File.Exists(rehold)&&reboundWait.Elapsed<TimeSpan.FromSeconds(25))await Task.Delay(100);
+            Assert(File.Exists(rehold),"fixture never reached the rehold phase;"+Diag());
+            deadline.Restart();string? aReboundDetail=null,bReboundDetail=null;
+            while(deadline.Elapsed<TimeSpan.FromSeconds(12)&&(aReboundDetail is null||bReboundDetail is null))
+            {
+                if(ReceiptOf(a) is{Phase:"Started"} ra2&&!ra2.Detail.Contains("共享池当前已回落"))aReboundDetail=ra2.Detail;
+                if(ReceiptOf(b) is{Phase:"Started"} rb2&&rb2.Detail.Contains("同一共享池已收到内核分配拒绝通知"))bReboundDetail=rb2.Detail;
+                await Task.Delay(100);
+            }
+            Assert(aReboundDetail is not null,"offender recovery note survived the rebound or a finished too early;"+Diag());
+            Assert(bReboundDetail is not null,"peer pane lost its latched pool notice after the rebound;"+Diag());
+            Assert(aReboundDetail!.Contains("内核已报告该共享池的内存分配触及 Job 上限")&&bReboundDetail!.Contains("同一共享池已收到内核分配拒绝通知"),"latched pool notice text vanished after rebound; a="+aReboundDetail+" b="+bReboundDetail);
+            File.WriteAllText(finish,"finish");
+            var endWait=Stopwatch.StartNew();
+            while((!ra.HasExited||!rb.HasExited)&&endWait.Elapsed<TimeSpan.FromSeconds(15))await Task.Delay(100);
+            Assert(ra.HasExited&&rb.HasExited&&ra.ExitCode==0&&rb.ExitCode==0,"pool pressure runners did not exit cleanly (aExit="+(ra.HasExited?ra.ExitCode:(int?)null)+" bExit="+(rb.HasExited?rb.ExitCode:(int?)null)+");"+Diag());
+            Assert(ReceiptOf(a) is{Phase:"Finished"}&&ReceiptOf(b) is{Phase:"Finished"},"pool pressure receipts did not finish;"+Diag());
+            }
+            finally
+            {
+                try{File.WriteAllText(go,"go");}catch{}
+                try{File.WriteAllText(finish,"finish");}catch{}
+                foreach(var runner in runners){try{await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(25));}catch{}try{if(!runner.HasExited){runner.Kill(true);await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));}}catch{}}
+                try{await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:a.Id));}catch{}
+                try{await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:b.Id));}catch{}
+                var settle=Stopwatch.StartNew();
+                while(settle.Elapsed<TimeSpan.FromSeconds(5))
+                {
+                    var frame=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+                    var pending=frame.Entries?.Any(e=>(e.Plan.Id==a.Id||e.Plan.Id==b.Id)&&(e.State=="Started"||e.State=="Pending"))==true;
+                    if(!pending)break;
                     await Task.Delay(200);
                 }
             }
@@ -688,7 +841,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             Assert(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0}&&File.Exists(output),"literal title changed Terminal command parsing");await Ipc.SendAsync(new("status",Guid.NewGuid()));
         });
         await Test("Terminal two panes exact child cwd and arguments",TerminalPair);
-        await Test("Terminal sixteen panes all become ready before any fixture exits",TerminalBatch);
+        await Test("Terminal eight panes (MaxConcurrentAgents cap) all become ready before any fixture exits",TerminalBatch);
         await Test("ACC-S3B01 shared pool bills once, keeps kernel caps and launches on a root-pool-item chain",async()=>{
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);

@@ -29,9 +29,9 @@ if (args is ["--pane-ready", var readyPath, var releasePath, .. var extraArgumen
 }
 
 if (args is not ["--run", "--n", var countText, "--terminal", var terminal, "--evidence", var evidenceDirectory]
-    || !int.TryParse(countText, out var paneCount) || paneCount is < 1 or > 4)
+    || !int.TryParse(countText, out var paneCount) || paneCount is < 1 or > 16)
 {
-    Console.Error.WriteLine("用法: AgentLauncher.LayoutChecks --run --n <1-4> --terminal <wt.exe> --evidence <目录>");
+    Console.Error.WriteLine("用法: AgentLauncher.LayoutChecks --run --n <1-16> --terminal <wt.exe> --evidence <目录>");
     return 2;
 }
 return await LayoutChecks.RunAsync(paneCount, terminal, evidenceDirectory);

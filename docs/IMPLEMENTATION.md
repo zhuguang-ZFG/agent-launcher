@@ -1277,3 +1277,14 @@ powershell -NoProfile -File scripts/test.ps1
 - 过程纠偏：编辑 TerminalCommands 时误改 `QuotedLength` 语义（少算引号会弱化 CommandLineLimit 预检），当轮自查 diff 发现即还原，未进入任何验证轮；原生套件一次 FAIL 系本会话 shell 导出 `AGENT_LAUNCHER_TEST_ROOT` 污染（S0.6 环境一致性守卫正常履职），净环境重跑 184/184。
 - 共享池恢复注记 pane 级实证（§69①，部分闭合）：子代理 12 轮运行中 run8 实证触及路径——池通知「同一共享池已收到内核分配拒绝通知」出现在双 pane Detail、持有基线期间恢复注记不出现、a 释放后「当前已回落」注记出现；回弹撤销断言因治具时序抖动未稳定复现。卡点根因为机器级内存压力（2×1000 MiB python 治具与并行验证负载叠加，16 GiB 机器余量约 4.5 GiB），非产品缺陷。用例代码已还原（Integration.cs 回 HEAD），后续轮建议：b 改一次性 VirtualAlloc 持有、重持延后至 15–20s 与采样窗解耦、断言记「首次出现时刻」、低负载时段单独运行。
 - N=8/16 实机轻量验证可用 `test-terminal-layouts.ps1`（harness 支持 `--n 1..4`，需先扩参）跟进，本轮未跑；installed WT 的美化生效需用户重启 WT 一次（守卫期内自动降级为无 profile 启动）。
+
+## 73. 清理遗留轮：共享池恢复链闭合、N=8/16、fragment 真美化（2026-11-16，Asia/Shanghai）
+
+- 动因：用户「把问题处理干净啊，要有实用性啊」+「开subagent，并行开发」。目标=上轮披露的三项遗留全部闭合，不留「部分」。
+- §69① 共享池恢复注记**完整闭合**：新用例 `Shared pool memory recovery note tracks commit fall and rebound across panes`（Integration.cs，紧接单项版）。治具按上轮子代理诊断重写——python `ctypes.VirtualAlloc(MEM_COMMIT)` 一次性提交持有（commit 即时计入 Job、越限返回 NULL 不抛异常），根除了 bytearray+按页 touch 在换页压力下的卡死；重持延后至释放后 15 秒与采样窗解耦；恢复/回弹断言记「首次出现时刻」且回弹断言限定收据 Phase=="Started"（防进程退出后收据天然不含注记的 vacuous pass）。预算：单项 1 GiB×2（MinJobMemoryLimit 强制下限，700 MiB 不可过校验）、池 1100 MiB、基线 500+500>85%×1100=935、尖峰 +150→1150 越限。集成套件 124/124 绿（含本用例一次通过），机器低负载窗口运行。
+- 用例实证的产品语义（与 run8 观测、Program.cs:273-278 一致）：池内核通知在冒犯者窗格归因 PID（「内核已报告该共享池的内存分配触及 Job 上限」）、旁观者窗格显示归属未确认通知；恢复注记仅冒犯者窗格收敛（poolRecovered 门控于 poolOffender）；锁存 LimitReached 全程不撤销。旁观者窗格是否也应显示恢复注记是潜在改进点，本轮未改 Worker 行为。
+- N=8/16（§28/§169 收尾）：harness 上限 4→16，ps1 提参 `param([int[]]$N=@(3,4))`（默认行为不变；附 5.1 `-File` 数组误绑定陷阱注释）。实机：N=8 全绿（22 项断言，证据 artifacts/terminal-profile/layout-n8-n16-20261116-180622/n8/）；N=16 在 reserve 即按 R21 拒绝（「同时运行的 Agent 窗格最多 8 个…」逐字命中）——这是策略合同的正确执行，同时构成 R21 的真机端到端证据。命令行实测：N=8 全长 3641 字符、N=16 全长 7228 字符（上限 24000，无拆分需求）。
+- 用例名纠谎：`Terminal sixteen panes…` 实际生成 MaxConcurrentAgents=8 项，改名 `Terminal eight panes (MaxConcurrentAgents cap)…`（两处调用点）。
+- fragment 真美化补齐（上轮名不副实）：profile 增加 One Half Dark 配色、opacity 92+useAcrylic、bellStyle none；TryPrepare 内容比对自动重写既有 fragment，守卫语义不变。
+- 实用性抽查（预览版隔离实例，真实桌面）：配置种子→App 启动→槽位就绪→启动按钮链路完整；计算机使用层在 Windows 前台锁下无法代点启动键（用户正在使用其他应用，不抢占），聚焦终端的「点击→真实 WT 窗口置前」末环由既有证据链覆盖（probe 机制实证 + UiChecks 按钮接线断言），未伪造成功。已授权 control 已释放，spotcheck 实例已清理。
+- 测试基线变更（待评审；只增不削）：Integration +1（共享池恢复链）；两个用例名更名（不断言行为变化）；LayoutChecks 上限与 ps1 参数化。

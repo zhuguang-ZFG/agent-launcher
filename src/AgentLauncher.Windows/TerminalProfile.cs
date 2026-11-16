@@ -11,6 +11,8 @@ public static class TerminalProfile
     public const string Name = "AgentLauncher";
 
     // closeOnExit "graceful": panes that exit 0 close on their own; failed panes stay so the output survives.
+    // One Half Dark is a built-in Terminal scheme (no custom scheme payload needed); opacity+useAcrylic and
+    // bellStyle are stable profile properties.
     private const string Fragment = """
         {
           "profiles": [
@@ -18,6 +20,10 @@ public static class TerminalProfile
               "name": "AgentLauncher",
               "font": { "face": "Cascadia Mono", "size": 11 },
               "padding": "8, 8, 8, 12",
+              "colorScheme": "One Half Dark",
+              "opacity": 92,
+              "useAcrylic": true,
+              "bellStyle": "none",
               "closeOnExit": "graceful",
               "scrollbarState": "visible"
             }
