@@ -1222,4 +1222,5 @@ powershell -NoProfile -File scripts/test.ps1
 - 窄态能力缺口修复：Rail 底部新增窄态（<900 逻辑 px）可见的「⋯」菜单（AutomationProperties.Name=窄屏菜单），复用 ChooseClick/ResourceClick/WorkspacesClick/TaskRecoveryClick/TaskHistoryClick/RestoreBackupClick 既有 handler，零新逻辑；恢复备份项经 `RailOverflowMenuOpened` 跟随 readOnly。「设置」本就在品牌行可达。设计 §6 能力损失段落改写为「命令不丢失」。
 - 验证：UI 检查 282→**287**（4 变体窄态可见性 + 1 菜单内容结构）；窄态截图人工核对（⋯ 在底、圆点条正常）。变更面：Core 1 文案、Worker 2 行为、App 3（XAML 菜单 + ArrangePanels 一行 + handler 一行）。
 - 待评审：提示文案变更；收据重写频率语义变化（减少）；新增 5 项 UI 检查。
+- 容量指引边界（评审修正）：真机快照提交上限 34.3 GiB、已用约 22.2、可用约 12.1。上限配额是拒绝阈值而非预占，但配额之和不能与整机上限直接比较；5-6 个并发在 6 GiB 上限下的同时峰值无现成证据。对用户的指引因此限定为「可逐步试」：调高上限后观察资源 pill 的可用读数与整机响应，发现变慢即降回或减少并发——不承诺任何并发档位安全。
 - 门禁：本树 `scripts/test.ps1` 全绿（native 183/0、Integration failures: 0、UI 287/287，2026-11-16，`artifacts/gate-20261116-fixes.log`）。生产实例运行中，预览发布至 `artifacts/preview-next`（替换需先关闭正在运行的旧实例）。
