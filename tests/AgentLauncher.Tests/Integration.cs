@@ -549,7 +549,7 @@ else:
                     Store.Save(Store.ReceiptPath(finItem.Id),new Receipt("Finished",parentPid,parentTime,1,"全部受管进程已退出，退出码 1",DateTimeOffset.UtcNow));
                     Store.Save(Store.ReceiptPath(deadTreeItem.Id),new Receipt("Exited",parentPid,parentTime,-1073740791,"进程已退出，退出码 -1073740791",DateTimeOffset.UtcNow));
                     Store.Save(Store.ReceiptPath(liveItem.Id),new Receipt("Started",survivorPid,survivorTime,null,"已启动进程（不代表任务完成）",DateTimeOffset.UtcNow));
-                    Store.Save(Store.ReceiptPath(rebootedItem.Id),new Receipt("Exited",parentPid,DateTime.UtcNow.AddDays(-30).ToFileTimeUtc(),-1073740791,"进程已退出，退出码 -1073740791",DateTimeOffset.UtcNow));
+                    Store.Save(Store.ReceiptPath(rebootedItem.Id),new Receipt("Exited",parentPid,DateTime.UtcNow.Subtract(TimeSpan.FromMilliseconds(AgentLauncher.Windows.Native.GetTickCount64())).AddSeconds(-1).ToFileTimeUtc(),-1073740791,"进程已退出，退出码 -1073740791",DateTimeOffset.UtcNow));
                     using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;
                     Field("sample").SetValue(monitor,new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow));
                     Field("ledger").SetValue(monitor,new Ledger{Entries=[finEntry,deadTreeEntry,liveEntry,rebootedEntry]});
