@@ -521,7 +521,7 @@ internal sealed class Monitor : IDisposable
                     try{pools[poolId]=new Job(Store.PoolName(poolId),openOnly:true);WatchPool(poolId,pools[poolId]);}
                     catch(System.ComponentModel.Win32Exception ex) when(ex.NativeErrorCode==2)
                     {
-                        blocked="资源池句柄丢失，无法证明整池成员已退出；保留预算，系统重启后可核对释放。";
+                        blocked="资源池句柄丢失，无法证明整池成员已退出；保留池与预算，需人工核对后释放。";
                         e.Detail=blocked;reconcileOffered=true;continue;
                     }
                 }
@@ -790,6 +790,16 @@ internal sealed class Monitor : IDisposable
                     settled++;changed=true;continue;
                 }
                 if(receipt.Pid>0&&ProcessAlive(receipt.Pid,receipt.ProcessTime)){refusals.Add((e,$"记录的进程（PID {receipt.Pid}）仍在运行"));continue;}
+                // Reboot proof: a recorded root started before the current boot means every tree member was
+                // spawned before the boot too (post-boot processes cannot be spawned by pre-boot ones), so the
+                // whole tree ended with the previous session even though the Job handle is lost. This is what
+                // makes the "系统重启后可核对释放" guidance true.
+                if(receipt.ProcessTime>0&&receipt.ProcessTime<DateTime.UtcNow.Subtract(TimeSpan.FromMilliseconds(Native.GetTickCount64())).ToFileTimeUtc())
+                {
+                    e.State="Settled";
+                    e.Detail=$"经确认的核对释放：记录进程启动早于本次系统启动，整树已随重启结束；原回执阶段 {receipt.Phase}；{receipt.Detail??"无附加说明"}";
+                    settled++;changed=true;continue;
+                }
                 // A dead recorded parent is not tree proof: jobs have no KILL_ON_JOB_CLOSE, so the object can be gone while descendants survive, and without the handle they cannot be enumerated.
                 refusals.Add((e,$"记录的父进程（PID {receipt.Pid}）已退出，但资源组句柄丢失使其派生进程无法枚举核对"));continue;
             }

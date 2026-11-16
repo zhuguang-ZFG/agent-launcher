@@ -521,7 +521,7 @@ else:
             const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
             System.Reflection.FieldInfo Field(string name)=>type.GetField(name,flags)??throw new MissingFieldException(type.FullName,name);
             var handle=type.GetMethod("Handle",flags)??throw new MissingMethodException(type.FullName,"Handle");
-            var finItem=Item("lost-finished",["--hold","1"]);var deadTreeItem=Item("lost-dead-tree",["--hold","1"]);var liveItem=Item("lost-live",["--hold","1"]);
+            var finItem=Item("lost-finished",["--hold","1"]);var deadTreeItem=Item("lost-dead-tree",["--hold","1"]);var liveItem=Item("lost-live",["--hold","1"]);var rebootedItem=Item("lost-rebooted",["--hold","1"]);
             var isolatedRoot=Store.RootJob+"-reconcile-"+Guid.NewGuid().ToString("N");
             using var rootJob=new Job(isolatedRoot,root:true);
             using(var treeJob=new Job(Store.JobName(deadTreeItem.Id),ResourcePolicy.AgentBudget))
@@ -545,17 +545,20 @@ else:
                     var finEntry=new ControlEntry{Plan=finItem,Digest=Store.Digest(finItem),State="Creating",Detail="正在创建进程"};
                     var deadTreeEntry=new ControlEntry{Plan=deadTreeItem,Digest=Store.Digest(deadTreeItem),State="Creating",Detail="正在创建进程"};
                     var liveEntry=new ControlEntry{Plan=liveItem,Digest=Store.Digest(liveItem),State="Creating",Detail="正在创建进程"};
+                    var rebootedEntry=new ControlEntry{Plan=rebootedItem,Digest=Store.Digest(rebootedItem),State="Creating",Detail="正在创建进程"};
                     Store.Save(Store.ReceiptPath(finItem.Id),new Receipt("Finished",parentPid,parentTime,1,"全部受管进程已退出，退出码 1",DateTimeOffset.UtcNow));
                     Store.Save(Store.ReceiptPath(deadTreeItem.Id),new Receipt("Exited",parentPid,parentTime,-1073740791,"进程已退出，退出码 -1073740791",DateTimeOffset.UtcNow));
                     Store.Save(Store.ReceiptPath(liveItem.Id),new Receipt("Started",survivorPid,survivorTime,null,"已启动进程（不代表任务完成）",DateTimeOffset.UtcNow));
+                    Store.Save(Store.ReceiptPath(rebootedItem.Id),new Receipt("Exited",parentPid,DateTime.UtcNow.AddDays(-30).ToFileTimeUtc(),-1073740791,"进程已退出，退出码 -1073740791",DateTimeOffset.UtcNow));
                     using var monitor=(IDisposable)Activator.CreateInstance(type,true)!;
                     Field("sample").SetValue(monitor,new MemorySnapshot(16*ResourcePolicy.GiB,12*ResourcePolicy.GiB,32*ResourcePolicy.GiB,24*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow));
-                    Field("ledger").SetValue(monitor,new Ledger{Entries=[finEntry,deadTreeEntry,liveEntry]});
+                    Field("ledger").SetValue(monitor,new Ledger{Entries=[finEntry,deadTreeEntry,liveEntry,rebootedEntry]});
                     Field("ledgerPath").SetValue(monitor,Path.Combine(Store.Root,"reconcile-"+Guid.NewGuid().ToString("N")+".json"));
                     Field("root").SetValue(monitor,new Job(isolatedRoot,root:true));
                     var response=(Response)handle.Invoke(monitor,[new Request("reconcile",Guid.NewGuid())])!;
                     Assert(finEntry.State=="Settled"&&finEntry.Detail.Contains("核对释放"),"finished-tree receipt was not released: "+finEntry.State+" "+finEntry.Detail);
                     Assert(deadTreeEntry.State=="Creating"&&deadTreeEntry.Detail.Contains("拒绝"),"dead parent with a live surviving tree member was released: "+deadTreeEntry.State+" "+deadTreeEntry.Detail);
+                    Assert(rebootedEntry.State=="Settled"&&rebootedEntry.Detail.Contains("早于本次系统启动"),"pre-boot receipt was not released by the reboot proof: "+rebootedEntry.State+" "+rebootedEntry.Detail);
                     Assert(liveEntry.State=="Creating"&&liveEntry.Detail.Contains("仍在运行"),"entry with a live recorded process did not refuse: "+liveEntry.State+" "+liveEntry.Detail);
                     Assert(response.Ok==false&&response.Entries?.SingleOrDefault(e=>e.Plan.Id==finItem.Id)!=null,"reconcile outcome did not keep refusals while reporting the release");
                     Assert(!survivor.Process.HasExited,"reconcile killed the surviving tree member");
