@@ -44,6 +44,17 @@
       <TextBlock x:Name="RailResourceText" Text="资源：未读取 · 打开设置" FontSize="12" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
      </DockPanel>
     </Border>
+    <Button DockPanel.Dock="Bottom" x:Name="RailOverflow" Content="⋯" Style="{StaticResource QuietButton}" Visibility="Collapsed" MinHeight="26" Padding="2" ToolTip="更换项目、资源设置、更多" AutomationProperties.Name="窄屏菜单">
+     <Button.ContextMenu><ContextMenu x:Name="RailOverflowMenu" Opened="RailOverflowMenuOpened">
+      <MenuItem Header="更换项目" Click="ChooseClick"/>
+      <MenuItem Header="资源设置" Click="ResourceClick"/>
+      <MenuItem Header="工作目录" Click="WorkspacesClick"/>
+      <MenuItem Header="恢复与诊断" Click="TaskRecoveryClick"/>
+      <MenuItem Header="运行历史与导出" Click="TaskHistoryClick"/>
+      <Separator/>
+      <MenuItem x:Name="RailOverflowRestore" Header="恢复备份" Click="RestoreBackupClick"/>
+     </ContextMenu></Button.ContextMenu>
+    </Button>
     <StackPanel DockPanel.Dock="Bottom" x:Name="RailSessionsSection" Margin="2,8,2,0">
      <TextBlock Text="会话与队列" Style="{StaticResource Caption}" FontWeight="SemiBold" Margin="0,0,0,4"/>
      <StackPanel x:Name="RailSessions"/>

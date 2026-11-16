@@ -258,6 +258,7 @@ public partial class MainWindow : Window
         SelectionSummary.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
         RailSessionsSection.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
         RailResource.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
+        RailOverflow.Visibility=narrow?Visibility.Visible:Visibility.Collapsed;
         AddButton.Content=narrow?"＋":"＋ 添加 Agent";
         foreach(var name in railNames.Values)name.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
         foreach(var status in railLabels.Values)status.Visibility=narrow?Visibility.Collapsed:Visibility.Visible;
@@ -794,6 +795,7 @@ public partial class MainWindow : Window
         }
         finally{applyingSettings=false;}
     });
+    private void RailOverflowMenuOpened(object sender,RoutedEventArgs e)=>RailOverflowRestore.IsEnabled=readOnly;
     private async void RestoreBackupClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
     {
         var recovered=await Task.Run(()=>Store.Read<Configuration>(configPath+".bak"))??throw new IOException("没有可恢复备份。");

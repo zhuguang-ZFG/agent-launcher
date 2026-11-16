@@ -179,10 +179,13 @@ public partial class MainWindow
             Store.Save(System.IO.Path.Combine(folder,$"layout-{variant.Item1}-{variant.Item2}.json"),new{RequestedWidth=variant.Item2,RequestedHeight=variant.Item3,Width,ActualWidth,Height,ActualHeight,Scale=UiScale.Value,WorkWidth=WorkGrid.ActualWidth,ConfigWidth=ConfigurationPanel.ActualWidth,SummaryWidth=SummaryPanel.ActualWidth,ConfigMargin=ConfigurationPanel.Margin.ToString(),SummaryMargin=SummaryPanel.Margin.ToString(),SummaryColumn=Grid.GetColumn(SummaryPanel),SummaryRow=Grid.GetRow(SummaryPanel),ColumnWidth=SummaryColumn.Width.ToString(),RailWidth=Rail.ActualWidth,SelectedSlotIndex=selectedSlotIndex,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});
             Check($"primary configuration fills the main column without a right summary sidebar {variant}",Math.Abs(ConfigurationPanel.ActualWidth-WorkGrid.ActualWidth)<2&&SummaryColumn.Width.Value==0&&!LaunchOptionsExpander.IsExpanded&&!SummaryPanel.IsVisible);
             Check($"project accessible name {variant}",AutomationProperties.GetName(ProjectPath).Length>0);
+            var expectOverflow=variant.Item2/UiScale.Value<900;
+            Check($"narrow rail overflow menu {variant}",(RailOverflow.Visibility==Visibility.Visible)==expectOverflow);
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-{variant.Item1}-{variant.Item2}.png"));encoder.Save(file);
         }
         // F5 regression: the submission gate must hold only while attempts are still Pending; a confirmed running attempt must release it for the next batch.
+        Check("narrow overflow exposes rail commands",RailOverflowMenu.Items.OfType<MenuItem>().Select(i=>i.Header as string).SequenceEqual(new[]{"更换项目","资源设置","工作目录","恢复与诊断","运行历史与导出","恢复备份"}));
         // Reserve admission depends on real free memory, which is environment-dependent; restart the monitor under the sanctioned FAKE_SAMPLE hook for determinism, then restore real sampling for the final health check.
         var realMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(realMonitor>0){try{using var m=Process.GetProcessById(realMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
         Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE","1");

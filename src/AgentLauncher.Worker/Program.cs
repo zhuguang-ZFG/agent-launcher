@@ -128,7 +128,7 @@ internal static class Program
         // Queue only the spawn transaction; release it as soon as Started is durable, so Agents still run in parallel.
         using var startup=new Mutex(false,Store.RootJob+"-startup");var startupOwned=false;
         ProtectedProcess? child=null;Job? root=null;Job? pool=null;Job? job=null;JobMemoryWatch? memoryWatch=null;var resumeIntent=false;var claimCreated=false;int? memoryOffender=null;
-        OmpMemoryGuard? toolGuard=null;Admission? observedToolDecision=null;
+        OmpMemoryGuard? toolGuard=null;Admission? observedToolDecision=null;var observedHandshake=false;
         JobMemoryEvidence? exitMemory=null;int? poolOffender=null;Guid? panePoolId=null;DateTimeOffset? poolNoticeAt=null;string poolNoticeDetail="";string? memoryNotificationError=null;var poolCheck=Stopwatch.StartNew();
         try
         {
@@ -217,6 +217,10 @@ internal static class Program
         void ObserveMemory(bool forcePool=false)
         {
             int[] pids=[];var changed=false;
+            // A late handshake must clear the launch-time warning; kernel limit notices repeat under sustained
+            // pressure, so only a new offending process rewrites the receipt.
+            var handshake=toolGuard?.HandshakeConfirmed??false;
+            if(handshake!=observedHandshake){observedHandshake=handshake;changed=true;}
             var decision=toolGuard?.LastDecision;
             if(decision!=observedToolDecision){observedToolDecision=decision;changed=true;}
             try
@@ -230,7 +234,7 @@ internal static class Program
             {
                 memoryNotificationError=$"Win32 {e.NativeErrorCode}: {e.Message}";memoryWatch?.Dispose();memoryWatch=null;changed=true;
             }
-            if(pids.Length>0){memoryOffender=pids[0];changed=true;}
+            if(pids.Length>0&&memoryOffender!=pids[0]){memoryOffender=pids[0];changed=true;}
             if(changed)exitMemory=MemoryEvidence();
             if(panePoolId is {} poolId&&(forcePool||poolCheck.ElapsedMilliseconds>=1000))
             {
