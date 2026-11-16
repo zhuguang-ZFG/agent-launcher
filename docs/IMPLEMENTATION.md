@@ -1265,4 +1265,4 @@ powershell -NoProfile -File scripts/test.ps1
 - 修复：harness 新增 `ReadStoreSettled<T>`——仅对「记录正在写入」重试 ≤3 次、间隔 50ms，其余 IOException 原样抛；替换上述 5 处读。断言不变（仍要求 `Finished`/`ExitCode 0`），生产语义零改动（守卫与 2000ms 预算保留）。
 - 新闸门 +1（295→**296**）：「transient store write lock is retried instead of aborting checks」——后台线程持同名文件 mutex 2300ms（超过 2000ms 等待预算）期间读回执，断言重试后仍读到 `Finished`；mutex 名复用 tests 既有 `FileMutexFor` 算法。
 - 变异证红：重试上限改 0（等价旧单次读）→ `--ui-check` UI_RED_EXIT=1，ui-exception.json 正是「记录正在写入」IOException（artifacts/ui-redlock），与 CI 失败同因；恢复后 296/296 绿（artifacts/ui-lockgreen），未变异对照 296 绿（artifacts/ui-lock）。
-- 门禁：待本轮 CI 运行回填。
+- 门禁：CI 运行 43811938530（head `ca09f18`）conclusion=success；前一笔 43810948992（head `efbfbc3`）亦 success（2026-11-16，gh run view 实测）。本地 UI 296/296（artifacts/ui-lockgreen），变异红证 artifacts/ui-redlock（UI_RED_EXIT=1）。
