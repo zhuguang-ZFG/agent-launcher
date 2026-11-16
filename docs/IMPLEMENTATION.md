@@ -1288,3 +1288,11 @@ powershell -NoProfile -File scripts/test.ps1
 - fragment 真美化补齐（上轮名不副实）：profile 增加 One Half Dark 配色、opacity 92+useAcrylic、bellStyle none；TryPrepare 内容比对自动重写既有 fragment，守卫语义不变。
 - 实用性抽查（预览版隔离实例，真实桌面）：配置种子→App 启动→槽位就绪→启动按钮链路完整；计算机使用层在 Windows 前台锁下无法代点启动键（用户正在使用其他应用，不抢占），聚焦终端的「点击→真实 WT 窗口置前」末环由既有证据链覆盖（probe 机制实证 + UiChecks 按钮接线断言），未伪造成功。已授权 control 已释放，spotcheck 实例已清理。
 - 测试基线变更（待评审；只增不削）：Integration +1（共享池恢复链）；两个用例名更名（不断言行为变化）；LayoutChecks 上限与 ps1 参数化。
+
+## 74. 功能轮：会话通知、查看变更/审阅路由、任务对比组（2026-11-16，Asia/Shanghai）
+
+- 范围：P1 完成/异常/内存触限桌面通知（SessionNotifier，客户端本地、TestMode 接缝、设置可关）；P2 会话卡「查看变更」只读 git 摘要（新服务 GitChanges：分支/基线/领先落后/未提交数/diff --stat，fail-closed）；P3 经拦截意见改为「审阅改动」路由进既有 TaskReviewWindow（钉 SHA 的 PushCore/PullRequestCore），删除了自写的弱路径 GitChanges.CreatePullRequest（push 可变分支，确认到推送间 agent 可再提交）；P4 任务对比组（2–4 份复制、对比组 Note 标记、搜索命中 Note、逐张正常入队）。
+- 门禁排障（两个真实回归，均已修复并复验）：①NotificationSlice 给设置对话框加了 notify 复选框，UiChecks 设置项仍用 `Single()` 取唯一 CheckBox → Loaded 回调抛异常、模态永不关闭 → UI 阶段挂死（先看的是隔夜的 ui-exception.json 陈旧文件，误判为 UX05 崩溃；正确判据是 ui-progress 停在第 26 项+真实 store 无新写入）。修复：按自动化名取两个复选框并把 notify 纳入断言。②通知探针用伪造路径 `C:\Users\me\proj` 调 PhysicalDirectory.Workspace（路径不存在即抛 Win32Exception）→ 改 Store.Root。
+- GitChanges 入口改 public（WorktreeChanges/GhStatus/GetWorktreeChanges/GetGhStatus），csproj 只保留 InternalsVisibleTo(Tests)，App 不再靠 IVT 穿透程序集边界。
+- 环境事件：机器物理空闲一度跌到 0.32 GiB（edge/chrome/UPDF 为用户进程未动），ACC-R07/R11（真实 Job+系统余量依赖）拒止属正确行为；关闭 dotnet build server 后 4.66 GiB，原生 188 项全绿。期间曾误启生产预览 App（--ui-check 只在 INTEGRATION_TESTS 构建可用；已停掉其拉起的真实 store monitor，control.json 未被改写）。test.ps1 的 UI 阶段必须用 artifacts/test-runtime + AGENT_LAUNCHER_TEST_ROOT（scripts/run-ui-check-once.ps1 为单跑 UI 阶段的窄工具，本轮新增并保留）。
+- 测试基线变更（只增不削）：UiChecks +通知组 10 项、设置对话框断言、P2 两项（变更摘要+审阅路由、非 git 目录错误）、P4 队列拒斥；ReviewChecks +3 项 GitChanges fail-closed；Integration +1（共享池恢复链，§73）。隔离 UI 重跑 298 项全绿（EXIT=0）。

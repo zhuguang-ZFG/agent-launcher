@@ -44,15 +44,17 @@ public sealed class TaskCard
     [JsonRequired] public List<Guid> DependsOn { get; set; } = [];
     [JsonRequired] public int Priority { get; set; }
     [JsonRequired] public DateTimeOffset UpdatedAt { get; set; }
-    public bool Archived { get; set; }
+    // Optional: older books have no such property and deserialize to "". Carries the compare-group search marker.
+    public string Note { get; set; } = "";
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public QuickLaunchSource? QuickLaunch { get; set; }
+    public bool Archived { get; set; }
 
     public TaskCard Copy() => new()
     {
         Id = Id, Revision = Revision, Name = Name, Project = Project, AgentId = AgentId, Profile = Profile.Copy(),
         Description = Description, Acceptance = Acceptance.Select(item => item.Copy()).ToList(), DirectoryMode = DirectoryMode,
         Resource = Resource?.Copy(), BaseCommit = BaseCommit, Branch = Branch, DependsOn = [.. DependsOn], Priority = Priority, UpdatedAt = UpdatedAt,
-        QuickLaunch = QuickLaunch, Archived = Archived
+        QuickLaunch = QuickLaunch, Note = Note, Archived = Archived
     };
 
     public void Validate()
