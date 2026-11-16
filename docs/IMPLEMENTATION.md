@@ -1232,3 +1232,13 @@ powershell -NoProfile -File scripts/test.ps1
 - §9 断言补齐（282+5+2=289）：`rail status dot maps to state brushes`（Ok/Off 映射 + 还原）、`rail summaries truncate with overflow entry`（5 条合成会话/队列 → 恰 4 行且末行为含「全部」的 Button）。采用既有 savedStatus/savedBook try/finally 恢复模式，末位守卫不受影响。
 - 过程记录：SliceTiming 子代理进程死于上游网络中断，但其编辑已落盘并经主代理逐行审查（写一次语义、收据兼容性、断言有界性均复核）；SliceZip 的 artifact 命名套娃问题在集成时修正。崩溃取证：真机一次 Bun 1.4.4 进程在 4117/4096 MiB 压限后被拒分配崩溃（退出码 3）——保护按设计生效，已指引用户调 6 GiB。
 - 待评审：Receipt 字段新增（序列化兼容）、Integration 握手计时断言（≤5000ms 宽松界）、2 条 UI 断言、ci.yml 发布步骤。
+
+## 69. 内存上限回落自动恢复（2026-11-16，Asia/Shanghai）
+
+- 动因（用户问题）：分屏 agent 触及内存上限后即使内存回落，面板/收据警告仍常驻。事实分层：分配层面本就自动恢复（Job 上限是瞬时拒绝而非挂起，回落后新分配立即成功）；已被拒死的进程（如 §67 的 Bun 崩溃）无法原地复活；但收据的 LimitReached 此前锁存不清——内核通知只报越限瞬间、不报恢复瞬间。
+- 内核行为实测（throwaway 探针，用后已删）：①运行中 `SetMemoryLimit` 有效且通知可达；②**通知按「越限事件」去重——6 次连续拒绝仅 1 条通知**，「无新增拒绝」不可作为恢复依据；③.NET 子进程的被拒不产生通知（0/6），python/CRT 分配路径产生（1/事件）——真机 node/python 系 agent 可锁存（生产 4106/4096 收据为证），.NET 子进程不能；④嵌套（root+pane job）与 openOnly 句柄均不影响投递。
+- 实现（Worker ObserveMemory，250ms 既有节拍，无新定时器）：`LimitReached` 历史锁存**永不翻回**；恢复只是叠加注记——用既有 `Job.QueryCurrentCommit()` 采样，连续 4 次（1 秒）低于上限 85% 置「当前已回落：提交低于上限 85%（历史触及不撤销；内核通知为一次性事件，不能据此判断是否仍有分配被拒）」；**回弹即撤**（一次高于阈值采样立即撤注记；非对称迟滞：慢标快消）；新通知到达也撤注记并复位采样窗。共享池对称（poolOffender，1Hz 节拍→4 秒）。Exited/Finished 明细同步携带。文案只陈述可测事实（当前提交量），不声称「无新增拒绝」。
+- 回归测试（Integration，真实 pane 端到端）：python 治具子进程持有 1400 MiB（>85%×1536 阈值、<上限）→ go 信号后每 500ms 试加 700 MiB（被拒）→ quiet → 释放 → 回弹重持。断言链：拒绝计数>0；越限被锁存（LimitReached+「触及」）；**1400 MiB 持有期间恢复注记绝不出现**（钉住「恢复由提交量驱动而非时间」）；释放后注记出现且锁存保留；回弹后注记消失且锁存保留；Finished 收据仍带 LimitReached。测试卫生：ready/go 屏障、策略冻结（configuration.json custom/1536/independent + 条目 ResourceMode）、reserve/断言失败均有 finally 自然等待→kill 兜底→终态轮询→配置还原（评审教训：reserve 在 try 外曾致配置残留级联 11 连挂；kill-first 曾致 Started 账本残留）。
+- 验证：Integration 全绿（0 failures，`gate-20261116-recovery-final` 轮）；bg_46 一次 S4 失败复跑通过=时序抖动。探针目录已删。
+- 待评审/限制：①共享池路径对称实现但未做 pane 级实证（需 PoolLimitNotice 治具）；②85%/4 次为工程取值；③.NET 子进程无内核通知→其超限只能靠峰值读数与守卫证据，文档级限制；④恢复注记是「当前提交量」事实陈述，不证明拒绝已停止。
+- 顺带核实：CI zip 产物 691 KB 属正常（框架依赖型打包，21 项完整），此前「0 MB」为 MiB 取整误读。

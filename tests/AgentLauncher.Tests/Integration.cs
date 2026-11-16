@@ -225,6 +225,120 @@ internal static class Integration
             Assert(runner.ExitCode==0&&Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0},"runner did not finish normally");
             await Ipc.SendAsync(new("status",Guid.NewGuid()));
         });
+        await Test("Pane memory warning latches hit history and tracks commit-based recovery and rebound",async()=>{
+            var ready=Path.Combine(Store.Root,"alloc-pressure.ready");var go=Path.Combine(Store.Root,"alloc-pressure.go");
+            var quiet=Path.Combine(Store.Root,"alloc-pressure.quiet");var released=Path.Combine(Store.Root,"alloc-pressure.released");var rehold=Path.Combine(Store.Root,"alloc-pressure.rehold");
+            var stats=Path.Combine(Store.Root,"alloc-pressure.stats");
+            // The fixture child must be a native-style allocator: measured evidence shows .NET children get no
+            // kernel limit notice (0/6 refusals notified) while python does (1 notice per crossing episode).
+            var script=Path.Combine(Store.Root,"alloc-pressure.py");
+            File.WriteAllText(script,"""
+import os,sys,time
+ready,go,quiet,released,rehold,stats=sys.argv[1:7]
+base=bytearray(1400*1024*1024)
+for i in range(0,len(base),4096): base[i]=1
+open(ready,'w').write('ready')
+while not os.path.exists(go): time.sleep(0.05)
+attempts=0;refused=0;end=time.time()+5
+while time.time()<end:
+    attempts+=1
+    try:
+        spike=bytearray(700*1024*1024)
+        for i in range(0,len(spike),4096): spike[i]=1
+    except MemoryError:
+        refused+=1
+    spike=None
+    time.sleep(0.5)
+open(stats,'w').write('attempts=%d;refused=%d'%(attempts,refused))
+open(quiet,'w').write('quiet')
+time.sleep(3)
+base=None
+open(released,'w').write('released')
+time.sleep(3)
+base=bytearray(1400*1024*1024)
+for i in range(0,len(base),4096): base[i]=1
+open(rehold,'w').write('rehold')
+time.sleep(2)
+""");
+            // Freeze a custom 1536 MiB per-item cap into configuration so the begin recheck accepts the entry budget.
+            var original=Store.Read<Configuration>(Store.FilePath("configuration.json"));
+            var settings=new ResourceSettings{Mode="custom",JobMemoryLimit=1536*ResourcePolicy.MiB,PlanningBytes=ResourcePolicy.MinPlanningBytes,Pool=ResourcePolicy.PoolIndependent};
+            var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
+            var python=(Environment.GetEnvironmentVariable("PATH")??"").Split(';').Select(dir=>Path.Combine(dir,"python.exe")).FirstOrDefault(File.Exists)??throw new Exception("python.exe not on PATH");
+            var item=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"alloc pressure fixture",cwd,PhysicalDirectory.Workspace(cwd),false,new CommandSpec(python,[script,ready,go,quiet,released,rehold,stats],"exe"),1536*ResourcePolicy.MiB) with{PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode};
+            try
+            {
+            var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
+            using var runner=Start("run",item.Id);
+            try
+            {
+            var wait=Stopwatch.StartNew();
+            while((!File.Exists(ready)||Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase!="Started")&&!runner.HasExited&&wait.Elapsed<TimeSpan.FromSeconds(15))await Task.Delay(25);
+            Assert(File.Exists(ready)&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase=="Started","pressure fixture pane did not start with baseline held");
+            using var job=new Job(Store.JobName(item.Id),openOnly:true);
+            Assert(job.QueryMemory() is{LimitBytes:1536*ResourcePolicy.MiB},"monitor-created pane job lacks the entry budget as its kernel cap");
+            File.WriteAllText(go,"go");
+            // Retry phase: kernel posts a limit notice only once per crossing episode (probe evidence), so the
+            // assertions cover the latch itself—not a per-refusal stream the kernel does not provide.
+            var deadline=Stopwatch.StartNew();var sawLimitHit=false;string? lastDetail=null;
+            while(!File.Exists(quiet)&&deadline.Elapsed<TimeSpan.FromSeconds(20))
+            {
+                if(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{} sample)
+                {
+                    lastDetail=sample.Detail;
+                    if(sample.Detail.Contains("触及")&&sample.JobMemory is{LimitReached:true})sawLimitHit=true;
+                }
+                await Task.Delay(100);
+            }
+            Assert(File.Exists(quiet)&&File.Exists(stats)&&File.ReadAllText(stats) is{} counters&&counters.Contains("refused=")&&!counters.Contains("refused=0"),"spike allocations were never refused; counters="+(File.Exists(stats)?File.ReadAllText(stats):"<none>"));
+            Assert(sawLimitHit,"limit hit was never latched; last detail="+(lastDetail??"<none>"));
+            // Hold phase: the 1400 MiB baseline stays above the 85% threshold, so no recovery note may appear
+            // until the fixture actually releases; this pins recovery to the commit level, not to time passing.
+            var releasedWait=Stopwatch.StartNew();var sawRecoveryBeforeRelease=false;
+            while(!File.Exists(released)&&releasedWait.Elapsed<TimeSpan.FromSeconds(15))
+            {
+                if(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{} sample){lastDetail=sample.Detail;if(sample.Detail.Contains("已回落"))sawRecoveryBeforeRelease=true;}
+                await Task.Delay(100);
+            }
+            Assert(File.Exists(released),"fixture never reached the release phase");
+            Assert(!sawRecoveryBeforeRelease,"recovery claimed while the above-threshold baseline was still held; last detail="+(lastDetail??"<none>"));
+            // After release the commit drops far below the threshold: the note appears while the latch survives.
+            deadline.Restart();
+            while(deadline.Elapsed<TimeSpan.FromSeconds(10)&&(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is not{} probe||!probe.Detail.Contains("已回落")))await Task.Delay(100);
+            var quietReceipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id));
+            Assert(quietReceipt is{JobMemory:{LimitReached:true}}&&quietReceipt.Detail.Contains("已回落"),"recovery note missing after release or latched hit history erased; last detail="+(quietReceipt?.Detail??"<none>"));
+            // Rehold phase: committing back above the threshold must withdraw the note (history stays latched).
+            var reboundWait=Stopwatch.StartNew();
+            while(!File.Exists(rehold)&&reboundWait.Elapsed<TimeSpan.FromSeconds(15))await Task.Delay(100);
+            Assert(File.Exists(rehold),"fixture never reached the rehold phase");
+            deadline.Restart();
+            while(deadline.Elapsed<TimeSpan.FromSeconds(10)&&(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{} rebound&&rebound.Detail.Contains("已回落")))await Task.Delay(100);
+            var reboundReceipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id));
+            Assert(reboundReceipt is{JobMemory:{LimitReached:true}}&&!reboundReceipt.Detail.Contains("已回落"),"recovery note survived the rebound; last detail="+(reboundReceipt?.Detail??"<none>"));
+            await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            var finished=Store.Read<Receipt>(Store.ReceiptPath(item.Id));
+            Assert(runner.ExitCode==0&&finished is{Phase:"Finished",ExitCode:0}&&finished.JobMemory is{LimitReached:true},"final receipt lost the latched hit history; last detail="+(finished?.Detail??"<none>"));
+            }
+            finally
+            {
+                // The fixture is self-timed (~11 s after go): let it exit naturally so the ledger entry turns terminal;
+                // revoke only clears Pending entries (Program.cs:703), so kill is the last resort.
+                try{File.WriteAllText(go,"go");}catch{}
+                try{await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(25));}catch{}
+                try{if(!runner.HasExited){runner.Kill(true);await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));}}catch{}
+                try{await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:item.Id));}catch{}
+                var settle=Stopwatch.StartNew();
+                while(settle.Elapsed<TimeSpan.FromSeconds(5))
+                {
+                    var frame=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+                    var entry=frame.Entries?.FirstOrDefault(e=>e.Plan.Id==item.Id);
+                    if(entry is null||(entry.State!="Started"&&entry.State!="Pending"))break;
+                    await Task.Delay(200);
+                }
+            }
+            }
+            finally{try{Store.Save(Store.FilePath("configuration.json"),original??new Configuration());}catch{}}
+        });
         await Test("P04 begin rechecks complete resource policy without consuming grant",async()=>{
             var type=System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe",".dll",StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor",true)!;
             const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;

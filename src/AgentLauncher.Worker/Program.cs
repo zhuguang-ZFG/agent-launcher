@@ -130,6 +130,10 @@ internal static class Program
         ProtectedProcess? child=null;Job? root=null;Job? pool=null;Job? job=null;JobMemoryWatch? memoryWatch=null;var resumeIntent=false;var claimCreated=false;int? memoryOffender=null;
         OmpMemoryGuard? toolGuard=null;Admission? observedToolDecision=null;var observedHandshake=false;
         JobMemoryEvidence? exitMemory=null;int? poolOffender=null;Guid? panePoolId=null;DateTimeOffset? poolNoticeAt=null;string poolNoticeDetail="";string? memoryNotificationError=null;var poolCheck=Stopwatch.StartNew();
+        // Limit recovery: kernel notices fire once per crossing episode (measured: six refusals, one notice),
+        // so recovery is a commit-only signal—four consecutive samples below 85% of the limit. The latched hit
+        // history (LimitReached) is never rewritten; notices still reset the sample window when they do arrive.
+        var lowCommitSamples=0;var poolLowSamples=0;var memoryRecovered=false;var poolRecovered=false;
         // Set immediately before the bounded handshake wait, so the receipt can report how long the hello took.
         DateTimeOffset handshakeWaitBegin=default;
         try
@@ -204,10 +208,11 @@ internal static class Program
             ObserveMemory(forcePool:true);var exit=child.Process.ExitCode;
             exitMemory=MemoryEvidence();var detail=ExitDiagnostics.Describe(exit,exitMemory);
             if(pool is not null)detail+="共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail;
+            if(memoryRecovered)detail+="当前已回落：提交低于上限 85%（历史触及不撤销）。";
             Write("Exited",child.Process.Id,child.CreationTime,exit,"进程已退出。"+detail);
             if(interactive&&exit!=0)Console.WriteLine("\nAgent 异常退出。"+detail+"\n工作目录已保留；如仍有工具运行，将等待它们结束。");
             while(job!.Members().Length>0){Thread.Sleep(250);ObserveMemory();}
-            ObserveMemory(forcePool:true);exitMemory=MemoryEvidence();detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail);
+            ObserveMemory(forcePool:true);exitMemory=MemoryEvidence();detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail)+(memoryRecovered?"当前已回落：提交低于上限 85%（历史触及不撤销）。":"");
             Write("Finished",child.Process.Id,child.CreationTime,exit,"全部受管进程已退出。"+detail);
 #if !INTEGRATION_TESTS
             HoldPane(interactive,exit,exitMemory?.LimitReached==true||poolOffender!=null);
@@ -220,8 +225,8 @@ internal static class Program
         void ObserveMemory(bool forcePool=false)
         {
             int[] pids=[];var changed=false;
-            // A late handshake must clear the launch-time warning; kernel limit notices repeat under sustained
-            // pressure, so only a new offending process rewrites the receipt.
+            // A late handshake must clear the launch-time warning; measured kernel behavior posts a limit
+            // notice once per crossing episode, so offender changes rewrite the receipt only for a new PID.
             var handshake=toolGuard?.HandshakeConfirmed??false;
             if(handshake!=observedHandshake){observedHandshake=handshake;changed=true;}
             var decision=toolGuard?.LastDecision;
@@ -237,7 +242,22 @@ internal static class Program
             {
                 memoryNotificationError=$"Win32 {e.NativeErrorCode}: {e.Message}";memoryWatch?.Dispose();memoryWatch=null;changed=true;
             }
-            if(pids.Length>0&&memoryOffender!=pids[0]){memoryOffender=pids[0];changed=true;}
+            if(pids.Length>0)
+            {
+                // A fresh notice also withdraws the recovery overlay until the commit window re-qualifies.
+                lowCommitSamples=0;
+                if(memoryRecovered){memoryRecovered=false;changed=true;}
+                if(memoryOffender!=pids[0]){memoryOffender=pids[0];changed=true;}
+            }
+            if(memoryOffender is not null&&exitMemory is {LimitBytes:>0} hit&&job?.QueryCurrentCommit() is {} commit)
+            {
+                // Slow to set (4 samples), fast to clear (one above-threshold sample): the note may describe
+                // the present only while sampling continues, so a rebound withdraws it immediately.
+                var below=commit<hit.LimitBytes*85/100;
+                if(memoryRecovered){if(!below){memoryRecovered=false;lowCommitSamples=0;changed=true;}}
+                else if(below){if(++lowCommitSamples>=4){memoryRecovered=true;changed=true;}}
+                else lowCommitSamples=0;
+            }
             if(changed)exitMemory=MemoryEvidence();
             if(panePoolId is {} poolId&&(forcePool||poolCheck.ElapsedMilliseconds>=1000))
             {
@@ -248,17 +268,28 @@ internal static class Program
                     if(notice is not null&&notice.PoolId==poolId&&notice.At>=DateTimeOffset.FromFileTime(child!.CreationTime)&&notice.At!=poolNoticeAt)
                     {
                         poolNoticeAt=notice.At;changed=true;
+                        // A fresh pool notice resets the recovery interval as well.
+                        poolLowSamples=0;if(poolRecovered)poolRecovered=false;
                         if(notice.Pid==child.Process.Id||job!.Members().Contains(notice.Pid))poolOffender=notice.Pid;
                         else poolNoticeDetail=$"同一共享池已收到内核分配拒绝通知（PID {notice.Pid}），该 PID 与本窗格的归属未确认。";
                     }
                 }
                 catch(Exception e)when(e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException){poolNoticeDetail="共享池通知不可读取，不能据此判断本窗格超限。";}
+                if(poolOffender is not null&&pool is not null&&PoolEvidence() is {LimitBytes:>0} poolHit&&pool.QueryCurrentCommit() is {} poolCommit)
+                {
+                    var poolBelow=poolCommit<poolHit.LimitBytes*85/100;
+                    if(poolRecovered){if(!poolBelow){poolRecovered=false;poolLowSamples=0;changed=true;}}
+                    else if(poolBelow){if(++poolLowSamples>=4){poolRecovered=true;changed=true;}}
+                    else poolLowSamples=0;
+                }
             }
             if(!changed)return;
             var text="已启动进程（不代表任务完成）"+(exitMemory is null?"":"；"+ExitDiagnostics.MemoryText(exitMemory))+(pool is null?"":"；共享池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail);
             if(toolGuard is not null&&!toolGuard.HandshakeConfirmed)text+="；内存保护未确认加载";
             if(observedToolDecision is {Allowed:false})text+="；"+ToolRecovery.BlockedMarker+observedToolDecision.Reason;
             else if(observedToolDecision is {Allowed:true})text+="；最近一次工具已通过内存检查";
+            if(memoryRecovered)text+="；当前已回落：提交低于上限 85%（历史触及不撤销；内核通知为一次性事件，不能据此判断是否仍有分配被拒）";
+            if(poolRecovered)text+="；共享池当前已回落（历史触及不撤销）";
             Write(child!.Process.HasExited?"Exited":"Started",child.Process.Id,child.CreationTime,child.Process.HasExited?child.Process.ExitCode:null,text);
             if(interactive)Console.Error.WriteLine("\n"+text);
         }
