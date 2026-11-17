@@ -24,6 +24,8 @@ public sealed class Slot
     [JsonRequired] public string Directory { get; set; } = "";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] public bool RequiresDirectory { get; set; }
     public string Note { get; set; } = "";
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public Guid? RemoteHostId { get; set; }  // 远程主机 ID（引用 Configuration.RemoteHosts，稳定 ID 不会孤立）
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? RemoteDirectory { get; set; }  // 远程工作目录（如 /home/agent/work）
     [JsonRequired] public Dictionary<string, AgentProfile> Profiles { get; set; } = [];
     [JsonIgnore] public AgentProfile Current => Profiles.GetValueOrDefault(AgentId) ?? new();
     public Slot Copy() => new() { Id = Id, Enabled = Enabled, AgentId = AgentId, CustomName = CustomName, Directory = Directory, RequiresDirectory = RequiresDirectory, Note = Note, RemoteHostId = RemoteHostId, RemoteDirectory = RemoteDirectory, Profiles = Profiles.ToDictionary(p => p.Key, p => p.Value.Copy()) };
@@ -89,6 +91,7 @@ public sealed class Configuration
     public int TextScalePercent { get; set; } = 100;
     public List<string> RecentProjects { get; set; } = [];
     public List<string> RecentAgents { get; set; } = [];
+    public List<RemoteHost> RemoteHosts { get; set; } = [];  // 远程主机配置（VPS）
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? NotifyOnSessionEvents { get; set; }
     [JsonIgnore] public bool NotifyOnSessionEventsEnabled => NotifyOnSessionEvents ?? true;
     public void Edit(Action<Draft> change)
@@ -115,7 +118,7 @@ public sealed record MemorySnapshot(ulong Total, ulong Available, ulong CommitLi
 public sealed record Admission(bool Allowed, string Reason);
 public sealed record CommandSpec(string Executable, string[] Arguments, string Adapter);
 public sealed record WorkspaceIdentity(string Path, string Key);
-public sealed record LaunchItem(Guid Id, Guid BatchId, int Position, string Name, string Cwd, WorkspaceIdentity Workspace, bool Shared, CommandSpec Command, ulong Budget, string Kind = "agent", [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? RetryOf = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] ulong? PlanningBytes = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? ResourceMode = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? SourceSlotId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? AgentId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? PoolId = null);
+public sealed record LaunchItem(Guid Id, Guid BatchId, int Position, string Name, string Cwd, WorkspaceIdentity Workspace, bool Shared, CommandSpec Command, ulong Budget, string Kind = "agent", [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? RetryOf = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] ulong? PlanningBytes = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? ResourceMode = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? SourceSlotId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? AgentId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Guid? PoolId = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] RemoteExecutionSpec? RemoteExecution = null);
 public sealed class ControlEntry
 {
     public required LaunchItem Plan { get; set; }

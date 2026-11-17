@@ -31,7 +31,8 @@ public sealed record ResourcePolicySnapshot(
 
 // Usage credits come only from the monitor's live Job queries, never from launch requests or historical peaks.
 public sealed record BudgetItem(Guid Id, string Kind, ulong PlanningBytes, ulong JobMemoryLimit, Guid? PoolId = null, ulong? PoolLimit = null,
-    ulong? CurrentCommitBytes = null, ulong? CurrentPhysicalBytes = null, ulong? PoolCommitBytes = null);
+    ulong? CurrentCommitBytes = null, ulong? CurrentPhysicalBytes = null, ulong? PoolCommitBytes = null,
+    [property:System.Text.Json.Serialization.JsonIgnore(Condition=System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool Remote = false);
 
 public enum AdmissionKind { Allow, Deny }
 
@@ -146,6 +147,12 @@ public static class LedgerMigration
         if (ledger.BootId == boot) return false;
         foreach (var entry in ledger.Entries.Where(e => !ControlEntryStates.IsTerminal(e)))
         {
+            if (entry.Plan.RemoteExecution is not null && entry.State != "Pending")
+            {
+                entry.State = "Disconnected";
+                entry.Detail = "本机重启不能证明远程进程结束，请核对远程主机；未重放旧请求。";
+                continue;
+            }
             entry.State = "Settled";
             entry.Detail = "系统已重新启动，未重放旧请求";
         }
@@ -324,7 +331,22 @@ public static class ResourcePolicy
             Adapter = item.Command.Adapter,
             ResourceMode = item.ResourceMode,
             PoolId = item.PoolId?.ToString("N"),
-            PlanningBytes = item.PlanningBytes ?? 0
+            PlanningBytes = item.PlanningBytes ?? 0,
+            // 远程执行身份（主机/用户/目录/同步模式）必须绑定到摘要：改主机或改同步方式会使旧计划失效
+            Remote = item.RemoteExecution is null ? null : new
+            {
+                item.RemoteExecution.Host,
+                item.RemoteExecution.SshPort,
+                item.RemoteExecution.SshUser,
+                item.RemoteExecution.AgentUser,
+                item.RemoteExecution.AgentType,
+                item.RemoteExecution.RemoteWorkingDirectory,
+                Arguments = item.RemoteExecution.Arguments,
+                item.RemoteExecution.SshKeyPath,
+                SyncMode = item.RemoteExecution.WorkspaceSync?.Mode,
+                SyncLocal = item.RemoteExecution.WorkspaceSync?.LocalPath,
+                SyncRemote = item.RemoteExecution.WorkspaceSync?.RemotePath
+            }
         }));
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
     }
@@ -416,6 +438,13 @@ public static class ResourcePolicy
     public static void ValidateLaunchItem(LaunchItem item, ResourcePolicySnapshot policy, ulong totalPhysical)
     {
         if (item is null) throw new InvalidDataException("执行计划不支持。");
+        if (item.RemoteExecution is {} remote)
+        {
+            remote.Validate();
+            if (item.Kind != "agent" || item.Budget != 0 || item.PoolId is not null || item.PlanningBytes is not null || item.ResourceMode is not null)
+                throw new InvalidDataException("远程执行不接受本地 Job、资源池或内存预算。");
+            return;
+        }
         if (item.Kind == "git")
         {
             if (item.Budget != GitJobMemoryLimit)
@@ -448,6 +477,7 @@ public static class ResourcePolicy
 
     public static BudgetItem BudgetOf(LaunchItem plan, ulong? poolLimit = null)
     {
+        if (plan.RemoteExecution is not null) return new(plan.Id, "agent", 0, 0, Remote: true);
         var git = plan.Kind == "git";
         return new(
             plan.Id,
@@ -475,10 +505,10 @@ public static class ResourcePolicy
             .Select(e => BudgetOf(e.Plan, e.PoolMemoryLimit)).ToArray();
 
     static ulong PlanningOf(ResourcePolicySnapshot policy, BudgetItem item) =>
-        item.Kind == "git" ? policy.GitPlanningBytes : item.PlanningBytes == 0 ? DefaultPlanningBytes : item.PlanningBytes;
+        item.Remote ? 0 : item.Kind == "git" ? policy.GitPlanningBytes : item.PlanningBytes == 0 ? DefaultPlanningBytes : item.PlanningBytes;
 
     static ulong CapOf(ResourcePolicySnapshot policy, BudgetItem item) =>
-        item.Kind == "git" ? policy.GitJobMemoryLimit : item.JobMemoryLimit == 0 ? DefaultJobMemoryLimit : item.JobMemoryLimit;
+        item.Remote ? 0 : item.Kind == "git" ? policy.GitJobMemoryLimit : item.JobMemoryLimit == 0 ? DefaultJobMemoryLimit : item.JobMemoryLimit;
 
     static ulong SumPlanning(ResourcePolicySnapshot policy, IReadOnlyList<BudgetItem> items)
     {

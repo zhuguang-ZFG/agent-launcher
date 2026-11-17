@@ -187,7 +187,9 @@ public partial class MainWindow
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-{variant.Item1}-{variant.Item2}.png"));encoder.Save(file);
         }
         // F5 regression: the submission gate must hold only while attempts are still Pending; a confirmed running attempt must release it for the next batch.
-        Check("narrow overflow exposes rail commands",RailOverflowMenu.Items.OfType<MenuItem>().Select(i=>i.Header as string).SequenceEqual(new[]{"更换项目","资源设置","工作目录","恢复与诊断","运行历史与导出","恢复备份"}));
+        Check("narrow overflow exposes rail commands",RailOverflowMenu.Items.OfType<MenuItem>().Select(i=>i.Header as string).SequenceEqual(new[]{"更换项目","资源设置","远程主机（VPS）","工作目录","恢复与诊断","运行历史与导出","恢复备份"}));
+        var moreCommand=FindLogical<Button>(this).FirstOrDefault(b=>b.Content as string=="更多");
+        Check("remote host command reachable from more menu",(moreCommand?.ContextMenu as ContextMenu)?.Items.OfType<MenuItem>().Any(i=>i.Header as string=="远程主机（VPS）")==true);
         // Reserve admission depends on real free memory, which is environment-dependent; restart the monitor under the sanctioned FAKE_SAMPLE hook for determinism, then restore real sampling for the final health check.
         var realMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(realMonitor>0){try{using var m=Process.GetProcessById(realMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
         Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE","1");

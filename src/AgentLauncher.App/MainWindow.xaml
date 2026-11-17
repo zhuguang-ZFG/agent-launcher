@@ -36,8 +36,8 @@
      <DockPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
        <Button x:Name="RestoreBackupButton" Content="恢复备份" Click="RestoreBackupClick" Visibility="Collapsed" Margin="0,0,2,0" Padding="6,2" MinHeight="26" FontSize="12"/>
-       <Button Content="更多" Style="{StaticResource QuietButton}" Click="MoreClick" Margin="0,0,2,0" Padding="6,2" MinHeight="26" FontSize="12" ToolTip="工作目录、资源设置、恢复与诊断、运行历史与导出">
-        <Button.ContextMenu><ContextMenu><MenuItem Header="工作目录" Click="WorkspacesClick"/><MenuItem Header="资源设置" Click="ResourceClick"/><MenuItem Header="恢复与诊断" Click="TaskRecoveryClick"/><MenuItem Header="运行历史与导出" Click="TaskHistoryClick"/></ContextMenu></Button.ContextMenu>
+       <Button Content="更多" Style="{StaticResource QuietButton}" Click="MoreClick" Margin="0,0,2,0" Padding="6,2" MinHeight="26" FontSize="12" ToolTip="工作目录、资源设置、远程主机、恢复与诊断、运行历史与导出">
+        <Button.ContextMenu><ContextMenu><MenuItem Header="工作目录" Click="WorkspacesClick"/><MenuItem Header="资源设置" Click="ResourceClick"/><MenuItem Header="远程主机（VPS）" Click="RemoteHostsClick" AutomationProperties.Name="远程主机"/><MenuItem Header="恢复与诊断" Click="TaskRecoveryClick"/><MenuItem Header="运行历史与导出" Click="TaskHistoryClick"/></ContextMenu></Button.ContextMenu>
        </Button>
        <Button Content="⚙" Style="{StaticResource QuietButton}" Click="ResourceClick" Padding="6,2" MinHeight="26" ToolTip="资源设置" AutomationProperties.Name="资源设置"/>
       </StackPanel>
@@ -48,6 +48,7 @@
      <Button.ContextMenu><ContextMenu x:Name="RailOverflowMenu" Opened="RailOverflowMenuOpened">
       <MenuItem Header="更换项目" Click="ChooseClick"/>
       <MenuItem Header="资源设置" Click="ResourceClick"/>
+      <MenuItem Header="远程主机（VPS）" Click="RemoteHostsClick" AutomationProperties.Name="远程主机"/>
       <MenuItem Header="工作目录" Click="WorkspacesClick"/>
       <MenuItem Header="恢复与诊断" Click="TaskRecoveryClick"/>
       <MenuItem Header="运行历史与导出" Click="TaskHistoryClick"/>

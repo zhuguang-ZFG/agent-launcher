@@ -74,6 +74,8 @@ internal sealed class SessionNotifier
 
             if (entry.State == "FailedBeforeStart" && before.State != "FailedBeforeStart")
                 Add("failed", name + " 启动前失败", "进程未启动，可到运行记录查看。");
+            else if (entry.State == "Disconnected" && before.State != "Disconnected")
+                Add("disconnected", name + " SSH 连接断开", "远程进程可能仍在运行，请手动核对远程主机状态后再决定操作。");
             else if ((entry.State is "Unknown" or "NeedsReconciliation") && before.State is not ("Unknown" or "NeedsReconciliation"))
                 Add("unknown", name + " 状态待核对", "占用尚未确认，请查看运行记录。");
             else if ((entry.State is "Settled" or "Exited" or "Finished") && before.State != entry.State && before.State is not ("Settled" or "Finished"))

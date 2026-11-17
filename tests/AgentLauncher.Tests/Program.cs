@@ -39,6 +39,9 @@ if(args is ["--terminal-batch-checks"]) return await Integration.RunAsync(termin
 if(args is ["--parallel-batch-checks"]) return await Integration.RunAsync(terminalOnly:true,directBatch:true);
 if(args is ["--startup-queue-checks"]) return await Integration.RunAsync(startupOnly:true);
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
+if(args is ["--remote-execution-integration"])return await RemoteExecutionIntegration.RunAsync();
+if(args is ["--remote-startup-e2e"])return await RemoteE2EIntegration.RunAsync();
+if(args is ["--remote-live",var liveHost,var liveSshUser,var liveAgentUser,var liveDir,var liveKey,var liveArgs,var liveTimeout])return await RemoteLiveChecks.RunAsync(liveHost,liveSshUser,liveAgentUser,liveDir,liveKey,liveArgs,liveTimeout);
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
 if(args is ["--allocate-hold",var holdMib,var holdMs]) return MemoryFixture.AllocateHold(int.Parse(holdMib),int.Parse(holdMs));
 if(args is ["--memory-cycle",var memoryPrefix]) return MemoryFixture.Cycle(memoryPrefix);
@@ -252,6 +255,7 @@ Test("P02 Job memory evidence survives child exit and never invents crash cause"
 });
 IdleWorkingSetChecks.Run(Test,Assert);
 SlotConvenienceChecks.Run(Test,Assert);
+AgentLauncher.Tests.RemoteExecutionChecks.Run(Test,Assert);
 Test("W1 idle working-set trim reclaims physical and preserves data on page-in",()=>{
  using var root=new Job(@"Local\AL-trim-root-"+Guid.NewGuid(),root:true);using var job=new Job(@"Local\AL-trim-child-"+Guid.NewGuid(),512*ResourcePolicy.MiB);
  var prefix=Path.Combine(temp,"trim-"+Guid.NewGuid().ToString("N"));

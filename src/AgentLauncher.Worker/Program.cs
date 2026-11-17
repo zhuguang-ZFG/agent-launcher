@@ -128,7 +128,8 @@ internal static class Program
         // a pool helper before queued resume requests are served, exhausting the 8-second IPC budget.
         // Queue only the spawn transaction; release it as soon as Started is durable, so Agents still run in parallel.
         using var startup=new Mutex(false,Store.RootJob+"-startup");var startupOwned=false;
-        ProtectedProcess? child=null;Job? root=null;Job? pool=null;Job? job=null;JobMemoryWatch? memoryWatch=null;var resumeIntent=false;var claimCreated=false;int? memoryOffender=null;
+        ProtectedProcess? child=null;SshRunnerBackend? sshChild=null;Job? root=null;Job? pool=null;Job? job=null;JobMemoryWatch? memoryWatch=null;var resumeIntent=false;var claimCreated=false;int? memoryOffender=null;
+        LaunchItem? plan=null;string? remoteHost=null;bool qoderGuard=false;  // 提升到函数级作用域（wait try 块需要访问 RemoteExecution）
         OmpMemoryGuard? toolGuard=null;Admission? observedToolDecision=null;var observedHandshake=false;
         JobMemoryEvidence? exitMemory=null;int? poolOffender=null;Guid? panePoolId=null;DateTimeOffset? poolNoticeAt=null;string poolNoticeDetail="";string? memoryNotificationError=null;var poolCheck=Stopwatch.StartNew();
         // Limit recovery: kernel notices fire once per crossing episode (measured: six refusals, one notice),
@@ -148,81 +149,174 @@ internal static class Program
             if(!startupOwned)throw new IOException("同一监控器的启动队列等待超时，尚未创建 Agent；请在运行记录中核对。");
             var grant=Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:id)).GetAwaiter().GetResult();
             if(!grant.Ok||grant.Entries is not {Length:1})throw new IOException(grant.Message);
-            var entry=grant.Entries[0];var plan=entry.Plan;
-            root=new Job(Store.RootJob,openOnly:true);job=new Job(Store.JobName(id),openOnly:true);
-            try
+            var entry=grant.Entries[0];plan=entry.Plan;remoteHost=plan.RemoteExecution?.Host;
+            
+            // 远程执行：不创建本地 Job/custody（远程进程不受本地资源限制，用 SSH PID/创建时间核验存活）
+            if(plan.RemoteExecution is null)
             {
+                root=new Job(Store.RootJob,openOnly:true);job=new Job(Store.JobName(id),openOnly:true);
+                try
+                {
 #if INTEGRATION_TESTS
-                if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")=="MemoryWatchStart")throw new System.ComponentModel.Win32Exception(6,"Controlled notification initialization failure");
+                    if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")=="MemoryWatchStart")throw new System.ComponentModel.Win32Exception(6,"Controlled notification initialization failure");
 #endif
-                memoryWatch=new JobMemoryWatch(job);
+                    memoryWatch=new JobMemoryWatch(job);
+                }
+                catch(System.ComponentModel.Win32Exception e){memoryNotificationError=$"Win32 {e.NativeErrorCode}: {e.Message}";}
+                if(plan.PoolId is {} poolId){panePoolId=poolId;pool=new Job(Store.PoolName(poolId),openOnly:true);}
             }
-            catch(System.ComponentModel.Win32Exception e){memoryNotificationError=$"Win32 {e.NativeErrorCode}: {e.Message}";}
-            if(plan.PoolId is {} poolId){panePoolId=poolId;pool=new Job(Store.PoolName(poolId),openOnly:true);}
             if(PhysicalDirectory.Workspace(plan.Cwd).Key!=plan.Workspace.Key)throw new IOException("工作目录物理身份变化，已阻止启动。");
-            JobCustody.Retain(plan);
+            
+            // 远程执行：拒绝共享池/本地内存策略（远程进程不受本地限制）
+            if(plan.RemoteExecution is not null)
+            {
+                if(pool is not null)throw new IOException("远程执行不支持共享资源池（本地 Job 限制不适用于远程进程）。");
+                if(plan.PlanningBytes is not null||plan.ResourceMode is not null)throw new IOException("远程执行不支持本地内存策略（远程进程不受本地 Job 限制）。");
+            }
+            
+            // 远程执行：跳过本地 custody（远程进程不受本地 Job 限制，用 SSH PID/创建时间核验存活）
+            if(plan.RemoteExecution is null)JobCustody.Retain(plan);
             LaunchEvidence.CaptureBaseline(plan);
             if(interactive)TerminalAppearance.WritePaneHeading(plan);
             Dictionary<string,string>? guardEnvironment=null;
-            var qoderGuard=QoderMemoryGuard.IsAttached(plan.Command);
-            if(qoderGuard)QoderMemoryGuard.Prepare();
-            if(OmpMemoryGuard.IsAttached(plan.Command)||qoderGuard)
+            
+            // 远程执行：跳过本地 MemoryGuard（远程进程无法加载 Windows 端 guard）
+            if(plan.RemoteExecution is null)
             {
-                toolGuard=new OmpMemoryGuard(job,pool,entry.PhysicalFloor??2*ResourcePolicy.GiB,entry.CommitFloor??2*ResourcePolicy.GiB);
-                guardEnvironment=new(){[OmpMemoryGuard.PipeEnvironment]=toolGuard.PipeName};
+                if(job is null)throw new InvalidOperationException("本地执行需要 job（逻辑错误）");
+                qoderGuard=QoderMemoryGuard.IsAttached(plan.Command);
+                if(qoderGuard)QoderMemoryGuard.Prepare();
+                if(OmpMemoryGuard.IsAttached(plan.Command)||qoderGuard)
+                {
+                    toolGuard=new OmpMemoryGuard(job,pool,entry.PhysicalFloor??2*ResourcePolicy.GiB,entry.CommitFloor??2*ResourcePolicy.GiB);
+                    guardEnvironment=new(){[OmpMemoryGuard.PipeEnvironment]=toolGuard.PipeName};
+                }
             }
             Write("SpawnIntent",0,0,null,"正在受保护地创建进程");
-            child=pool==null?new ProtectedProcess(plan.Command,plan.Cwd,root,job,redirected:!interactive,environment:guardEnvironment):new ProtectedProcess(plan.Command,plan.Cwd,[root,pool,job],redirected:!interactive,environment:guardEnvironment);
-            Write("CreatedSuspended",child.Process.Id,child.CreationTime,null,"已创建，尚未运行");
+            
+            // 远程执行：如果 LaunchItem 有 RemoteExecution，用 SshRunnerBackend 替代 ProtectedProcess
+            // 明确：远程进程不受本地 Windows Job 限制，资源管理由远程主机负责
+            if(plan.RemoteExecution is not null)
+            {
+                // 启动工作区同步（如果启用），在 Create 之前（同步会话的远程路径会替换 Spec.RemoteWorkingDirectory）
+                IWorkspaceSyncSession? syncSession=null;
+                var remoteSpec=plan.RemoteExecution;
+                if(remoteSpec.WorkspaceSync is not null&&remoteSpec.WorkspaceSync.Mode!=WorkspaceSyncMode.None)
+                {
+                    try
+                    {
+                        // 超时 30 秒（Mutagen/SSHFS 启动可能需要时间）
+                        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                        syncSession=WorkspaceSync.StartAsync(remoteSpec.WorkspaceSync,remoteSpec,timeout.Token).GetAwaiter().GetResult();
+                        try
+                        {
+                            syncSession.WaitReadyAsync(timeout.Token).GetAwaiter().GetResult();
+                        }
+                        catch
+                        {
+                            // 就绪失败：dispose 会话（清理 Mutagen 会话/SSHFS 挂载）
+                            try{syncSession.DisposeAsync().AsTask().Wait(5000);}catch{}
+                            throw;
+                        }
+                        // 用同步会话的远程路径替换 RemoteWorkingDirectory
+                        remoteSpec=remoteSpec with{RemoteWorkingDirectory=syncSession.GetRemoteWorkingDirectory()};
+                    }
+                    catch(Exception ex)when(ex is IOException or TimeoutException or OperationCanceledException)
+                    {
+                        // 同步失败：fail-closed（用户明确要求远程 agent 编辑本地工作区，同步失败不能静默降级）
+                        Write("FailedBeforeStart",0,0,null,$"工作区同步失败（{ex.Message}）：远程 agent 无法访问本地工作区，已阻止启动。请检查 Mutagen/SSHFS 是否可用。");
+                        throw new IOException($"工作区同步失败：{ex.Message}",ex);
+                    }
+                }
+                
+                sshChild=SshRunnerBackend.Create(remoteSpec);
+                // 保持同步会话引用（Dispose 时清理）
+                if(syncSession is not null)sshChild.SyncSession=syncSession;
+                Write("CreatedSuspended",0,0,null,$"已创建 SSH 远程会话配置（{remoteSpec.Host}，不受本地资源限制），尚未运行");
+            }
+            else
+            {
+                if(root is null||job is null)throw new InvalidOperationException("本地执行需要 root/job（逻辑错误）");
+                child=pool==null?new ProtectedProcess(plan.Command,plan.Cwd,root,job,redirected:!interactive,environment:guardEnvironment):new ProtectedProcess(plan.Command,plan.Cwd,[root,pool,job],redirected:!interactive,environment:guardEnvironment);
+                Write("CreatedSuspended",child.Process.Id,child.CreationTime,null,"已创建，尚未运行");
+            }
+            
             var resume=Ipc.SendAsync(new("resume",Guid.NewGuid(),Attempt:id,Epoch:grant.Epoch,Digest:entry.Digest)).GetAwaiter().GetResult();
             if(!resume.Ok)throw new IOException(resume.Message);
-            Write("ResumeIntent",child.Process.Id,child.CreationTime,null,"准备恢复初始线程");resumeIntent=true;
+            if(child is not null)Write("ResumeIntent",child.Process.Id,child.CreationTime,null,"准备恢复初始线程");else Write("ResumeIntent",0,0,null,"准备启动 SSH 远程会话");
             try
             {
 #if INTEGRATION_TESTS
                 if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")=="ResumeRejected")throw new System.ComponentModel.Win32Exception(6,"Controlled ResumeThread rejection");
 #endif
-                child.Resume();
+                if(child is not null)child.Resume();else sshChild!.Start();
+                resumeIntent=true;  // Start 成功后才设置（任何异常都跳过 FailedBeforeStart）
             }
             catch(System.ComponentModel.Win32Exception){resumeIntent=false;throw;}
             var startedDetail="已启动进程（不代表任务完成）";
+            if(sshChild is not null)startedDetail=$"已启动 SSH 远程会话（{plan.RemoteExecution!.Host}，不受本地资源限制）";
             // Fail open: an unconfirmed extension load weakens only the pre-limit, never the Job hard caps.
             handshakeWaitBegin=DateTimeOffset.UtcNow;
             if(toolGuard is not null&&!toolGuard.WaitForHandshake(TimeSpan.FromSeconds(3)))
                 startedDetail+=$"；{(qoderGuard?"Qoder":"Omp")} 内存保护未确认加载：工具可能不受提前限流（硬上限仍生效），请核对版本与插件加载提示";
-            Write("Started",child.Process.Id,child.CreationTime,null,startedDetail);
+            Write("Started",(child?.Process??sshChild!.Process).Id,(child?.CreationTime??sshChild!.CreationTime),null,startedDetail);
         }
         catch(Exception error)when(error is not OutOfMemoryException)
         {
             try
             {
                 // Only this claim owner may publish evidence. A duplicate runner must not overwrite a live attempt's receipt.
-                if(claimCreated&&child is null&&!resumeIntent)Write("FailedBeforeStart",0,0,null,"未启动："+error.Message);
+                if(claimCreated&&child is null&&sshChild is null&&!resumeIntent)Write("FailedBeforeStart",0,0,null,"未启动："+error.Message);
                 if(child!=null&&!resumeIntent){child.AbortBeforeResume();Write("FailedBeforeStart",child.Process.Id,child.CreationTime,null,"未运行的进程已回收："+error.Message);}
+                if(sshChild!=null&&!resumeIntent){sshChild.Abort();Write("FailedBeforeStart",0,0,null,"未运行的 SSH 会话已回收："+error.Message);}
             }
-            finally{toolGuard?.Dispose();memoryWatch?.Dispose();child?.Dispose();job?.Dispose();pool?.Dispose();root?.Dispose();}
+            finally{toolGuard?.Dispose();memoryWatch?.Dispose();child?.Dispose();sshChild?.Dispose();job?.Dispose();pool?.Dispose();root?.Dispose();}
             throw;
         }
         finally{if(startupOwned)startup.ReleaseMutex();mutex.ReleaseMutex();}
         try
         {
-            while(!child!.Process.WaitForExit(250))ObserveMemory();
+            var process=(child?.Process??sshChild!.Process);
+            while(!process.WaitForExit(250))if(child is not null)ObserveMemory();
             if(pool!=null)try{Ipc.SendAsync(new("status",Guid.NewGuid())).GetAwaiter().GetResult();}catch(Exception e)when(e is IOException or OperationCanceledException or TimeoutException){poolNoticeDetail="共享池通知尚未核对；退出码不能单独证明内存超限。";}
-            ObserveMemory(forcePool:true);var exit=child.Process.ExitCode;
-            exitMemory=MemoryEvidence();var detail=ExitDiagnostics.Describe(exit,exitMemory);
+            if(child is not null)ObserveMemory(forcePool:true);var exit=process.ExitCode;
+            // 工作区同步收敛（硬性要求：远程 agent 的改动必须落回本机）。先于 Exited/Finished 回执 flush，
+            // 成功则终止会话；失败/超时保留会话并把原因写入回执，不假装已收敛。覆盖正常退出与 255 断连两条路径。
+            var syncNote="";
+            if(sshChild?.SyncSession is {} syncToFlush)
+            {
+                string? flushError;
+                try{flushError=syncToFlush.TryDisposeAsync().GetAwaiter().GetResult();}
+                catch(Exception ex){flushError="工作区同步收敛异常："+ex.Message;}
+                sshChild.SyncSession=null;  // 已处置，避免 Dispose 重复 flush
+                syncNote=flushError is null?" 工作区已同步收敛回本机。":" "+flushError;
+            }
+            exitMemory=child is not null?MemoryEvidence():null;var detail=ExitDiagnostics.Describe(exit,exitMemory)+syncNote;
+            
+            // SSH 连接错误（255）写 Disconnected，不是 Exited/Finished
+            if(sshChild is not null&&sshChild.IsSshConnectionError)
+            {
+                detail=$"SSH 连接断开（{remoteHost}，退出码 255，不受本地资源限制）：网络错误或主机不可达";
+                Write("Disconnected",process.Id,sshChild.CreationTime,255,detail);
+                if(interactive)Console.WriteLine("\nSSH 连接断开。"+detail+"\n请检查网络连接和远程主机状态。");
+                return 255;
+            }
+            
+            if(sshChild is not null)detail=$"SSH 远程会话（{remoteHost}，不受本地资源限制）："+detail;
             if(pool is not null)detail+="共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail;
             if(memoryRecovered)detail+="当前已回落：提交低于上限 85%（历史触及不撤销）。";
-            Write("Exited",child.Process.Id,child.CreationTime,exit,"进程已退出。"+detail);
+            Write("Exited",process.Id,(child?.CreationTime??sshChild!.CreationTime),exit,"进程已退出。"+detail);
             if(interactive&&exit!=0)Console.WriteLine("\nAgent 异常退出。"+detail+"\n工作目录已保留；如仍有工具运行，将等待它们结束。");
-            while(job!.Members().Length>0){Thread.Sleep(250);ObserveMemory();}
-            ObserveMemory(forcePool:true);exitMemory=MemoryEvidence();detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail)+(memoryRecovered?"当前已回落：提交低于上限 85%（历史触及不撤销）。":"");
-            Write("Finished",child.Process.Id,child.CreationTime,exit,"全部受管进程已退出。"+detail);
+            if(job is not null)while(job.Members().Length>0){Thread.Sleep(250);if(child is not null)ObserveMemory();}
+            if(child is not null)ObserveMemory(forcePool:true);exitMemory=child is not null?MemoryEvidence():null;detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail)+(memoryRecovered?"当前已回落：提交低于上限 85%（历史触及不撤销）。":"");
+            if(sshChild is not null)detail=$"SSH 远程会话（{remoteHost}，不受本地资源限制）："+detail;
+            Write("Finished",process.Id,(child?.CreationTime??sshChild!.CreationTime),exit,"全部受管进程已退出。"+detail);
 #if !INTEGRATION_TESTS
             HoldPane(interactive,exit,exitMemory?.LimitReached==true||poolOffender!=null);
 #endif
             return exit;
         }
-        finally{toolGuard?.Dispose();memoryWatch?.Dispose();child?.Dispose();job?.Dispose();pool?.Dispose();root?.Dispose();}
+        finally{toolGuard?.Dispose();memoryWatch?.Dispose();child?.Dispose();sshChild?.Dispose();job?.Dispose();pool?.Dispose();root?.Dispose();}
         JobMemoryEvidence? MemoryEvidence()=>job?.QueryMemory() is {} evidence?evidence with{LimitReached=memoryOffender!=null,OffendingProcessId=memoryOffender,NotificationError=memoryNotificationError}:null;
         JobMemoryEvidence? PoolEvidence()=>pool?.QueryMemory() is {} evidence?evidence with{LimitReached=poolOffender!=null,OffendingProcessId=poolOffender}:null;
         void ObserveMemory(bool forcePool=false)
@@ -545,9 +639,54 @@ internal sealed class Monitor : IDisposable
                 }
                 var receipt=ReadReceipt(e.Plan.Id);
                 if(receipt?.Phase is "Exited" or "Finished" && e.ExitCode!=receipt.ExitCode){e.ExitCode=receipt.ExitCode;changed=true;}
-                if(j==null && receipt?.Phase is not ("Finished" or "FailedBeforeStart")) {blocked="资源组句柄丢失，无法证明后代已退出；保留预算，系统重启后可核对释放。";e.Detail=blocked;reconcileOffered=true;continue;}
+                
+                // 远程执行：没有本地 Job，用 SSH PID/创建时间核验存活
+                if(e.Plan.RemoteExecution is not null)
+                {
+                    if(receipt?.Phase is "Started"&&receipt.Pid>0)
+                    {
+                        // 检查 SSH 进程是否仍存活（PID + 创建时间核验）
+                        try
+                        {
+                            using var sshProcess=Process.GetProcessById(receipt.Pid);
+                            if(sshProcess.StartTime.ToFileTimeUtc()==receipt.ProcessTime)
+                            {
+                                // SSH 进程仍存活（PID 和创建时间匹配），保持 Started 状态
+                                if(e.State!="Started"){e.State="Started";changed=true;}
+                                e.Detail=receipt.Detail;
+                                continue;  // 不进入本地 Job reconciliation
+                            }
+                        }
+                        catch(ArgumentException){/* 进程不存在 */}
+                    }
+                    // SSH 进程已退出或无法核验，进入 Disconnected 状态
+                    if(receipt?.Phase is "Started")
+                    {
+                        e.State="Disconnected";e.Detail="SSH 连接断开（远程进程可能仍存活，请手动核对远程主机状态）";changed=true;reconcileOffered=true;continue;
+                    }
+                }
+                
+                if(j==null && receipt?.Phase is not ("Finished" or "FailedBeforeStart" or "Disconnected") && e.Plan.RemoteExecution is null) {blocked="资源组句柄丢失，无法证明后代已退出；保留预算，系统重启后可核对释放。";e.Detail=blocked;reconcileOffered=true;continue;}
+                // SSH 连接断开（Disconnected）且 Job 句柄丢失：远程执行没有本地 Job，保持可见未知状态
+                if(j==null && receipt?.Phase is "Disconnected")
+                {
+                    e.State="Disconnected";e.Detail=receipt.Detail+"（远程进程可能仍存活，请手动核对远程主机状态）";changed=true;reconcileOffered=true;continue;
+                }
                 var members=j?.Members()??[];
-                if(members.Length==0){e.State=receipt?.Phase is "Started" or "Exited" or "ResumeIntent" or "Finished"?"Settled":"FailedBeforeStart";e.Detail=receipt?.Detail??"创建者已退出，核对无存活进程";changed=true;continue;}
+                if(members.Length==0)
+                {
+                    // SSH 连接断开（Disconnected）：远程进程可能存活，保持可见未知状态，防止盲目重启
+                    if(receipt?.Phase is "Disconnected")
+                    {
+                        e.State="Disconnected";e.Detail=receipt.Detail+"（远程进程可能仍存活，请手动核对远程主机状态）";changed=true;reconcileOffered=true;continue;
+                    }
+                    // 远程执行：不可验证的创建阶段（ResumeIntent/SpawnIntent/CreatedSuspended）映射到 Disconnected（远程进程可能存活）
+                    if(e.Plan.RemoteExecution is not null && receipt?.Phase is "ResumeIntent" or "SpawnIntent" or "CreatedSuspended")
+                    {
+                        e.State="Disconnected";e.Detail="远程创建中断（远程进程可能仍存活，请手动核对远程主机状态）";changed=true;reconcileOffered=true;continue;
+                    }
+                    e.State=receipt?.Phase is "Started" or "Exited" or "ResumeIntent" or "Finished"?"Settled":"FailedBeforeStart";e.Detail=receipt?.Detail??"创建者已退出，核对无存活进程";changed=true;continue;
+                }
                 if(receipt?.Phase is "SpawnIntent" or "CreatedSuspended")
                 {
                     // Gate proves no creator is running; no persisted ResumeIntent means our children never ran.
@@ -693,7 +832,7 @@ internal sealed class Monitor : IDisposable
             // decide a queue reservation whose snapshot was frozen as practical. Everything else still precedes the binding.
             if(AdmissionHardReason() is {} earlyReason)throw new IOException(earlyReason);
             var binding=request.Operation=="reserve-task"?BindTaskAuthority(request,items):BindAuthority(request,items);
-            if(pressure&&binding.Policy.Mode=="conservative")throw new IOException("资源压力尚未连续恢复，稍后重新检查。");
+            if(pressure&&binding.Policy.Mode=="conservative"&&items.Any(i=>i.RemoteExecution is null))throw new IOException("资源压力尚未连续恢复，稍后重新检查。");
             if(AdmissionHardReason() is {} reason)throw new IOException(reason);
             if(items.Length is <1 or >ResourcePolicy.MaxSlots||items.Select(i=>i.Id).Distinct().Count()!=items.Length)throw new IOException("启动项数量或 ID 无效。");
             var previous=ledger.Entries.Where(e=>items.Any(i=>i.Id==e.Plan.Id)).ToArray();
@@ -707,7 +846,15 @@ internal sealed class Monitor : IDisposable
             var active=ledger.Entries.Where(e=>!Store.IsTerminal(e)).ToList();
             foreach(var p in items)
             {
-                if(p.Kind is not ("agent" or "git")||(p.Kind=="git"&&p.Budget!=ResourcePolicy.GitJobMemoryLimit)||(p.Kind=="agent"&&(p.Budget<ResourcePolicy.MinJobMemoryLimit||p.Budget>ResourcePolicy.MaxJobMemoryLimit))||!File.Exists(p.Command.Executable)||!p.Command.Executable.EndsWith(".exe",StringComparison.OrdinalIgnoreCase))throw new IOException("执行计划不支持。");
+                // 执行域分域校验：远程计划只受远程合同约束，本地 Job/可执行文件规则不适用于远程域。
+                if(p.RemoteExecution is {} remotePlan)
+                {
+                    if(p.Kind!="agent"||p.Budget!=0||p.PoolId is not null||p.PlanningBytes is not null||p.ResourceMode is not null||p.Command.Adapter!="remote"||p.Command.Executable!=remotePlan.AgentType)throw new IOException("执行计划不支持。");
+                }
+                else
+                {
+                    if(p.Kind is not ("agent" or "git")||(p.Kind=="git"&&p.Budget!=ResourcePolicy.GitJobMemoryLimit)||(p.Kind=="agent"&&(p.Budget<ResourcePolicy.MinJobMemoryLimit||p.Budget>ResourcePolicy.MaxJobMemoryLimit))||!File.Exists(p.Command.Executable)||!p.Command.Executable.EndsWith(".exe",StringComparison.OrdinalIgnoreCase))throw new IOException("执行计划不支持。");
+                }
                 if(p.RetryOf is {} sourceId)
                 {
                     var source=ledger.Entries.SingleOrDefault(e=>e.Plan.Id==sourceId);
@@ -723,9 +870,13 @@ internal sealed class Monitor : IDisposable
                 active.Add(new(){Plan=p});
             }
             var reservedItems=ActiveBudgets();
-            var requestedItems=items.Select(p=>ResourcePolicy.BudgetOf(p,p.PoolId is {} poolId?ledger.Pools.SingleOrDefault(pool=>pool.Id==poolId)?.MemoryLimit??binding.Policy.PoolMemoryLimit:null)).ToList();
-            var decision=Decide(binding.Policy,reservedItems,requestedItems);
-            if(decision.Kind==AdmissionKind.Deny)throw new IOException(decision.Reason);
+            var requestedItems=items.Where(p=>p.RemoteExecution is null).Select(p=>ResourcePolicy.BudgetOf(p,p.PoolId is {} poolId?ledger.Pools.SingleOrDefault(pool=>pool.Id==poolId)?.MemoryLimit??binding.Policy.PoolMemoryLimit:null)).ToList();
+            // 远程域不消耗本地预算：纯远程批次跳过本地准入决策（安全类闸门仍在上方共享路径生效）。
+            if(requestedItems.Count>0)
+            {
+                var decision=Decide(binding.Policy,reservedItems,requestedItems);
+                if(decision.Kind==AdmissionKind.Deny)throw new IOException(decision.Reason);
+            }
             // Ray-style fixed concurrency pool: the per-process Job cap stays the hard wall, this ceiling keeps the
             // machine responsive. Entries this request already covers are not counted twice on replay/retry paths.
             var concurrent=ledger.Entries.Count(e=>!Store.IsTerminal(e)&&(e.Plan.Kind is null or "agent")&&!items.Any(i=>i.Id==e.Plan.Id))
@@ -742,7 +893,7 @@ internal sealed class Monitor : IDisposable
                 if(record==null)addedPools.Add(new(){Id=poolId,MemoryLimit=policy.PoolMemoryLimit,PolicyHash=binding.Hash,BatchId=items[0].BatchId});
                 else if(record.MemoryLimit!=policy.PoolMemoryLimit||record.PolicyHash!=binding.Hash)throw new IOException("资源池策略已变化，请撤销后重新准备。");
             }
-            var entries=items.Select(p=>new ControlEntry{Plan=p,Digest=Store.Digest(p),Epoch=epoch,Mode=policy.Mode,JobMemoryLimit=p.Kind=="git"?policy.GitJobMemoryLimit:p.Budget,PlanningBytes=ResourcePolicy.BudgetOf(p).PlanningBytes,PhysicalFloor=policy.PhysicalFloor,CommitFloor=policy.CommitFloor,CpuRate=rootCpuRate??policy.CpuRate,Pool=policy.PoolMode,PoolMemoryLimit=policy.PoolMode==ResourcePolicy.PoolShared?policy.PoolMemoryLimit:null}).ToArray();
+            var entries=items.Select(p=>new ControlEntry{Plan=p,Digest=Store.Digest(p),Epoch=epoch,Mode=policy.Mode,JobMemoryLimit=p.Kind=="git"?policy.GitJobMemoryLimit:p.RemoteExecution is not null?policy.JobMemoryLimit:p.Budget,PlanningBytes=ResourcePolicy.BudgetOf(p).PlanningBytes,PhysicalFloor=policy.PhysicalFloor,CommitFloor=policy.CommitFloor,CpuRate=rootCpuRate??policy.CpuRate,Pool=policy.PoolMode,PoolMemoryLimit=policy.PoolMode==ResourcePolicy.PoolShared?policy.PoolMemoryLimit:null}).ToArray();
             foreach(var candidate in entries)Ipc.EnsureEntryRepresentable(candidate);
             TaskReservationClaim? claim=request.Operation=="reserve-task"?new(request.TaskEntryId!.Value,items[0].Id):null;
             EnsureReservationCapacity(entries,addedPools.ToArray(),claim);
@@ -780,20 +931,28 @@ internal sealed class Monitor : IDisposable
             if(ledger.Entries.Count(e=>!Store.IsTerminal(e)&&(e.Plan.Kind is null or "agent"))>ResourcePolicy.MaxConcurrentAgents)throw new IOException($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个；请先结束或撤销部分 Agent 后再启动。");
             if(UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!Ipc.EntryRepresentable(e)).ToArray()) is {} reason)throw new IOException(reason);
             if(blocked!=null)throw new IOException(blocked);
-            var policy=PolicyFromEntry(entry);
-            if(pressure&&policy.Mode=="conservative")throw new IOException("资源压力尚未连续恢复，暂不恢复运行。已保留预约，可撤销此项。");
-            var beginDecision=Decide(policy,ActiveBudgets(),[],includeSoftBudget:false);
-            if(beginDecision.Kind==AdmissionKind.Deny)throw new IOException(beginDecision.Reason.Contains("暂停新增任务",StringComparison.Ordinal)
-                ?"资源压力尚未连续恢复，暂不恢复运行。已保留预约，可撤销此项。":beginDecision.Reason+" 已保留预约，可撤销此项。");
             if(PhysicalDirectory.Workspace(entry.Plan.Cwd).Key!=entry.Plan.Workspace.Key)throw new IOException("目录物理身份已变化。");
-            if(entry.Plan.PoolId is {} poolId)
+            // 执行域分域：远程条目不重建本地策略、不做本地准入决策、不创建本地 Job；
+            // 资源压力与预算属于本地域，远程进程的资源由远程主机负责。安全类闸门已在上方共享路径核对。
+            if(entry.Plan.RemoteExecution is null)
             {
-                if(!pools.TryGetValue(poolId,out var pool)){pool=new Job(Store.PoolName(poolId),openOnly:true);pools[poolId]=pool;}
-                var poolLimit=pool.QueryMemory()?.LimitBytes??0;
-                if(poolLimit==0)throw new IOException("资源池上限不可读，已停止创建。");
-                jobs[entry.Plan.Id]=CreateItemJob(poolId,entry.Plan.Id,pool,poolLimit,entry.Plan.Budget);
+                var policy=PolicyFromEntry(entry);
+                if(pressure&&policy.Mode=="conservative")throw new IOException("资源压力尚未连续恢复，暂不恢复运行。已保留预约，可撤销此项。");
+                var beginDecision=Decide(policy,ActiveBudgets(),[],includeSoftBudget:false);
+                if(beginDecision.Kind==AdmissionKind.Deny)throw new IOException(beginDecision.Reason.Contains("暂停新增任务",StringComparison.Ordinal)
+                    ?"资源压力尚未连续恢复，暂不恢复运行。已保留预约，可撤销此项。":beginDecision.Reason+" 已保留预约，可撤销此项。");
+                if(entry.Plan.PoolId is {} poolId)
+                {
+                    if(!pools.TryGetValue(poolId,out var pool)){pool=new Job(Store.PoolName(poolId),openOnly:true);pools[poolId]=pool;}
+                    var poolLimit=pool.QueryMemory()?.LimitBytes??0;
+                    if(poolLimit==0)throw new IOException("资源池上限不可读，已停止创建。");
+                    jobs[entry.Plan.Id]=CreateItemJob(poolId,entry.Plan.Id,pool,poolLimit,entry.Plan.Budget);
+                }
+                else
+                {
+                    jobs[entry.Plan.Id]=new Job(Store.JobName(entry.Plan.Id),entry.Plan.Budget);
+                }
             }
-            else jobs[entry.Plan.Id]=new Job(Store.JobName(entry.Plan.Id),entry.Plan.Budget);
             entry.State="Creating";entry.Epoch=epoch;entry.Detail="正在创建进程";Save();return new(true,"单次创建授权",[entry],sample,epoch);
         }
         if(request.Operation=="resume")
@@ -1030,7 +1189,7 @@ internal sealed class Monitor : IDisposable
     {
         SampleResources();budgetBaseline=sample;
         var poolUsage=pools.ToDictionary(pair=>pair.Key,pair=>pair.Value.QueryMemory()?.LimitBytes==ledger.Pools.SingleOrDefault(p=>p.Id==pair.Key)?.MemoryLimit?JobUsageReader.Read(pair.Value):null);
-        var items=ledger.Entries.Where(e=>!Store.IsTerminal(e)).Select(e=>
+        var items=ledger.Entries.Where(e=>!Store.IsTerminal(e)&&e.Plan.RemoteExecution is null).Select(e=>
         {
             var usage=jobs.TryGetValue(e.Plan.Id,out var job)&&job.QueryMemory()?.LimitBytes==e.Plan.Budget?JobUsageReader.Read(job):null;
             var pooled=e.Plan.PoolId is {} poolId?poolUsage.GetValueOrDefault(poolId):null;
@@ -1166,8 +1325,8 @@ internal sealed class Monitor : IDisposable
         var settings=new ResourceSettings
         {
             Mode=entry.Mode??entry.Plan.ResourceMode??"practical",
-            JobMemoryLimit=entry.JobMemoryLimit??entry.Plan.Budget,
-            PlanningBytes=entry.PlanningBytes??entry.Plan.PlanningBytes??ResourcePolicy.DefaultPlanningBytes,
+            JobMemoryLimit=(entry.Plan.RemoteExecution is not null&&entry.JobMemoryLimit is null or 0)?ResourcePolicy.DefaultJobMemoryLimit:entry.JobMemoryLimit??entry.Plan.Budget,
+            PlanningBytes=(entry.Plan.RemoteExecution is not null&&entry.PlanningBytes is null or 0)?ResourcePolicy.DefaultPlanningBytes:entry.PlanningBytes??entry.Plan.PlanningBytes??ResourcePolicy.DefaultPlanningBytes,
             PhysicalFloorOverride=entry.PhysicalFloor,
             CommitFloorOverride=entry.CommitFloor,
             CpuRate=entry.CpuRate??ResourcePolicy.DefaultCpuRate,

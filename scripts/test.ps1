@@ -19,21 +19,21 @@ try {
   & (Join-Path $runtime 'AgentLauncher.Tests.exe') --repair-checks
   if($LASTEXITCODE -ne 0){throw 'Repair checks failed'}
   Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'repair-results.json') (Join-Path $root 'artifacts/repair-results.json')
-  foreach($suite in @('startup-queue','parallel-batch','terminal-batch','integration')){
+  foreach($suite in @('admission-integration','startup-queue','parallel-batch','terminal-batch','integration','remote-execution-integration','remote-startup-e2e')){
     $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-'+$suite+'-'+[guid]::NewGuid().ToString('N'))
-    $testArgument=if($suite -eq 'integration'){'--integration'}else{'--'+$suite+'-checks'}
+    $testArgument=if($suite -in @('integration','admission-integration','remote-execution-integration','remote-startup-e2e')){'--'+$suite}else{'--'+$suite+'-checks'}
     try { & (Join-Path $runtime 'AgentLauncher.Tests.exe') $testArgument }
     finally {
     $diagnostics=Join-Path $root ('artifacts/ci-diagnostics/'+$suite)
     New-Item -ItemType Directory -Path $diagnostics -Force | Out-Null
-    foreach($name in @('control.json','control.json.bak','monitor-pid.json','monitor-error.json','monitor-native-error.json','terminal-16-diagnostics.json','integration-results.json','attempts')){
+    foreach($name in @('control.json','control.json.bak','monitor-pid.json','monitor-error.json','monitor-native-error.json','terminal-16-diagnostics.json','integration-results.json','admission-integration-results.json','remote-execution-integration-results.json','remote-e2e-results.json','attempts')){
       $source=Join-Path $env:AGENT_LAUNCHER_TEST_ROOT $name
       if(Test-Path -LiteralPath $source){Copy-Item -LiteralPath $source -Destination $diagnostics -Recurse -Force}
     }
     }
     if($LASTEXITCODE -ne 0){throw "$suite checks failed"}
+    if($suite -eq 'integration'){Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'integration-results.json') (Join-Path $root 'artifacts/integration-results.json')}
   }
-  Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'integration-results.json') (Join-Path $root 'artifacts/integration-results.json')
   Remove-Item Env:AGENT_LAUNCHER_FAKE_SAMPLE
   if(-not $SkipUi){
     $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-ui-'+[guid]::NewGuid().ToString('N'))

@@ -493,15 +493,17 @@ public partial class MainWindow : Window
         if(memory is null)return new(AdmissionKind.Deny,"等待资源检测",0,0,0,0,0,0,0,false);
         var settings=draft.Resource??new ResourceSettings();
         var policy=ResourcePolicy.SnapshotFor(settings,memory.Total,memory.CommitLimit);
-        var reserved=budgets?.ToList()??(entries??[]).Where(e=>!Store.IsTerminal(e)).Select(e=>ResourcePolicy.BudgetOf(e.Plan,e.PoolMemoryLimit)).ToList();
+        var reserved=budgets?.ToList()??(entries??[]).Where(e=>!Store.IsTerminal(e)&&e.Plan.RemoteExecution is null).Select(e=>ResourcePolicy.BudgetOf(e.Plan,e.PoolMemoryLimit)).ToList();
         // One prepared batch shares one pool, exactly as WorkspacePreparer builds it; charging every slot on its own would bill a
         // shared pool once per slot and disable the launch button the monitor would allow.
         var poolId=ResourcePolicy.PoolModeOf(settings)==ResourcePolicy.PoolShared?Guid.NewGuid():(Guid?)null;
         var poolLimit=poolId is null?(ulong?)null:ResourcePolicy.PoolLimitOf(settings);
-        var requested=draft.Slots.Where(s=>s.Enabled).Select(s=>new BudgetItem(s.Id,"agent",settings.PlanningBytes,settings.JobMemoryLimit,poolId,poolLimit)).ToList();
+        // 远程槽位不参与本地 admission（远程进程不受本地内存限制）
+        var localSlots=draft.Slots.Where(s=>s.Enabled&&s.RemoteHostId is null).ToList();
+        var requested=localSlots.Select(s=>new BudgetItem(s.Id,"agent",settings.PlanningBytes,settings.JobMemoryLimit,poolId,poolLimit)).ToList();
         if(includeGitPreparation)
         {
-            var enabled=draft.Slots.Where(s=>s.Enabled).Select(s=>PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(s.Directory)?draft.Project:s.Directory).Key).ToList();
+            var enabled=localSlots.Select(s=>PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(s.Directory)?draft.Project:s.Directory).Key).ToList();
             if(draft.DirectoryMode=="isolated"&&enabled.GroupBy(key=>key,StringComparer.OrdinalIgnoreCase).Any(g=>g.Count()>1))
                 requested.Add(new BudgetItem(Guid.Empty,"git",ResourcePolicy.DefaultGitPlanningBytes,ResourcePolicy.GitJobMemoryLimit));
         }
@@ -551,6 +553,16 @@ public partial class MainWindow : Window
             }
             AddChangeActions(row,e);
             if(e.State=="Pending"){var revoke=new Button{Content="撤销未启动项",HorizontalAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(revoke,$"撤销未启动项 {e.Plan.Name}");revoke.Click+=async(_,_)=>await GuardAsync(async()=>{var result=await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:e.Plan.Id));ProgressText.Text=result.Message;await RefreshAsync();});row.Children.Add(revoke);}
+            if(e.State=="Disconnected")
+            {
+                // SSH 连接断开：远程进程可能仍存活，显示警告标签，防止盲目重启
+                var warning=new TextBlock{Text="⚠ SSH 连接已断开，远程进程可能仍在运行。请手动核对远程主机状态后再决定操作。",Foreground=(Brush)FindResource("Warning"),TextWrapping=TextWrapping.Wrap,Margin=new(0,4,0,0)};
+                row.Children.Add(warning);
+                var reconcile=new Button{Content="手动核对状态",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,4,0,0),ToolTip="SSH 到远程主机，检查 agent 进程是否仍在运行"};
+                AutomationProperties.SetName(reconcile,$"手动核对状态 {e.Plan.Name}");
+                reconcile.Click+=(_,_)=>{MessageBox.Show(this,$"请手动 SSH 到远程主机并检查 agent 进程状态。\n\n远程主机：{e.Plan.RemoteExecution?.Host}\n远程目录：{e.Plan.RemoteExecution?.RemoteWorkingDirectory}\n\n如果进程仍在运行，可以选择：\n1. 等待进程完成\n2. 手动终止进程\n3. 重新连接（未来版本支持）","核对远程状态",MessageBoxButton.OK,MessageBoxImage.Information);};
+                row.Children.Add(reconcile);
+            }
             if(e.State is "FailedBeforeStart" or "Revoked"&&!entries.Any(next=>next.Plan.RetryOf==e.Plan.Id))
             {
                 if(retryable.Contains(e.Plan.Id))
@@ -850,7 +862,7 @@ public partial class MainWindow : Window
         catch(InvalidDataException e){MessageBox.Show(owner,e.Message,"参数预设",MessageBoxButton.OK,MessageBoxImage.Warning);}
     }
     private async void ResourceClick(object sender,RoutedEventArgs e)=>await GuardAsync(ShowResourceSettingsAsync);
-    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates});
+    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates,["管理远程主机"]=ManageRemoteHosts});
     private async void SettingsClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
     {
         if(applyingSettings)return;applyingSettings=true;
@@ -877,6 +889,164 @@ public partial class MainWindow : Window
         await Task.Run(()=>{if(File.Exists(configPath))File.Copy(configPath,configPath+".corrupt-"+DateTime.UtcNow.ToString("yyyyMMddHHmmss"));Store.Save(configPath,recovered);});
         config=recovered;readOnly=false;RestoreBackupButton.Visibility=Visibility.Collapsed;ErrorText.Text="";SaveStatus.Text="已从备份恢复";ApplyTheme();Render();
     });
+    
+    private void RemoteHostsClick(object sender,RoutedEventArgs e)
+    {
+        if(busy||readOnly){ErrorText.Text="当前配置不可编辑，未打开远程主机管理。";return;}
+        ManageRemoteHosts(this);
+    }
+    
+    // 远程主机管理：添加/编辑/删除 VPS 配置（immutable snapshot 模式，确认后才 commit）
+    private void ManageRemoteHosts(Window owner)
+    {
+        if(busy||readOnly){ErrorText.Text="当前配置不可编辑，未打开远程主机管理。";return;}
+        // 创建 immutable snapshot（取消不修改原配置）
+        var snapshot=config.RemoteHosts.ToList();
+        var window=new Window{Owner=owner,Title="管理远程主机（VPS）",Width=Math.Min(720,SystemParameters.WorkArea.Width-32),Height=Math.Min(650,SystemParameters.WorkArea.Height-32),WindowStartupLocation=WindowStartupLocation.CenterOwner};
+        window.Style=(Style)Application.Current.Resources[typeof(Window)];
+        var panel=new StackPanel{Margin=new(24)};
+        // 同步模式用下拉选择而不是自由文本，避免拼写错误静默回退成另一种同步策略。
+        var syncChoices=new Dictionary<string,(string Value,string Label)[]>
+        {
+            ["syncMode"]=[("mutagen","mutagen（推荐：实时双向同步）"),("sshfs","sshfs（透明挂载）"),("none","none（不同步）")]
+        };
+        
+        void Build()
+        {
+            panel.Children.Clear();
+            panel.Children.Add(new TextBlock{Text="远程主机是通过 SSH 访问的 VPS，上面装有 agent CLI。添加后，可在槽位配置中选择远程主机启动 agent。",Margin=new(0,0,0,16),TextWrapping=TextWrapping.Wrap});
+            
+            var addButton=new Button{Content="添加远程主机",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,0,0,16)};
+            AutomationProperties.SetName(addButton,"添加远程主机");
+            addButton.Click+=(_,_)=>EditHost(null);
+            panel.Children.Add(addButton);
+            
+            if(snapshot.Count==0)
+            {
+                panel.Children.Add(new TextBlock{Text="尚无远程主机配置。点击「添加远程主机」开始。",Foreground=(Brush)FindResource("Muted")});
+            }
+            else
+            {
+                foreach(var host in snapshot)
+                {
+                    var card=new Border{Style=(Style)FindResource("Card"),Padding=new(12),Margin=new(0,0,0,8)};
+                    var stack=new StackPanel();
+                    stack.Children.Add(new TextBlock{Text=host.Name,FontWeight=FontWeights.SemiBold});
+                    stack.Children.Add(new TextBlock{Text=$"{host.SshUser}@{host.Address}:{host.SshPort} · agent 用户：{host.AgentUser}",FontSize=12,Foreground=(Brush)FindResource("Muted"),Margin=new(0,4,0,0)});
+                    stack.Children.Add(new TextBlock{Text=$"可用 agent：{string.Join(", ",host.AvailableAgents)} · 同步：{RemoteHostEditor.SyncModeText(host.WorkspaceSyncMode)}",FontSize=12,Foreground=(Brush)FindResource("Muted"),Margin=new(0,4,0,0)});
+                    if(!string.IsNullOrEmpty(host.SshKeyPath))stack.Children.Add(new TextBlock{Text=$"SSH 密钥：{host.SshKeyPath}",FontSize=12,Foreground=(Brush)FindResource("Muted"),Margin=new(0,4,0,0)});
+                    
+                    var buttons=new WrapPanel{Margin=new(0,8,0,0)};
+                    var editButton=new Button{Content="编辑",Margin=new(0,0,8,0)};
+                    AutomationProperties.SetName(editButton,"编辑远程主机 "+host.Name);
+                    editButton.Click+=(_,_)=>EditHost(host);
+                    var deleteButton=new Button{Content="删除"};
+                    AutomationProperties.SetName(deleteButton,"删除远程主机 "+host.Name);
+                    deleteButton.Click+=(_,_)=>DeleteRemoteHost(host.Id);
+                    buttons.Children.Add(editButton);buttons.Children.Add(deleteButton);
+                    stack.Children.Add(buttons);
+                    card.Child=stack;
+                    panel.Children.Add(card);
+                }
+            }
+            
+            var buttons2=new DockPanel{Margin=new(0,16,0,0)};
+            var applyButton=new Button{Content="应用",Width=80,Margin=new(0,0,8,0)};
+            AutomationProperties.SetName(applyButton,"应用远程主机更改");
+            applyButton.Click+=(_,_)=>{if(Commit())window.DialogResult=true;};
+            var cancelButton=new Button{Content="取消",Width=80};
+            AutomationProperties.SetName(cancelButton,"取消远程主机更改");
+            cancelButton.Click+=(_,_)=>window.DialogResult=false;
+            DockPanel.SetDock(applyButton,Dock.Right);
+            DockPanel.SetDock(cancelButton,Dock.Right);
+            buttons2.Children.Add(applyButton);
+            buttons2.Children.Add(cancelButton);
+            panel.Children.Add(buttons2);
+        }
+        
+        void EditHost(RemoteHost? host)
+        {
+            var isNew=host is null;
+            var fields=new (string Key,string Label,string Value,bool Multiline)[]
+            {
+                ("name","显示名称（如：京东云 VPS）",host?.Name??"",false),
+                ("address","IP 或域名（如：100.85.114.65）",host?.Address??"",false),
+                ("port","SSH 端口（默认 22）",host?.SshPort.ToString()??"22",false),
+                ("sshUser","SSH 登录用户（如：root）",host?.SshUser??"",false),
+                ("agentUser","agent 运行用户（如：agent）",host?.AgentUser??"",false),
+                ("agents","可用 agent 类型（逗号分隔，如：pi,kimi,qodercli）",isNew?"pi":string.Join(",",host!.AvailableAgents),false),
+                ("keyPath","SSH 私钥路径（可选，留空用 ssh-agent）",host?.SshKeyPath??"",false),
+                ("syncMode","工作区同步模式",RemoteHostEditor.SyncModeText(host?.WorkspaceSyncMode??WorkspaceSyncMode.Mutagen),false)
+            };
+            var caption=isNew?"添加远程主机":"编辑远程主机";
+            var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的槽位会应用新配置。\n同步在远程启动时生效：mutagen 为实时双向同步。",choices:syncChoices);
+            if(dialog.ShowDialog()!=true)return;
+            var name=dialog.Values["name"].Trim();
+            var address=dialog.Values["address"].Trim();
+            var error=RemoteHostEditor.Validate(name,address,dialog.Values["port"],dialog.Values["agents"]);
+            error??=RemoteHostEditor.Duplicate(snapshot,name,address,host?.Id);
+            if(error is not null){MessageBox.Show(window,error,caption,MessageBoxButton.OK,MessageBoxImage.Warning);return;}
+            var updated=new RemoteHost(
+                Id:host?.Id??Guid.NewGuid(),
+                Name:name,
+                Address:address,
+                SshPort:int.Parse(dialog.Values["port"]),
+                SshUser:dialog.Values["sshUser"].Trim(),
+                AgentUser:dialog.Values["agentUser"].Trim(),
+                AvailableAgents:RemoteHostEditor.ParseAgents(dialog.Values["agents"]),
+                SshKeyPath:string.IsNullOrWhiteSpace(dialog.Values["keyPath"])?null:dialog.Values["keyPath"].Trim(),
+                WorkspaceSyncMode:RemoteHostEditor.ParseSyncMode(dialog.Values["syncMode"],host?.WorkspaceSyncMode??WorkspaceSyncMode.Mutagen));
+            if(isNew)snapshot.Add(updated);
+            else snapshot[snapshot.FindIndex(h=>h.Id==host!.Id)]=updated;
+            Build();
+        }
+        
+        void DeleteRemoteHost(Guid id)
+        {
+            var host=snapshot.FirstOrDefault(h=>h.Id==id);
+            if(host==null)return;
+            
+            // 检查是否有槽位引用此主机（包括当前草稿和所有模板）
+            var referencedSlots=config.Draft.Slots.Where(s=>s.RemoteHostId==id).Select(s=>s.DisplayName).ToArray();
+            var referencedTemplates=config.Templates.Where(t=>t.Value.Slots.Any(s=>s.RemoteHostId==id)).Select(t=>t.Key).ToArray();
+            
+            if(referencedSlots.Length>0||referencedTemplates.Length>0)
+            {
+                var message="无法删除远程主机「"+host.Name+"」，因为以下配置正在使用：\n\n";
+                if(referencedSlots.Length>0)message+="当前草稿槽位："+string.Join("、",referencedSlots)+"\n";
+                if(referencedTemplates.Length>0)message+="模板："+string.Join("、",referencedTemplates)+"\n";
+                message+="\n请先将这些槽位改为本地执行或选择其他主机。";
+                MessageBox.Show(window,message,"删除远程主机",MessageBoxButton.OK,MessageBoxImage.Warning);
+                return;
+            }
+            
+#if INTEGRATION_TESTS
+            var confirm=TestConfirm?.Invoke($"确定删除远程主机「{host.Name}」吗？","删除远程主机",MessageBoxButton.YesNo)??MessageBox.Show(window,$"确定删除远程主机「{host.Name}」吗？","删除远程主机",MessageBoxButton.YesNo,MessageBoxImage.Question);
+#else
+            var confirm=MessageBox.Show(window,$"确定删除远程主机「{host.Name}」吗？","删除远程主机",MessageBoxButton.YesNo,MessageBoxImage.Question);
+#endif
+            if(confirm!=MessageBoxResult.Yes)return;
+            snapshot.RemoveAll(h=>h.Id==id);
+            Build();
+        }
+        
+        bool Commit()
+        {
+            // readOnly/busy 保护（与普通 Settings 保存一致）
+            if(busy||readOnly){MessageBox.Show(window,"当前配置不可编辑，远程主机更改未保存。","管理远程主机",MessageBoxButton.OK,MessageBoxImage.Warning);return false;}
+            config.RemoteHosts=snapshot;
+            QueueSave();
+            Render();
+            return true;
+        }
+        
+        Build();
+        window.Content=new ScrollViewer{Content=panel};
+        UiScale.Apply(window);
+        window.ShowDialog();
+    }
+    
+    
     private async void WorkspacesClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
     {
         var records=await Task.Run(()=>{

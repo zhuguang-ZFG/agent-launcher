@@ -105,7 +105,9 @@ public sealed class WorkspacePreparer
     {
         if(plan==null||plan.Id==Guid.Empty||plan.BatchId==Guid.Empty||plan.Position is <1 or >ResourcePolicy.MaxSlots||!ValidText(plan.Name)||!AbsolutePath(plan.Cwd))return false;
         if(plan.Workspace==null||!AbsolutePath(plan.Workspace.Path)||!ValidText(plan.Workspace.Key)||plan.Command==null)return false;
-        if(!AbsolutePath(plan.Command.Executable)||!plan.Command.Executable.EndsWith(".exe",StringComparison.OrdinalIgnoreCase)||plan.Command.Adapter is not ("exe" or "node-shim")||plan.Command.Arguments==null)return false;
+        // 远程执行：命令是远端 Agent 名（非本地 .exe 路径），不按本地可执行文件规则校验
+        if(plan.RemoteExecution is null&&(!AbsolutePath(plan.Command.Executable)||!plan.Command.Executable.EndsWith(".exe",StringComparison.OrdinalIgnoreCase)||plan.Command.Adapter is not ("exe" or "node-shim")||plan.Command.Arguments==null))return false;
+        if(plan.RemoteExecution is not null&&(string.IsNullOrWhiteSpace(plan.Command.Executable)||plan.Command.Adapter!="remote"||plan.Command.Arguments==null))return false;
         foreach(var argument in plan.Command.Arguments)if(argument==null||argument.Contains('\0'))return false;
         return true;
     }
@@ -133,7 +135,54 @@ public sealed class WorkspacePreparer
             ct.ThrowIfCancellationRequested();var cwd=PhysicalDirectory.Resolve(string.IsNullOrWhiteSpace(slot.Directory)?draft.Project:slot.Directory).Path;
             var position=draft.Slots.IndexOf(slot)+1;
             var resource=draft.Resource??new ResourceSettings();
-            plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),resource.JobMemoryLimit,PlanningBytes:resource.PlanningBytes,ResourceMode:resource.Mode,SourceSlotId:slot.Id,AgentId:slot.AgentId,PoolId:poolId));
+            
+            // 远程执行：如果槽位配置了远程主机，生成 RemoteExecution spec，跳过本地资源字段
+            RemoteExecutionSpec? remoteSpec=null;
+            if(slot.RemoteHostId is { } remoteHostId)
+            {
+                var remoteHost=configuration?.RemoteHosts.FirstOrDefault(h=>h.Id==remoteHostId);
+                if(remoteHost==null)throw new IOException($"远程主机未配置（ID：{remoteHostId}），请先在设置中添加。");
+                if(string.IsNullOrWhiteSpace(slot.RemoteDirectory))throw new IOException($"远程槽位「{slot.DisplayName}」未指定远程工作目录。");
+                if(!remoteHost.AvailableAgents.Contains(slot.AgentId))throw new IOException($"远程主机「{remoteHost.Name}」不支持 Agent「{slot.AgentId}」（可用：{string.Join(", ",remoteHost.AvailableAgents)}）。");
+                
+                // 远程槽位：不解析本地命令（远程主机上可能没有同名 CLI），只取参数
+                // 占位 CommandSpec：Executable=AgentType，Adapter=remote（远程执行分支识别）
+                var resolvedCommand=new CommandSpec(slot.AgentId, slot.Current.Arguments, "remote");
+                
+                // 构造工作区同步配置（如果远程主机启用同步）
+                WorkspaceSyncSpec? workspaceSync=null;
+                if(remoteHost.WorkspaceSyncMode!=WorkspaceSyncMode.None)
+                {
+                    workspaceSync=new WorkspaceSyncSpec(
+                        Mode:remoteHost.WorkspaceSyncMode,
+                        LocalPath:cwd,  // 本地工作区路径（当前工作目录）
+                        RemotePath:slot.RemoteDirectory,  // 远程工作目录（用户工作区，agent 可写）
+                        MutagenSessionName:null,  // 自动生成（agent-launcher-<guid>）
+                        SshfsMountPoint:null  // 自动分配（Z: 到 D:）
+                    );
+                }
+                
+                remoteSpec=new RemoteExecutionSpec(
+                    Host:remoteHost.Address,
+                    SshPort:remoteHost.SshPort,
+                    SshUser:remoteHost.SshUser,
+                    AgentUser:remoteHost.AgentUser,
+                    AgentType:slot.AgentId,
+                    RemoteWorkingDirectory:slot.RemoteDirectory,
+                    Arguments:resolvedCommand.Arguments,  // 用解析后的参数（profile/preset）
+                    MemoryLimitBytes:null,  // 远程进程不受本地内存限制
+                    SshKeyPath:remoteHost.SshKeyPath,
+                    WorkspaceSync:workspaceSync  // 工作区同步配置（如果启用）
+                );
+                
+                // 远程执行：不设置本地资源字段（PlanningBytes/ResourceMode/PoolId），不受本地 Job 限制
+                plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),false,resolvedCommand,0,SourceSlotId:slot.Id,AgentId:slot.AgentId,RemoteExecution:remoteSpec));
+            }
+            else
+            {
+                // 本地执行：正常设置资源字段
+                plans.Add(new(Guid.NewGuid(),batch,position,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),draft.DirectoryMode=="shared",Commands.Resolve(slot.AgentId,slot.Current),resource.JobMemoryLimit,PlanningBytes:resource.PlanningBytes,ResourceMode:resource.Mode,SourceSlotId:slot.Id,AgentId:slot.AgentId,PoolId:poolId));
+            }
         }
         // The enqueue-time source identity can go stale if the project directory is replaced; refuse before any preparation/Git write.
         if(expectedWorkspaceKey!=null&&!StringComparer.Ordinal.Equals(expectedWorkspaceKey,plans[0].Workspace.Key))throw new IOException("源工作区物理身份与进入队列时不一致，已停止准备；请重新确认项目目录。");
@@ -169,7 +218,9 @@ public sealed class WorkspacePreparer
             // The draft digest still matches, so slot order is authoritative; keep worktree mapping but re-resolve commands so shim/entry updates are honored.
             for(var i=0;i<record.Original.Count;i++)
             {
-                var plan=record.Original[i];var slot=draft.Slots[plan.Position-1];var fresh=Commands.Resolve(slot.AgentId,slot.Current);
+                var plan=record.Original[i];var slot=draft.Slots[plan.Position-1];
+                // 远程计划：命令来自远端 Agent 名与参数，不做本地命令解析（本机可能没有该 CLI）
+                var fresh=plan.RemoteExecution is null?Commands.Resolve(slot.AgentId,slot.Current):new CommandSpec(slot.AgentId,slot.Current.Arguments,"remote");
                 if(plan.Command.Executable!=fresh.Executable||!plan.Command.Arguments.SequenceEqual(fresh.Arguments)||plan.Command.Adapter!=fresh.Adapter||plan.SourceSlotId!=slot.Id||plan.AgentId!=slot.AgentId){record.Original[i]=plan with{Command=fresh,SourceSlotId=slot.Id,AgentId=slot.AgentId};repaired=true;}
             }
             foreach(var id in record.Completed.Keys.ToArray()){var mapped=record.Original.Single(p=>p.Id==id);var completed=record.Completed[id];if(completed.Command.Executable!=mapped.Command.Executable||!completed.Command.Arguments.SequenceEqual(mapped.Command.Arguments)||completed.Command.Adapter!=mapped.Command.Adapter||completed.SourceSlotId!=mapped.SourceSlotId||completed.AgentId!=mapped.AgentId){record.Completed[id]=completed with{Command=mapped.Command,SourceSlotId=mapped.SourceSlotId,AgentId=mapped.AgentId};repaired=true;}}

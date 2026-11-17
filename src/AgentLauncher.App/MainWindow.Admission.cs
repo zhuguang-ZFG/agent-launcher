@@ -27,7 +27,7 @@ public partial class MainWindow
         if (ConcurrencyBlocked(items.Count(item => item.Kind is null or "agent"))) throw new IOException(ConcurrencyLimitMessage);
         var binding = ReservationBindings(items);
         var reserved = ResourcePolicy.ReservedFor(status);
-        var requested = items.Select(item => ResourcePolicy.BudgetOf(item, item.PoolId is null ? null : binding.Policy.PoolMemoryLimit)).ToArray();
+        var requested = items.Where(item => item.RemoteExecution is null).Select(item => ResourcePolicy.BudgetOf(item, item.PoolId is null ? null : binding.Policy.PoolMemoryLimit)).ToArray();
         var decision = ResourcePolicy.Evaluate(status.Memory, binding.Policy, reserved, requested);
         // Conservative denies throw; practical mode allows and only surfaces the advisory reason in the launch hint.
         if (decision.Kind == AdmissionKind.Deny) throw new IOException(decision.Reason);
