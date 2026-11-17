@@ -168,8 +168,9 @@ IF EXIST "%dp0%\node.exe" (
 endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue-agent.js" %*
 """);
         File.WriteAllText(script, "const fs = require('node:fs');\n"
-            + "if (process.argv[2] === '--version') { console.log('omp/18.18.8'); } else {\n"
-            + $"fs.appendFileSync({JsonSerializer.Serialize(output)}, JSON.stringify({{ cwd: process.cwd(), args: process.argv.slice(2) }}) + '\\n');\n}}\n");
+            + "if (process.argv[2] === '--version') { console.log('omp/18.18.8'); } else if(process.argv[2] === '--help') { console.log('Usage: omp [messages...]\\n --print  Non-interactive mode\\n --resume <id>'); } else {\n"
+            + $"fs.appendFileSync({JsonSerializer.Serialize(output)}, JSON.stringify({{ cwd: process.cwd(), args: process.argv.slice(2) }}) + '\\n');\n"
+            + "if(process.argv.some(arg=>arg.includes('异常任务夹具')))process.exit(7);\n}\n");
         var arguments = new[] { "", "中文 value", "literal; &|%", "tail\\" };
         var priorMinimize = config.MinimizeAfterLaunch;
         var priorSample = Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE");
@@ -229,7 +230,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
                     if (dialog is null) await Task.Delay(50);
                 }
                 check("ACC-B10 the requested session dialog opens", dialog is not null);
-                ReviewFind<TextBox>(dialog!).First().Text = value;
+                dialog!.SetValue("session",value);
                 ReviewFind<Button>(dialog!).Single(button => apply ? button.IsDefault : button.IsCancel).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 if (!apply && dialog!.IsVisible) dialog.Close();
                 await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
@@ -303,6 +304,19 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             finally { File.WriteAllText(script, verifiedScript); }
             await UpdateTasksAsync(book => TaskBookOps.Dequeue(book, taskId), "版本变化夹具清理失败");
             await RunTaskRetryChecksAsync(check, taskId, frozenResume);
+            Guid deliveryId=default;
+            await UpdateTasksAsync(book=>{var card=TaskBookOps.Create(book,"自动交付",root,"omp",new(){Executable=shim},"异常任务夹具\n中文引号 \" 保真",["验收要求"],"shared",null,0);card.DeliveryMode="automatic";deliveryId=card.Id;},"自动交付夹具失败");
+            await EnqueueTaskAsync(deliveryId);
+            var deliveryEntry=taskStore.Load().Queue.Single(entry=>entry.TaskId==deliveryId);
+            var prompt=TaskDelivery.Prompt(taskStore.Load().Tasks.Single(card=>card.Id==deliveryId));
+            check("UX12 queue freezes automatic instructions as one argv value",deliveryEntry.Command.Arguments.TakeLast(3).SequenceEqual(new[]{"--print","--",prompt}));
+            await DispatchNextAsync();var deliveryRun=TaskBookOps.LastRun(taskStore.Load(),deliveryId)!;
+            for(var i=0;i<100&&ReadStoreSettled<Receipt>(Store.ReceiptPath(deliveryRun.AttemptId))?.Phase!="Finished";i++)await Task.Delay(100);
+            check("UX12 automatic task executes through real Terminal and retains exit code",ReadStoreSettled<Receipt>(Store.ReceiptPath(deliveryRun.AttemptId)) is{Phase:"Finished",ExitCode:7});
+            await ReconcileTaskRunsAsync();
+            check("UX12 abnormal automatic task displays failure with diagnostics",TaskBookOps.LastRun(taskStore.Load(),deliveryId) is{State:"Failed",Detail:var failure}&&failure.Contains("7"));
+            var delivered=File.ReadAllLines(output).Select(line=>JsonSerializer.Deserialize<JsonElement>(line)).Last().GetProperty("args").EnumerateArray().Select(value=>value.GetString()).ToArray();
+            check("UX12 automatic prompt reaches Agent once with exact Chinese and newline content",delivered.TakeLast(3).SequenceEqual(new[]{"--print","--",prompt})&&delivered.Count(arg=>arg==prompt)==1);
         }
         finally
         {

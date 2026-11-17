@@ -16,7 +16,7 @@ internal static class MemoryFixture
         Thread.Sleep(milliseconds);
         VirtualFree(address,UIntPtr.Zero,0x8000);return 11;
     }
-    public static int Cycle(string prefix)
+    public static int Cycle(string prefix,bool verifyAfterTrim=false)
     {
         var address=VirtualAlloc(IntPtr.Zero,(UIntPtr)(64UL*1024*1024),0x3000,4);
         if(address==IntPtr.Zero)return 37;
@@ -24,6 +24,16 @@ internal static class MemoryFixture
         {
             for(var offset=0;offset<64*1024*1024;offset+=4096)Marshal.WriteByte(address,offset,1);
             File.WriteAllText(prefix+".allocated","ready");
+            if(verifyAfterTrim)
+            {
+                if(!Wait(prefix+".touch"))return 40;
+                for(var offset=0;offset<64*1024*1024;offset+=4096)
+                {
+                    if(Marshal.ReadByte(address,offset)!=1)return 41;
+                    Marshal.WriteByte(address,offset,2);
+                }
+                File.WriteAllText(prefix+".touched","verified");
+            }
             if(!Wait(prefix+".free"))return 38;
         }
         finally{VirtualFree(address,UIntPtr.Zero,0x8000);}

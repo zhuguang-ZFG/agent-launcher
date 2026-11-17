@@ -16,7 +16,7 @@ public sealed class TaskStore
     public TaskBook ReadBackup()
     {
         var book = Store.Read<TaskBook>(path + ".bak") ?? throw new IOException("没有可读取的任务备份。");
-        if (book.SchemaVersion is 1 or 2) book.SchemaVersion = TaskSchema.Current;
+        if (book.SchemaVersion is 1 or 2 or 3) book.SchemaVersion = TaskSchema.Current;
         book.Validate();
         return book;
     }
@@ -36,7 +36,7 @@ public sealed class TaskStore
             var backupBytes = ReadBoundedBytes(path + ".bak");
             if (!string.Equals(Convert.ToHexString(SHA256.HashData(backupBytes)), expectedFingerprint, StringComparison.Ordinal)) throw new IOException("任务备份已变化，请刷新并重新核对。");
             var book = JsonSerializer.Deserialize<TaskBook>(backupBytes, Store.Json) ?? throw new InvalidDataException("任务备份为空。");
-            if (book.SchemaVersion is 1 or 2) book.SchemaVersion = TaskSchema.Current;
+            if (book.SchemaVersion is 1 or 2 or 3) book.SchemaVersion = TaskSchema.Current;
             book.Validate();
             book.Revision = Math.Max(checked(book.Revision + 1), DateTimeOffset.UtcNow.UtcTicks);
             if (File.Exists(path))
@@ -72,7 +72,7 @@ public sealed class TaskStore
             throw new InvalidDataException("任务主文件缺失，但仍有 .bak 备份；队列已停用。请先人工核对并恢复主文件，不会自动覆盖备份。");
         book ??= new TaskBook();
         // Old books have neither archived cards nor deferred intents. Upgrade only in memory until a successful edit.
-        if (book.SchemaVersion is 1 or 2) book.SchemaVersion = TaskSchema.Current;
+        if (book.SchemaVersion is 1 or 2 or 3) book.SchemaVersion = TaskSchema.Current;
         book.Validate();
         return book;
     }

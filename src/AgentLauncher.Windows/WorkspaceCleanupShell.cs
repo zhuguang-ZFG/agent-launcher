@@ -9,6 +9,12 @@ namespace AgentLauncher.Windows;
 // git itself refuses a dirty tree, which is the second line of defense after the porcelain check.
 public static class WorkspaceCleanupShell
 {
+    public static async Task<IReadOnlyList<CleanupFile>> InventoryAsync(string git,string target,CancellationToken ct)
+    {
+        var result=await ReviewGit.CaptureAsync(git,target,["status","--porcelain=v1","-z","--untracked-files=all","--ignored=matching"],ct,30,256*1024);
+        RequireComplete(result,"列出阻止清理的文件");
+        return CleanupInventory.Parse(Encoding.UTF8.GetString(result.Output));
+    }
     // Occupancy must compare physical identity, not raw strings: monitor entries carry Resolve()d worktree roots
     // (final path name + volume:index key) while workspace records keep the original spelling. Overlaps also covers
     // a session anchored in any subdirectory of the checkout. Returns null when occupancy cannot be proven either

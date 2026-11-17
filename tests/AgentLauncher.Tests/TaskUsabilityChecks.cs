@@ -107,7 +107,7 @@ internal static class TaskUsabilityChecks
             var path = Path.Combine(temp, "ux-schema2.json"); var book = new TaskBook(); Create(book);
             book.SchemaVersion = 2; Store.Save(path, book); var before = File.ReadAllBytes(path);
             var migrated = new TaskStore(path).Load();
-            Assert(migrated.SchemaVersion == 3 && !migrated.Tasks.Single().Archived && migrated.LastDispatchTaskIds is null && before.SequenceEqual(File.ReadAllBytes(path)), "schema2 migration changed disk or invented new intent");
+            Assert(migrated.SchemaVersion == TaskSchema.Current && !migrated.Tasks.Single().Archived && migrated.LastDispatchTaskIds is null && before.SequenceEqual(File.ReadAllBytes(path)), "schema2 migration changed disk or invented new intent");
         });
     }
 

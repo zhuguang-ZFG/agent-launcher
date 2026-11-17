@@ -30,7 +30,7 @@
     </Border>
     <DockPanel DockPanel.Dock="Top" Margin="2,0,2,4">
      <TextBlock DockPanel.Dock="Right" x:Name="SelectionSummary" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
-     <TextBlock x:Name="AgentHeader" Text="AGENT" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource Muted}" VerticalAlignment="Center"/>
+     <TextBlock x:Name="AgentHeader" Text="Agent" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource Muted}" VerticalAlignment="Center"/>
     </DockPanel>
     <Border DockPanel.Dock="Bottom" x:Name="RailResource" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="8" Padding="8,4" Margin="0,8,0,0">
      <DockPanel>
@@ -69,8 +69,15 @@
    </DockPanel>
   </Border>
   <Grid Grid.Column="1">
-   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-   <ScrollViewer x:Name="ContentScroll" Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+   <Grid Margin="16,8,16,0">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+    <Button x:Name="ProjectSwitchButton" Style="{StaticResource QuietButton}" Click="ProjectSwitchClick" HorizontalContentAlignment="Stretch" Margin="0,0,8,0" AutomationProperties.Name="切换项目和最近项目">
+     <DockPanel><TextBlock DockPanel.Dock="Right" Text=" ▾" VerticalAlignment="Center"/><TextBlock x:Name="ProjectSwitchText" Text="选择项目…" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" VerticalAlignment="Center"/></DockPanel>
+    </Button>
+    <Button x:Name="QuickActionsButton" Grid.Column="1" Style="{StaticResource QuietButton}" Click="QuickActionsClick" ToolTip="Ctrl+K · 搜索操作、Agent、最近项目和活动会话" AutomationProperties.Name="快捷操作 Ctrl+K"><TextBlock x:Name="QuickActionsText" Text="快捷操作  Ctrl+K" TextWrapping="NoWrap"/></Button>
+   </Grid>
+   <ScrollViewer x:Name="ContentScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <StackPanel x:Name="Editor" Margin="24,16,24,24">
      <Grid x:Name="WorkGrid">
       <Grid.ColumnDefinitions><ColumnDefinition x:Name="ConfigColumn" Width="*"/><ColumnDefinition x:Name="SummaryColumn" Width="320"/></Grid.ColumnDefinitions>
@@ -149,6 +156,7 @@
            <ComboBoxItem Content="并发 4" Tag="4"/>
           </ComboBox>
           <Button x:Name="QueueToggleButton" Content="执行队列" Click="QueueToggleClick" AutomationProperties.AutomationId="QueueToggle" Margin="0,0,8,0" VerticalAlignment="Top"/>
+          <Button Content="后台运行" Click="BackgroundClick" ToolTip="收起到通知区域，队列和通知继续运行；双击图标或再次打开启动器可恢复" Margin="0,0,8,0" VerticalAlignment="Top"/>
           <TextBlock x:Name="QueueStatusText" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"/>
          </DockPanel>
          <TextBlock Text="实际等待顺序（优先级高的先执行，同优先级按入队顺序）" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,6"/>
@@ -162,7 +170,7 @@
      </Grid>
     </StackPanel>
    </ScrollViewer>
-   <Border Grid.Row="1" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
+   <Border Grid.Row="2" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
     <StackPanel>
      <Border x:Name="ErrorBanner" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12,8" Margin="0,0,0,12">
       <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Visible"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ErrorText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>

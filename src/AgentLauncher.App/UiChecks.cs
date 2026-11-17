@@ -363,6 +363,9 @@ public partial class MainWindow
             taskBook=savedBook;RenderTasks();
             status=savedStatus;RenderMonitorStatus();
         }
+        await RunQuickActionsChecksAsync(folder,Check,ResizeForCheckAsync);
+        await RunSlotConvenienceChecksAsync(folder,Check,ResizeForCheckAsync);
+        await RunPracticalFixChecksAsync(folder,Check);
         // P1 session notifications: runtime transitions only, deduped, rate-limited and path-safe.
         var notifier = SessionNotifier.For(this);
         notifier.Reset(); notifier.TestMode = true;

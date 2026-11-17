@@ -2,7 +2,7 @@ using System.Text;
 
 namespace AgentLauncher.Core;
 
-/// <summary>User-facing task text and ordering. No command is built or executed from this text.</summary>
+/// <summary>User-facing task text and ordering. Delivery adapters opt in explicitly to using the brief as one argv value.</summary>
 public static class TaskUsability
 {
     public static string StateLabel(string state) => state switch
@@ -27,7 +27,7 @@ public static class TaskUsability
     }
 
     public static string CloseQueueNotice(int waiting, bool dispatching) => waiting > 0
-        ? $"还有 {waiting} 项等待执行。关闭窗口会暂停后续排队；重新打开后需要点「继续执行」。已运行的 Agent 会继续运行。\n\n关闭并暂停队列？"
+        ? $"还有 {waiting} 项等待执行。关闭窗口会暂停后续排队；重新打开后需要点「继续执行」。已运行的 Agent 会继续运行。\n如需继续派发，可取消关闭并点击「后台运行」。\n\n关闭并暂停队列？"
         : dispatching ? "当前正在处理启动。关闭会停止后续准备，已运行的 Agent 会继续运行。\n\n关闭窗口？" : "";
 
     public static string SessionGuide(string agentId) => agentId switch

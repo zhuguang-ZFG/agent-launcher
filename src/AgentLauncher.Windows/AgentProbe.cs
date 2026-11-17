@@ -22,7 +22,7 @@ public static class AgentProbe
         var probe = QoderMemoryGuard.Detach(OmpMemoryGuard.Detach(spec));
         var result = await RunAsync(probe with { Arguments = [.. probe.Arguments, "--version"] }, cwd, timeout, ct: ct);
         if (fingerprint != Fingerprint(spec)) throw new InvalidDataException("版本核对期间程序已变化，请重试核对。");
-        var version = result is { ExitCode: 0 } ? AgentVersion.Parse(result.Output + "\n" + result.Error) : null;
+        var version = result is { ExitCode: 0,TimedOut:false,Truncated:false } ? AgentVersion.Parse(result.Output + "\n" + result.Error) : null;
         var note = result.TimedOut ? "版本探测超时；预设不可用，仍可手动填写参数。"
             : result.Truncated ? "版本输出超出上限（可能不是带 --version 的 CLI）；预设不可用。"
             : result.ExitCode is null ? "版本探测未得到退出码；预设不可用。"
@@ -134,7 +134,10 @@ public static class AgentProbe
             if (Native.ResumeThread(thread) == uint.MaxValue) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             var outTask = Task.Run(() => Drain(outStream, maxBytes));
             var errTask = Task.Run(() => Drain(errStream, maxBytes));
-            var wait = Native.WaitForSingleObject(process, (uint)Math.Clamp(timeout.TotalMilliseconds, 1, 120000));
+            var deadline=System.Diagnostics.Stopwatch.StartNew();
+            uint wait;
+            do { ct.ThrowIfCancellationRequested(); wait=Native.WaitForSingleObject(process,50); }
+            while(wait==258&&deadline.Elapsed.TotalMilliseconds<Math.Clamp(timeout.TotalMilliseconds,1,120000));
             var timedOut = wait == 258;
             if (wait == uint.MaxValue) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             ct.ThrowIfCancellationRequested();

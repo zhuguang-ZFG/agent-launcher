@@ -39,7 +39,8 @@ public partial class MainWindow
         foreach (var entry in TaskUsability.OrderedQueue(book))
         {
             var task = book.Tasks.Single(candidate => candidate.Id == entry.TaskId);
-            var row = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            var row = new StackPanel { Tag = entry.Id, Focusable = true, Margin = new Thickness(0, 0, 0, 8) };
+            AutomationProperties.SetName(row, "等待项 " + task.Name);
             var position = entry.Deferred ? "暂缓" : !InQueueScope(task.Id) ? "范围外" : $"第 {++rank} 项";
             var scope = !InQueueScope(task.Id) ? " · 不在本批次内" : "";
             row.Children.Add(new TextBlock { Text = $"{position} · {task.Name} · 优先级 {entry.Priority}{scope}", TextWrapping = TextWrapping.Wrap });
@@ -106,7 +107,7 @@ public partial class MainWindow
     {
         var window = new Window { Owner = this, Title = "复制任务说明 · " + task.Name, Width = Math.Min(680, SystemParameters.WorkArea.Width - 32), Height = Math.Min(580, SystemParameters.WorkArea.Height - 32), WindowStartupLocation = WindowStartupLocation.CenterOwner };
         var root = new DockPanel { Margin = new Thickness(20) };
-        var note = new TextBlock { Text = "启动器尚未把这些内容发送给 Agent。复制后，请粘贴到本任务对应的终端，并确认工作目录。", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12) };
+        var note = new TextBlock { Text = task.DeliveryMode=="manual" ? "该任务采用手动交付，启动器尚未把这些内容发送给 Agent。复制后，请粘贴到本任务对应的终端，并确认工作目录。" : "该任务启用了自动交付，新启动时会发送入队时的说明和验收要求；续接不会重发。此处是当前编辑内容，请勿重复粘贴已交付任务。", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12) };
         DockPanel.SetDock(note, Dock.Top); root.Children.Add(note);
         var actions = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) }; DockPanel.SetDock(actions, Dock.Bottom); root.Children.Add(actions);
         var text = new TextBox { Text = TaskUsability.Brief(task), IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };

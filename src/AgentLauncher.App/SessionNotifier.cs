@@ -76,11 +76,11 @@ internal sealed class SessionNotifier
                 Add("failed", name + " 启动前失败", "进程未启动，可到运行记录查看。");
             else if ((entry.State is "Unknown" or "NeedsReconciliation") && before.State is not ("Unknown" or "NeedsReconciliation"))
                 Add("unknown", name + " 状态待核对", "占用尚未确认，请查看运行记录。");
-            else if ((entry.State is "Settled" or "Exited" or "Finished") && before.State is not ("Settled" or "Exited" or "Finished"))
+            else if ((entry.State is "Settled" or "Exited" or "Finished") && before.State != entry.State && before.State is not ("Settled" or "Finished"))
             {
-                var code = ExtractExitCode(detail);
-                Add("finished", name + " 会话已结束",
-                    code is null ? "受管进程已全部退出。" : $"退出码 {code}，受管进程已全部退出。");
+                var code = entry.ExitCode ?? ExtractExitCode(detail);
+                Add(entry.State == "Exited" ? "agent-exited" : "finished", name + (entry.State == "Exited" ? " Agent 已退出" : " 会话已结束"),
+                    entry.State == "Exited" ? "Agent 已退出，派生工具仍在运行，请核对运行记录。" : code is null ? "受管进程已全部退出。" : $"退出码 {code}，受管进程已全部退出。");
             }
 
             // A resource-waiting entry (Pending/Creating) entering Started means its queue wait was released.
@@ -126,7 +126,7 @@ internal sealed class SessionNotifier
     {
         try
         {
-            owner.Activate();
+            if(owner is MainWindow main)main.RestoreBackground();else owner.Activate();
             if (owner.FindName("SessionExpander") is Expander expander) expander.IsExpanded = true;
             if (owner.FindName("Sessions") is Panel panel)
             {

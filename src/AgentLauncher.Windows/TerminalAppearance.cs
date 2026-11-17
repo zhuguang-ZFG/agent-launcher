@@ -35,8 +35,7 @@ public static class TerminalAppearance
         // (TerminalProfile); the user's own settings.json is never read or written.
         if(profile!=null){arguments.Add("--profile");arguments.Add(profile);}
         arguments.Add("--title");
-        var folder=Path.GetFileName(item.Cwd.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar));
-        arguments.Add($"{item.Position:00}  {DisplayText(item.Name,40)} · {DisplayText(folder,40)}".Replace(";","\\;"));
+        arguments.Add(PaneTitle(item).Replace(";","\\;"));
         arguments.Add("--suppressApplicationTitle");
         arguments.Add("--startingDirectory");arguments.Add(item.Cwd.Replace(";","\\;"));
         if(!useSystemColors)
@@ -44,6 +43,13 @@ public static class TerminalAppearance
             arguments.Add("--colorScheme");arguments.Add("One Half Dark");
             arguments.Add("--tabColor");arguments.Add(TabColor(item));
         }
+    }
+
+    public static string PaneTitle(LaunchItem item)=>LegacyPaneTitle(item)+" · "+item.BatchId.ToString("N");
+    public static string LegacyPaneTitle(LaunchItem item)
+    {
+        var folder=Path.GetFileName(item.Cwd.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar));
+        return $"{item.Position:00}  {DisplayText(item.Name,40)} · {DisplayText(folder,40)}";
     }
 
     private static string TabColor(LaunchItem item)

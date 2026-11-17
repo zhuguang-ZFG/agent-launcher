@@ -5,6 +5,8 @@ namespace AgentLauncher.Windows;
 /// <summary>工作区相对基线的只读变更概览；Ok=false 时其余字段为默认值且 Error 给出可读原因。</summary>
 public sealed record WorktreeChanges(bool Ok,string Branch,string Baseline,bool HasUpstream,int UncommittedCount,string DiffStat,int Ahead,int Behind,string Error)
 {
+    public string[] UntrackedFiles { get; init; } = [];
+    public bool PinnedBaseline { get; init; }
     public static WorktreeChanges Fail(string error)=>new(false,"","",false,0,"",0,0,error);
 }
 
@@ -24,7 +26,7 @@ public static class GitChanges
     private static string? ghCacheSignature;
 
     /// <summary>只读核对当前分支、上游基线、未提交条目、diff --stat 与 ahead/behind。</summary>
-    public static WorktreeChanges GetWorktreeChanges(string worktreePath,string? gitPath=null)
+    public static WorktreeChanges GetWorktreeChanges(string worktreePath,string? gitPath=null,string? baselineCommit=null)
     {
         var invalid=Resolve(worktreePath,gitPath,out var root,out var git);
         if(invalid is not null)return WorktreeChanges.Fail(invalid);
@@ -41,7 +43,13 @@ public static class GitChanges
         var upstream=Git(git,root,["rev-parse","--abbrev-ref","--symbolic-full-name","@{u}"]);
         string baseline;
         var hasUpstream=upstream.Ok&&upstream.Text.Length>0;
-        if(hasUpstream)baseline=upstream.Text;
+        if(baselineCommit is not null)
+        {
+            if(baselineCommit.Length is not (40 or 64)||!baselineCommit.All(Uri.IsHexDigit))return WorktreeChanges.Fail("任务基线提交无效，不能改用其他分支替代。");
+            baseline=baselineCommit;
+            if(!Git(git,root,["cat-file","-e",baseline+"^{commit}"]).Ok)return WorktreeChanges.Fail("任务启动时的基线提交已不可读取，请恢复该提交后再核对。");
+        }
+        else if(hasUpstream)baseline=upstream.Text;
         else
         {
             var head=Git(git,root,["symbolic-ref","--short","refs/remotes/origin/HEAD"]);
@@ -51,9 +59,12 @@ public static class GitChanges
             else return WorktreeChanges.Fail("无法确定对比基线：仓库没有上游，也没有 main / master 默认分支。");
         }
 
-        var status=Git(git,root,["status","--porcelain"]);
+        var status=Git(git,root,["status","--porcelain=v1","-z","--untracked-files=all"]);
         if(!status.Ok)return WorktreeChanges.Fail("读取未提交条目失败："+status.Error);
-        var uncommitted=status.Text.Length==0?0:status.Text.Split('\n',StringSplitOptions.RemoveEmptyEntries).Length;
+        var uncommitted=0;var entries=status.Text.Split('\0',StringSplitOptions.RemoveEmptyEntries);
+        for(var index=0;index<entries.Length;index++){uncommitted++;if(entries[index].Length>=2&&(entries[index][0] is 'R' or 'C'||entries[index][1] is 'R' or 'C'))index++;}
+        var untracked=Git(git,root,["ls-files","--others","--exclude-standard","-z"]);
+        if(!untracked.Ok)return WorktreeChanges.Fail("读取新增文件失败："+untracked.Error);
 
         var diff=Git(git,root,["diff","--stat",baseline]);
         if(!diff.Ok)return WorktreeChanges.Fail("读取变更统计失败："+diff.Error);
@@ -63,7 +74,14 @@ public static class GitChanges
         var parts=counts.Text.Split((char[]?)null,StringSplitOptions.RemoveEmptyEntries);
         if(parts.Length!=2||!int.TryParse(parts[0],out var behind)||!int.TryParse(parts[1],out var ahead))
             return WorktreeChanges.Fail("无法解析 ahead/behind："+counts.Text);
-        return new(true,branch,baseline,hasUpstream,uncommitted,diff.Text,ahead,behind,"");
+        return new(true,branch,baseline,hasUpstream,uncommitted,diff.Text,ahead,behind,""){UntrackedFiles=untracked.Text.Split('\0',StringSplitOptions.RemoveEmptyEntries),PinnedBaseline=baselineCommit is not null};
+    }
+
+    public static string? ReadHead(string directory)
+    {
+        var git=Commands.FindExe("git.exe");if(git is null)return null;
+        var result=Git(git,directory,["rev-parse","--verify","HEAD"]);
+        return result.Ok&&result.Text.Length is 40 or 64&&result.Text.All(Uri.IsHexDigit)?result.Text:null;
     }
 
     /// <summary>检测 gh 是否存在并完成认证，结果缓存 60 秒；缓存键包含 gh 路径与 PATH，便于 PATH 隔离后立即失效。</summary>
@@ -106,7 +124,8 @@ public static class GitChanges
         var capture=ReviewGit.CaptureAsync(git,cwd,args,CancellationToken.None,timeout,1024*1024).GetAwaiter().GetResult();
         if(capture.TimedOut)return(false,"",$"Git 操作超时（{timeout} 秒）。");
         if(capture.Truncated)return(false,"","Git 输出超出边界。");
-        var text=Encoding.UTF8.GetString(capture.Output).Replace("\r\n","\n").TrimEnd('\n');
+        var raw=Encoding.UTF8.GetString(capture.Output);
+        var text=args.Contains("-z")?raw:raw.Replace("\r\n","\n").TrimEnd('\n');
         if(capture.Code!=0)return(false,"",ReviewGit.Clean(capture.Error));
         return(true,text,"");
     }

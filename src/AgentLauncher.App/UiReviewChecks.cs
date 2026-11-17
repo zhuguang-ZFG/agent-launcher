@@ -22,6 +22,7 @@ public partial class MainWindow
     }
     private static void ReviewRemoveFirstSlot(MainWindow owner)
     {
+        owner.NavigateToSlot(owner.config.Draft.Slots[0].Id);
         var host=ReviewFind<MenuButton>(owner.SlotList).First();((Button)host.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         host.menu.Items.OfType<MenuItem>().Single(item=>(item.Header as string)=="移除").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));host.menu.IsOpen=false;
     }
@@ -157,6 +158,7 @@ public partial class MainWindow
         SelectProject(Path.Combine(Store.Root,"cr09-other-project"));
         Check("CR09 project switch drops stale removal undo",undoRemovals.Count==0&&!ReviewFind<Button>(Sessions).Any(button=>button.Content as string=="撤销移除"));
         ReviewRemoveFirstSlot(this);config.RecentProjects.Add(Store.Root);Render();Recent.SelectedItem=Store.Root;
+        await recentProjectTask;
         Check("CR09 recent project switch drops stale removal undo",config.Draft.Project==Store.Root&&undoRemovals.Count==0);
         config.SaveTemplate("cr09-restore");ReviewRemoveFirstSlot(this);Render();
         Templates.SelectedItem=Templates.Items.OfType<ComboBoxItem>().Single(item=>item.Tag as string=="cr09-restore");

@@ -247,6 +247,20 @@ internal static class ReviewChecks
             Assert(changes.Baseline is "master" or "main","fallback baseline mismatch: "+changes.Baseline);
         });
 
+        test("UX12 changes include untracked-only files and retain launch commit when branch advances",()=>
+        {
+            var repo=NewRepo("fixed-baseline");File.WriteAllText(Path.Combine(repo,"base.txt"),"base\n");Commit(repo,"base");
+            var baseline=GitChanges.ReadHead(repo)!;
+            File.WriteAllText(Path.Combine(repo,"新增 中文.txt"),"new\n");
+            var first=GitChanges.GetWorktreeChanges(repo,git,baseline);
+            Assert(first.Ok&&first.PinnedBaseline&&first.UntrackedFiles.SequenceEqual(new[]{"新增 中文.txt"})&&first.UncommittedCount==1,"untracked-only task disappeared");
+            Commit(repo,"advance default branch");
+            var moved=GitChanges.GetWorktreeChanges(repo,git,baseline);
+            Assert(moved.Ok&&moved.Baseline==baseline&&moved.Ahead==1&&moved.DiffStat.Length>0,"moving branch erased task diff");
+            Assert(!GitChanges.GetWorktreeChanges(repo,git,new string('f',40)).Ok,"missing launch commit silently fell back");
+            ReviewFixtureGit.Require(git,repo,"mv","base.txt","renamed.txt");
+            Assert(GitChanges.GetWorktreeChanges(repo,git,baseline).UncommittedCount==1,"rename counted twice");
+        });
         test("P3 GitChanges resolves upstream baseline and counts against a bare remote",()=>
         {
             var bare=Path.Combine(fixtureRoot,"git-changes-remote-"+Guid.NewGuid().ToString("N")+".git");Directory.CreateDirectory(bare);

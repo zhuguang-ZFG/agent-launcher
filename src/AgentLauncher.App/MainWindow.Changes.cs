@@ -40,13 +40,16 @@ public partial class MainWindow
 
     private async Task ViewChangesAsync(ControlEntry entry)
     {
-        var changes = await Task.Run(() => GitChanges.GetWorktreeChanges(entry.Plan.Cwd));
+        var baseline = await Task.Run(() => LaunchEvidence.ReadBaseline(entry.Plan));
+        var changes = await Task.Run(() => GitChanges.GetWorktreeChanges(entry.Plan.Cwd, baselineCommit: baseline));
         if (!changes.Ok) { ErrorText.Text = "查看变更失败：" + changes.Error; return; }
-        var head = changes.HasUpstream
+        var head = changes.PinnedBaseline ? $"{changes.Branch}（启动时提交 {changes.Baseline}，新增提交 {changes.Ahead}）" : changes.HasUpstream
             ? $"{changes.Branch}（基线 {changes.Baseline}，领先 {changes.Ahead} / 落后 {changes.Behind}）"
             : $"{changes.Branch}（无上游分支，参照 {changes.Baseline}）";
         var stat = (changes.UncommittedCount > 0 ? $"未提交更改 {changes.UncommittedCount} 项。" : "工作区干净。")
-            + (changes.DiffStat.Length > 0 ? "\n\n" + changes.DiffStat : "\n\n与基线没有差异。");
+            + (changes.DiffStat.Length > 0 ? "\n\n已跟踪文件：\n" + changes.DiffStat : "\n\n已跟踪文件与比较基线没有差异。")
+            + (changes.UntrackedFiles.Length > 0 ? "\n\n新增文件（尚未跟踪，未计入上方统计）：\n" + string.Join("\n",changes.UntrackedFiles.Select(path=>System.Text.Json.JsonSerializer.Serialize(path,new System.Text.Json.JsonSerializerOptions{Encoder=System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping}))) : "")
+            + (changes.PinnedBaseline ? "\n\n比较基准是启动时的提交，可能包含启动前已有的未提交修改；共享目录中的其他任务修改也会显示。" : "\n\n此记录没有可用的启动基线，以上是当前参考分支的比较结果，不能视为本次任务独有的改动。");
         var dialog = new FormWindow(this, "查看变更 · " + entry.Plan.Name,
             [("head", "分支与基线", head, false), ("stat", "变更统计（git diff --stat）", stat, true)],
             "此处内容只读核对用，编辑不会保存。审阅、推送与创建 PR 请用任务卡的「审查改动」（先钉住已核对内容，不推可变分支）。");

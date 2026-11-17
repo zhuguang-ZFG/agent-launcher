@@ -20,13 +20,21 @@ public sealed class Slot
     [JsonRequired] public bool Enabled { get; set; }
     [JsonRequired] public string AgentId { get; set; } = "pi";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? CustomName { get; set; }
-    [JsonIgnore] public string DisplayName=>AgentId=="custom"&&!string.IsNullOrWhiteSpace(CustomName)?CustomName:Agents.Get(AgentId).Name;
+    [JsonIgnore] public string DisplayName=>!string.IsNullOrWhiteSpace(CustomName)?CustomName:Agents.Get(AgentId).Name;
     [JsonRequired] public string Directory { get; set; } = "";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] public bool RequiresDirectory { get; set; }
     public string Note { get; set; } = "";
     [JsonRequired] public Dictionary<string, AgentProfile> Profiles { get; set; } = [];
     [JsonIgnore] public AgentProfile Current => Profiles.GetValueOrDefault(AgentId) ?? new();
-    public Slot Copy() => new() { Id = Id, Enabled = Enabled, AgentId = AgentId, CustomName = CustomName, Directory = Directory, RequiresDirectory = RequiresDirectory, Note = Note, Profiles = Profiles.ToDictionary(p => p.Key, p => p.Value.Copy()) };
+    public Slot Copy() => new() { Id = Id, Enabled = Enabled, AgentId = AgentId, CustomName = CustomName, Directory = Directory, RequiresDirectory = RequiresDirectory, Note = Note, RemoteHostId = RemoteHostId, RemoteDirectory = RemoteDirectory, Profiles = Profiles.ToDictionary(p => p.Key, p => p.Value.Copy()) };
+    public Slot Duplicate()
+    {
+        var duplicate = Copy();
+        duplicate.Id = Guid.NewGuid();
+        duplicate.Enabled = false;
+        duplicate.CustomName = DisplayName + " 副本";
+        return duplicate;
+    }
 }
 public sealed class Draft
 {
@@ -116,6 +124,7 @@ public sealed class ControlEntry
     public string Digest { get; set; } = "";
     public DateTimeOffset Created { get; set; } = DateTimeOffset.UtcNow;
     public string Detail { get; set; } = "等待终端启动确认";
+    [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public int? ExitCode { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? Mode { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? JobMemoryLimit { get; set; }
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public ulong? PlanningBytes { get; set; }

@@ -4,8 +4,8 @@ namespace AgentLauncher.Core;
 
 public static class TaskSchema
 {
-    // Version 3 adds archived cards and deferred queue intents; older dispatchers must reject these semantics.
-    public const int Current = 3;
+    // Version 4 adds explicit prompt delivery and program re-verification for session resume.
+    public const int Current = 4;
     public const int MaxNameLength = 120;
     public const int MaxDescriptionLength = 20000;
     public const int MaxAcceptanceItems = 32;
@@ -36,6 +36,7 @@ public sealed class TaskCard
     [JsonRequired] public string AgentId { get; set; } = "pi";
     [JsonRequired] public AgentProfile Profile { get; set; } = new();
     public string Description { get; set; } = "";
+    public string DeliveryMode { get; set; } = "manual";
     [JsonRequired] public List<AcceptanceItem> Acceptance { get; set; } = [];
     [JsonRequired] public string DirectoryMode { get; set; } = "isolated";
     public ResourceSettings? Resource { get; set; }
@@ -52,7 +53,7 @@ public sealed class TaskCard
     public TaskCard Copy() => new()
     {
         Id = Id, Revision = Revision, Name = Name, Project = Project, AgentId = AgentId, Profile = Profile.Copy(),
-        Description = Description, Acceptance = Acceptance.Select(item => item.Copy()).ToList(), DirectoryMode = DirectoryMode,
+        Description = Description, DeliveryMode = DeliveryMode, Acceptance = Acceptance.Select(item => item.Copy()).ToList(), DirectoryMode = DirectoryMode,
         Resource = Resource?.Copy(), BaseCommit = BaseCommit, Branch = Branch, DependsOn = [.. DependsOn], Priority = Priority, UpdatedAt = UpdatedAt,
         QuickLaunch = QuickLaunch, Note = Note, Archived = Archived
     };
@@ -64,6 +65,7 @@ public sealed class TaskCard
         if (string.IsNullOrWhiteSpace(Name) || Name.Length > TaskSchema.MaxNameLength || Name.Contains('\0')) throw new InvalidDataException("任务名称缺失或过长。");
         if (string.IsNullOrWhiteSpace(Project) || Project.Contains('\0')) throw new InvalidDataException("任务项目缺失。");
         if (Description.Length > TaskSchema.MaxDescriptionLength || Description.Contains('\0')) throw new InvalidDataException("任务说明过长或含 NUL。");
+        if (DeliveryMode is not ("manual" or "interactive" or "automatic")) throw new InvalidDataException("未知任务交付方式。");
         if (Agents.All.All(agent => agent.Id != AgentId)) throw new InvalidDataException("未知 Agent。");
         if (DirectoryMode is not ("shared" or "isolated" or "prepared")) throw new InvalidDataException("未知目录策略。");
         if (Profile.Executable.Contains('\0') || Profile.Arguments.Any(argument => argument.Contains('\0'))) throw new InvalidDataException("任务参数含 NUL。");
@@ -113,6 +115,7 @@ public sealed class QueueEntry
 /// <summary>One dispatched attempt. Task state (review/complete) stays separate from the process receipt states.</summary>
 public sealed class TaskRun
 {
+    public string? ReverifiedFingerprint { get; set; }
     [JsonRequired] public Guid TaskId { get; set; }
     [JsonRequired] public long TaskRevision { get; set; }
     [JsonRequired] public Guid AttemptId { get; set; }
@@ -128,7 +131,7 @@ public sealed class TaskRun
     public TaskRun Copy() => new()
     {
         TaskId = TaskId, TaskRevision = TaskRevision, AttemptId = AttemptId, BatchId = BatchId, State = State, At = At,
-        Detail = Detail, ResumeOf = ResumeOf, SessionRef = SessionRef, WorkspaceKey = WorkspaceKey, ProgramFingerprint = ProgramFingerprint
+        Detail = Detail, ResumeOf = ResumeOf, SessionRef = SessionRef, WorkspaceKey = WorkspaceKey, ProgramFingerprint = ProgramFingerprint, ReverifiedFingerprint = ReverifiedFingerprint
     };
 }
 
@@ -222,7 +225,7 @@ public static class QueuePolicy
         if (!previous.Terminal) return (false, "上一次尝试仍在进行或结果未确认。");
         if (attempts.Any(run => run.SessionRef is { Length: > 0 } session && previous.SessionRef is { Length: > 0 } prior && run.SessionRef == prior && !run.Terminal)) return (false, "该会话仍被其他尝试占用。");
         if (!string.Equals(previous.WorkspaceKey, workspaceKey, StringComparison.Ordinal)) return (false, "工作目录物理身份已改变，不能续接。");
-        if (!string.Equals(previous.ProgramFingerprint, programFingerprint, StringComparison.Ordinal)) return (false, "Agent 程序已升级或更换，不能续接旧能力。");
+        if (!string.Equals(previous.ProgramFingerprint, programFingerprint, StringComparison.Ordinal)&&previous.ReverifiedFingerprint!=programFingerprint) return (false, "Agent 程序已升级或更换，请重新核对并登记会话后续接。");
         if (string.IsNullOrWhiteSpace(previous.SessionRef)) return (false, "该尝试没有可核对的会话标识，只能新开任务。");
         return (true, "");
     }
@@ -300,6 +303,8 @@ public static class TaskBookOps
         var draft = current.Copy();
         change(draft);
         var launchRelevant = draft.Project != current.Project || draft.AgentId != current.AgentId || draft.DirectoryMode != current.DirectoryMode
+            || draft.DeliveryMode != current.DeliveryMode || ((draft.DeliveryMode != "manual" || current.DeliveryMode != "manual") &&
+                (draft.Name != current.Name || draft.Description != current.Description || !draft.Acceptance.Select(item=>item.Text).SequenceEqual(current.Acceptance.Select(item=>item.Text))))
             || draft.Priority != current.Priority || !draft.DependsOn.SequenceEqual(current.DependsOn)
             || draft.Profile.Executable != current.Profile.Executable || !draft.Profile.Arguments.SequenceEqual(current.Profile.Arguments)
             || !SameResource(draft.Resource, current.Resource);
@@ -376,19 +381,21 @@ public static class TaskBookOps
     }
 
     /// <summary>Records the Agent session of a settled attempt after checking its physical identity, live leases, and queued resume intent.</summary>
-    public static TaskRun RegisterSession(TaskBook book, Guid attemptId, string sessionRef, string workspaceKey, string programFingerprint)
+    public static TaskRun RegisterSession(TaskBook book, Guid attemptId, string sessionRef, string workspaceKey, string programFingerprint,bool reverified=false)
     {
         var session = (sessionRef ?? "").Trim();
         if (session.Length == 0 || session.Length > 200 || session.Contains('\0')) throw new InvalidDataException("会话标识缺失、过长或含 NUL。");
         var run = book.Attempts.SingleOrDefault(candidate => candidate.AttemptId == attemptId) ?? throw new InvalidDataException("尝试不存在。");
         if (!run.Terminal) throw new InvalidDataException("只能为已经结束的尝试登记会话。");
         if (!string.Equals(run.WorkspaceKey, workspaceKey, StringComparison.Ordinal)) throw new InvalidDataException("工作目录物理身份已改变，不能登记会话。");
-        if (!string.Equals(run.ProgramFingerprint, programFingerprint, StringComparison.Ordinal)) throw new InvalidDataException("Agent 程序已升级或更换，不能登记会话。");
+        if (!string.Equals(run.ProgramFingerprint, programFingerprint, StringComparison.Ordinal)&&run.ReverifiedFingerprint!=programFingerprint&&!reverified) throw new InvalidDataException("Agent 程序已升级或更换，需重新核对能力并确认后登记会话。");
+        if(reverified&&programFingerprint.Length!=64)throw new InvalidDataException("重新核对的程序指纹无效。");
         if (book.Attempts.Any(candidate => candidate.AttemptId != attemptId && !candidate.Terminal && string.Equals(candidate.SessionRef, session, StringComparison.Ordinal)))
             throw new InvalidDataException("该会话仍被其他尝试占用。");
         if (book.Queue.Any(candidate => candidate.ResumeOf == attemptId && !string.Equals(candidate.SessionRef, session, StringComparison.Ordinal)))
             throw new InvalidDataException("该尝试仍被排队续接引用，不能改写会话标识。");
         run.SessionRef = session;
+        if(reverified)run.ReverifiedFingerprint=programFingerprint;
         return run;
     }
 

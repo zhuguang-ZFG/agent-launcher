@@ -3,8 +3,15 @@ using AgentLauncher.Core;
 
 namespace AgentLauncher.Windows;
 
+public sealed record TerminalPaneReference(Guid AttemptId,Guid BatchId,int PaneId);
+
 public static partial class Commands
 {
+    public static ProcessStartInfo TerminalFocusStartInfo(string terminal,TerminalPaneReference reference)
+    {
+        if(reference.AttemptId==Guid.Empty||reference.BatchId==Guid.Empty||reference.PaneId is <0 or >=16)throw new IOException("窗格身份无效。");
+        return CreateTerminalStartInfo(terminal,["-w","agent-"+reference.BatchId.ToString("N"),"focus-tab","--target","0",";","focus-pane","--target",reference.PaneId.ToString(System.Globalization.CultureInfo.InvariantCulture)]);
+    }
     public static IReadOnlyList<string> ComposeTerminalArguments(IReadOnlyList<LaunchItem> items,string layout,bool useSystemColors=false,string? profile=null)
     {
         ArgumentNullException.ThrowIfNull(items);
@@ -56,6 +63,8 @@ public static partial class Commands
         if(fragments.Count!=items.Count)throw new IOException("窗格提交计划与启动项数量不一致，未提交。");
         var order=PaneLayout.Map(items.Count,layout).OrderBy(cell=>cell.CreationOrder).Select(cell=>items[cell.EnabledIndex]).ToArray();
         if(order.Any(item=>File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim"))))throw new IOException("本批次已有窗格领取记录，请核对运行记录，不要重复提交。");
+        for(var index=0;index<order.Length;index++)
+            Store.Save(Path.Combine(Store.Root,"attempts",order[index].Id.ToString("N"),"terminal.json"),new TerminalPaneReference(order[index].Id,order[index].BatchId,index));
         for(var index=0;index<fragments.Count;index++)
         {
             cancellationToken.ThrowIfCancellationRequested();

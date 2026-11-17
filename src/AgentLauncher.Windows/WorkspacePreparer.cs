@@ -111,7 +111,7 @@ public sealed class WorkspacePreparer
     }
     private static bool ValidText(string? value)=>!string.IsNullOrWhiteSpace(value)&&!value.Contains('\0');
     private static bool AbsolutePath(string? value)=>ValidText(value)&&Path.IsPathFullyQualified(value!);
-    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null,bool forceIsolated=false,string? expectedWorkspaceKey=null)
+    public async Task<List<LaunchItem>> PrepareAsync(Draft draft,Action<string> progress,Func<string,Task<bool>> confirmHead,CancellationToken ct,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces=null,bool forceIsolated=false,string? expectedWorkspaceKey=null,Configuration? configuration=null)
     {
         resourceSettings=draft.Resource??new ResourceSettings();
         draftRevision=draft.Revision;

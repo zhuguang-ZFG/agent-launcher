@@ -303,6 +303,23 @@ public static partial class Commands
         if(!Path.GetExtension(path).Equals(".cmd",StringComparison.OrdinalIgnoreCase))throw new IOException("首版只支持 exe 和已识别的 Node 启动脚本。");
         if(new FileInfo(path).Length>8192)throw new IOException("启动脚本超出适配范围。");
         var text=File.ReadAllText(path).Replace("\r\n","\n").Trim();var folder=Path.GetDirectoryName(path)!;
+        const string claudeNativeShim="""
+@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+"%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe"   %*
+""";
+        if(text==claudeNativeShim.Replace("\r\n","\n"))
+        {
+            var native=Path.Combine(folder,"node_modules","@anthropic-ai","claude-code","bin","claude.exe");
+            if(!File.Exists(native))throw new FileNotFoundException("Claude 原生入口不存在，请修复该 CLI 安装。");
+            return Protect(new(native,[..profile.Arguments],"exe"));
+        }
         // Full-template matching avoids translating arbitrary wrappers with hidden setup semantics.
         string? script=null;
         const string piShim="""

@@ -84,6 +84,16 @@ internal static class Integration
                     var actual=JsonDocument.Parse(File.ReadAllText(Path.Combine(Store.Root,$"terminal-{item.Position}.json"))).RootElement;
                     Assert(actual.GetProperty("Cwd").GetString()==item.Cwd&&actual.GetProperty("Args")[0].GetString()=="中文 & ; spaces","Terminal changed the child cwd or literal arguments");
                 }
+                foreach(var item in items.Reverse())
+                {
+                    var reference=Store.Read<TerminalPaneReference>(Store.FilePath($"attempts/{item.Id:N}/terminal.json"));
+                    Assert(reference is not null&&reference.AttemptId==item.Id&&reference.BatchId==batch,"missing stable pane reference");
+                    using var focus=Process.Start(Commands.TerminalFocusStartInfo(terminal,reference!))!;
+                    await focus.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                    var title=TerminalAppearance.PaneTitle(item);var found=false;
+                    for(var i=0;i<30&&!found;i++){found=TerminalRecallChecks.HasWindow(title);if(!found)await Task.Delay(100);}
+                    Assert(found&&focus.ExitCode==0,"Terminal did not focus the requested pane: "+item.Position);
+                }
             }
             finally
             {
@@ -769,6 +779,23 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             var restored=await Ipc.EnsureMonitorAsync();Assert(restored.Ok,restored.Message);
             await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(8));var status=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(status.Entries!.Single(e=>e.Plan.Id==item.Id).State=="Settled","did not reconcile completion");
         });
+        await Test("UX12 custody survives both runner and monitor loss without releasing a live process",async()=>
+        {
+            var item=Item("custody-recovery",["--hold","4500"]);var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
+            using var runner=Start("run",item.Id);Receipt? receipt=null;
+            for(var i=0;i<50;i++){receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id));if(receipt?.Phase=="Started")break;await Task.Delay(100);}
+            Assert(receipt?.Phase=="Started","fixture never started");
+            Assert(File.Exists(Store.FilePath($"attempts/{item.Id:N}/baseline.json")),"runner omitted launch baseline evidence");
+            runner.Kill();await runner.WaitForExitAsync();
+            var pid=Store.Read<int>(Store.FilePath("monitor-pid.json"));using(var monitor=Process.GetProcessById(pid)){monitor.Kill();await monitor.WaitForExitAsync();}
+            using(var child=Process.GetProcessById(receipt!.Pid))Assert(!child.HasExited,"crash ended the Agent");
+            using(var retained=new Job(Store.JobName(item.Id),openOnly:true))Assert(retained.Members().Contains(receipt!.Pid),"custody lost live item handle");
+            var restored=await Ipc.EnsureMonitorAsync();Assert(restored.Ok,restored.Message);
+            var live=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(!Store.IsTerminal(live.Entries!.Single(e=>e.Plan.Id==item.Id)),"live process released");
+            ControlEntry? settled=null;
+            for(var i=0;i<80;i++){var current=await Ipc.SendAsync(new("status",Guid.NewGuid()));settled=current.Entries?.SingleOrDefault(e=>e.Plan.Id==item.Id);if(settled?.State=="Settled")break;await Task.Delay(100);}
+            Assert(settled?.State=="Settled"&&settled.ExitCode is null,"drained recovered job did not settle honestly");
+        });
         foreach(var phase in new[]{"SpawnIntent","CreatedSuspended","Started"})
         await Test("R13 crash at "+phase,async()=>{
             var output=Path.Combine(Store.Root,"crash-"+phase+".json");var item=Item("crash",["--echo",output]);var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
@@ -909,6 +936,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             try
             {
                 var began=Sync(Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:items[0].Id)));Assert(began.Ok,began.Message);
+                JobCustody.Retain(items[0]); // This fixture creates the protected child directly, so perform the runner's custody handshake.
                 using var process=LaunchPooled(root,poolId,items[0].Id,["--hold","2000"]);
                 using(var pool=new Job(Store.PoolName(poolId),openOnly:true))using(var item=new Job(Store.JobName(items[0].Id),openOnly:true))
                 { Assert(pool.QueryMemory() is{LimitBytes:4*ResourcePolicy.GiB},"pool kernel cap missing");Assert(item.QueryMemory() is{LimitBytes:ResourcePolicy.GiB},"item kernel cap missing"); }
@@ -975,7 +1003,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             var restarted=await Ipc.EnsureMonitorAsync();Assert(restarted.Ok,restarted.Message);
             var after=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(after.AdmissionBlockedReason?.Contains("账本")!=true,"retired pool broke the ledger across restart: "+after.AdmissionBlockedReason);
         });
-        await Test("ACC-S3B03 a pool with a surviving direct member stays blocked and charged across monitor crash",async()=>{
+        await Test("ACC-S3B03 custody retains a surviving pool across crash and releases after proven drain",async()=>{
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
@@ -988,6 +1016,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             try
             {
                 var began=Sync(Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:items[0].Id)));Assert(began.Ok,began.Message);
+                JobCustody.Retain(items[0]); // Direct child fixture mirrors the runner's pre-spawn handshake.
                 using var process=LaunchPooled(root,poolId,items[0].Id,["--hold","2000"]);
                 Assert(process.Process.WaitForExit(10000),"item fixture timed out");
                 Store.Save(Store.ReceiptPath(items[0].Id),new Receipt("Finished",process.Process.Id,0,0,"全部受管进程已退出。",DateTimeOffset.UtcNow));
@@ -998,9 +1027,12 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             var pid=Store.Read<int>(Store.FilePath("monitor-pid.json"));using(var monitor=Process.GetProcessById(pid)){monitor.Kill();monitor.WaitForExit(5000);}
             await Ipc.EnsureMonitorAsync();
             var after=await Ipc.SendAsync(new("status",Guid.NewGuid()));
-            Assert(after.AdmissionBlockedReason?.Contains("资源池")==true,"surviving pool member was not reported after monitor crash: "+after.AdmissionBlockedReason);
+            using(var retained=new Job(Store.PoolName(poolId),openOnly:true))Assert(retained.Members().Contains(direct.Process.Id),"custody lost the surviving direct member");
+            Assert(after.Pools?.Any(p=>p.Id==poolId&&p.MemoryLimit==4*ResourcePolicy.GiB)==true,"surviving pool budget was not retained after monitor crash");
             var ledger=Store.Read<Ledger>(Store.FilePath("control.json"))!;Assert(ledger.Pools.Any(p=>p.Id==poolId),"lost pool record dropped while a direct member may survive");
             await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:items[1].Id));
+            var held=await Ipc.SendAsync(new("status",Guid.NewGuid()));
+            Assert(held.AdmissionBlockedReason?.Contains("资源池")==true,"orphan direct pool member was not blocked after pending entry revoked");
             Assert(direct.Process.WaitForExit(15000),"direct member timed out");
             var cleared=false;
             for(var i=0;i<100&&!cleared;i++)
@@ -1011,15 +1043,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
                 await Task.Delay(100);
             }
             var current=Store.Read<Ledger>(Store.FilePath("control.json"))!;
-            if(current.Pools.Any(p=>p.Id==poolId))
-            {
-                Assert(!cleared,"blocked pool record vanished without proven retirement");
-                current.Pools.RemoveAll(p=>p.Id==poolId);Store.Save(Store.FilePath("control.json"),current);
-                pid=Store.Read<int>(Store.FilePath("monitor-pid.json"));using(var monitor=Process.GetProcessById(pid)){monitor.Kill();monitor.WaitForExit(5000);}
-                var restarted=await Ipc.EnsureMonitorAsync();Assert(restarted.Ok,restarted.Message);
-                var healthy=await Ipc.SendAsync(new("status",Guid.NewGuid()));Assert(healthy.AdmissionBlockedReason?.Contains("资源池")!=true,"manual pool reconciliation did not clear the hold: "+healthy.AdmissionBlockedReason);
-            }
-            else Assert(cleared,"pool record removed before its hold cleared");
+            Assert(current.Pools.All(p=>p.Id!=poolId)&&cleared,"custody did not permit proven retirement after direct member drained");
             Store.Save(Store.FilePath("configuration.json"),new Configuration());
         });
         await Test("ACC-S3B04 the real preparation path assigns one shared pool and launches through reserve",async()=>{

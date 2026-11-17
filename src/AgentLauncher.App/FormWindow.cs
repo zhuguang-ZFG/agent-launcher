@@ -11,6 +11,14 @@ public sealed class FormWindow : Window
     public Dictionary<string,string> Values { get; }=[];
     public Dictionary<string,string[]> ArgumentValues { get; }=[];
     private readonly Dictionary<string,ArgumentEditor> argumentEditors=[];
+    private readonly Dictionary<string,Func<string>> readers=[];
+    private readonly Dictionary<string,Action<string>> writers=[];
+    private readonly Dictionary<string,Button> actionButtons=[];
+    private TextBlock? noteBlock;
+    public string ReadValue(string key)=>readers.TryGetValue(key,out var read)?read():Values.GetValueOrDefault(key)??"";
+    public void SetNote(string text){if(noteBlock is not null)noteBlock.Text=text;}
+    public void SetValue(string key,string value){if(writers.TryGetValue(key,out var write))write(value);else throw new ArgumentException("该字段不能直接填写："+key);}
+    public void SetActionEnabled(string label,bool enabled){if(actionButtons.TryGetValue(label,out var button))button.IsEnabled=enabled;}
     /// <summary>Replaces one argument list in place so actions apply to the same editor the user sees.</summary>
     public void SetArguments(string key,string[] arguments)
     {
@@ -27,9 +35,9 @@ public sealed class FormWindow : Window
         var footer=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new(0,16,0,0)};DockPanel.SetDock(footer,Dock.Bottom);
         var cancel=new Button{Content="取消",IsCancel=true,Margin=new(0,0,8,0),MinWidth=88};var apply=new Button{Content=applyLabel,IsDefault=true,MinWidth=88};footer.Children.Add(cancel);footer.Children.Add(apply);root.Children.Add(footer);
         var panel=new StackPanel();
-        if(!string.IsNullOrEmpty(note))panel.Children.Add(new TextBlock{Text=note,TextWrapping=TextWrapping.Wrap,Margin=new(0,0,0,16),Foreground=(Brush)FindResource("Muted")});
-        if(actions!=null){var actionRow=new WrapPanel{Margin=new(0,0,0,12)};foreach(var action in actions){var button=new Button{Content=action.Key,Margin=new(0,0,8,4)};button.Click+=(_,_)=>action.Value(this);actionRow.Children.Add(button);}panel.Children.Add(actionRow);}
-        var readers=new Dictionary<string,Func<string>>();Control? first=null;
+        noteBlock=new TextBlock{Text=note,TextWrapping=TextWrapping.Wrap,Margin=new(0,0,0,16),Foreground=(Brush)FindResource("Muted")};panel.Children.Add(noteBlock);
+        if(actions!=null){var actionRow=new WrapPanel{Margin=new(0,0,0,12)};foreach(var action in actions){var button=new Button{Content=action.Key,Margin=new(0,0,8,4)};button.Click+=(_,_)=>action.Value(this);actionButtons[action.Key]=button;actionRow.Children.Add(button);}panel.Children.Add(actionRow);}
+        Control? first=null;
         foreach(var f in fields)
         {
             if(argumentLists?.TryGetValue(f.Key,out var arguments)==true)
@@ -58,14 +66,14 @@ public sealed class FormWindow : Window
                 // Discovered local installs offered as an editable dropdown; typing and the picker button still work.
                 var combo=new ComboBox{IsEditable=true,IsTextSearchEnabled=false,Text=f.Value};
                 foreach(var path in found)combo.Items.Add(path);
-                AutomationProperties.SetName(combo,f.Label);readers[f.Key]=()=>combo.Text;
+                AutomationProperties.SetName(combo,f.Label);readers[f.Key]=()=>combo.Text;writers[f.Key]=value=>combo.Text=value;
                 panel.Children.Add(FieldLabel(f.Label,combo));
                 if(f.Key is "exe" or "terminal" or "cwd" or "worktree")panel.Children.Add(FieldRow(combo,Picker(f.Label,f.Key is "cwd" or "worktree",path=>combo.Text=path)));
                 else panel.Children.Add(FieldRow(combo));
                 first??=combo;continue;
             }
             var box=new TextBox{Text=f.Value,AcceptsReturn=f.Multiline,MinHeight=f.Multiline?80:36,TextWrapping=f.Multiline?TextWrapping.Wrap:TextWrapping.NoWrap,HorizontalScrollBarVisibility=f.Multiline?ScrollBarVisibility.Disabled:ScrollBarVisibility.Hidden,VerticalScrollBarVisibility=f.Multiline?ScrollBarVisibility.Auto:ScrollBarVisibility.Disabled};
-            AutomationProperties.SetName(box,f.Label);readers[f.Key]=()=>box.Text;
+            AutomationProperties.SetName(box,f.Label);readers[f.Key]=()=>box.Text;writers[f.Key]=value=>box.Text=value;
             var rowButtons=new List<Button>();
             if(f.Key=="cwd")rowButtons.Add(InheritButton(box));
             if(f.Key is "exe" or "terminal" or "cwd" or "worktree")rowButtons.Add(Picker(f.Label,f.Key is "cwd" or "worktree",path=>box.Text=path));

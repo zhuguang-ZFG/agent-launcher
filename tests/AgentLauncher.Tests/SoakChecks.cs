@@ -65,19 +65,30 @@ internal static class SoakChecks
             foreach (var name in new[] { "AgentLauncher.Worker.exe", "AgentLauncher.Worker.dll", "AgentLauncher.Core.dll", "AgentLauncher.Windows.dll", "SoakRunner.exe", "omp.exe", "node.exe" })
                 File.WriteAllText(Path.Combine(runtime, name), "parameter fixture only; never executed");
             string[] options = ["observe", "--root", Path.Combine(temp, "AgentLauncher-tests-fresh-soak"), "--runtime", runtime, "--runner-exe", Path.Combine(runtime, "SoakRunner.exe"), "--omp", Path.Combine(runtime, "omp.exe"), "--omp-version", "18.19.0", "--node", Path.Combine(runtime, "node.exe")];
-            var full = RunnerOptions.Parse(options); Assert(full.Rounds == 3 && full.RoundSeconds == 1800 && full.CalibrationSeconds == 0);
-            var shortRun = RunnerOptions.Parse([.. options, "--calibration-seconds", "10"]); Assert(shortRun.Rounds == 1 && shortRun.CalibrationSeconds == 10);
-            Reject(() => RunnerOptions.Parse([.. options, "--round-seconds", "10"]));
-            Reject(() => RunnerOptions.Parse([.. options, "--rounds", "1"]));
-            Reject(() => RunnerOptions.Parse([.. options, "--out", options[2]]));
-            Reject(() => RunnerOptions.Parse([.. options, "--admission-only", "--rounds", "3"]));
-            string[] driver = ["driver", "--omp", Path.Combine(runtime, "omp.exe"), "--omp-version", "18.19.0", "--node", Path.Combine(runtime, "node.exe"), "--state-root", temp, "--agent-dir", Path.Combine(temp,"agent"), "--home", Path.Combine(temp,"home"), "--stop-file", Path.Combine(temp,"stop"), "--result", Path.Combine(temp,"result")];
-            Reject(() => RunnerOptions.Parse(driver));
-            Assert(RunnerOptions.Parse([.. driver, "--duration-seconds", "10"]).DurationSeconds == 10);
-            Reject(() => EvidenceChecks.ValidateRuntime(runtime));
-            var protectedResult = Path.Combine(temp, "result"); File.WriteAllText(protectedResult, "keep this record");
-            Reject(() => EvidenceChecks.ValidateDriverRoot(RunnerOptions.Parse([.. driver, "--duration-seconds", "10"]), temp));
-            Assert(File.ReadAllText(protectedResult) == "keep this record");
+            
+            // 临时清除 AGENT_LAUNCHER_TEST_ROOT（测试用 --root 指定独立根）
+            var savedTestRoot = Environment.GetEnvironmentVariable("AGENT_LAUNCHER_TEST_ROOT");
+            Environment.SetEnvironmentVariable("AGENT_LAUNCHER_TEST_ROOT", null);
+            try
+            {
+                var full = RunnerOptions.Parse(options); Assert(full.Rounds == 3 && full.RoundSeconds == 1800 && full.CalibrationSeconds == 0);
+                var shortRun = RunnerOptions.Parse([.. options, "--calibration-seconds", "10"]); Assert(shortRun.Rounds == 1 && shortRun.CalibrationSeconds == 10);
+                Reject(() => RunnerOptions.Parse([.. options, "--round-seconds", "10"]));
+                Reject(() => RunnerOptions.Parse([.. options, "--rounds", "1"]));
+                Reject(() => RunnerOptions.Parse([.. options, "--out", options[2]]));
+                Reject(() => RunnerOptions.Parse([.. options, "--admission-only", "--rounds", "3"]));
+                string[] driver = ["driver", "--omp", Path.Combine(runtime, "omp.exe"), "--omp-version", "18.19.0", "--node", Path.Combine(runtime, "node.exe"), "--state-root", temp, "--agent-dir", Path.Combine(temp,"agent"), "--home", Path.Combine(temp,"home"), "--stop-file", Path.Combine(temp,"stop"), "--result", Path.Combine(temp,"result")];
+                Reject(() => RunnerOptions.Parse(driver));
+                Assert(RunnerOptions.Parse([.. driver, "--duration-seconds", "10"]).DurationSeconds == 10);
+                Reject(() => EvidenceChecks.ValidateRuntime(runtime));
+                var protectedResult = Path.Combine(temp, "result"); File.WriteAllText(protectedResult, "keep this record");
+                Reject(() => EvidenceChecks.ValidateDriverRoot(RunnerOptions.Parse([.. driver, "--duration-seconds", "10"]), temp));
+                Assert(File.ReadAllText(protectedResult) == "keep this record");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("AGENT_LAUNCHER_TEST_ROOT", savedTestRoot);
+            }
         });
         test("S0.6 RPC disconnect fails once and never replays an unknown command", () =>
         {
