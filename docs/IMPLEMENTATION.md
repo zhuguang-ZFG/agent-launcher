@@ -1387,3 +1387,13 @@ powershell -NoProfile -File scripts/test.ps1
 - 可运行包：`scripts/build.ps1` **退出 0**，固定 `artifacts/preview` 已更新；20 个配套文件哈希全部一致、生产程序集无测试钩子、.NET Desktop Runtime 检查通过。旧包保留于 `artifacts/preview.before-f148faf7e3504664a85a4303b5da1205`。`test-production-pane.ps1 -PackageDirectory artifacts/preview` **退出 0**，真实 Terminal 的缓冲 Enter 拒绝、F12 退出和正常 Enter 退出均通过；结果 `artifacts/production-pane-c5981d601a1e4d75948d8caba1659eb8/result.json`，Worker SHA-256 **11CC582153E0B6A006CD70E755AC46C47EA44B82C0C8BCAD4DE4A52E083AC654**。构建/生产日志为 `usability-release-build.log` / `usability-release-production-pane.log`，生产包 manifest 如实保留 `SourceDirty=true`，源码未提交或推送。
 - 最终截图核对：全门禁的清理截图早于 TextBox 文字绘制，数据断言通过但截图为空；只在 `INTEGRATION_TESTS` 抓图前增加 Dispatcher 布局等待。独立完整 WPF 再次 **退出 0，368 项**（`artifacts/usability-final-ui/`），已查看最终清理与交付截图，文字/按钮完整可见。该调整不编入生产包；独立 UI 报告/截图另存归档根目录，首轮全门禁原始截图保留在 `gate-ui/`，不覆盖历史证据。`git diff --check` 在 CRLF 规则下通过。
 - 限制：全部句柄已丢失的旧资源池仍无法凭名称消失证明后代退出，需重启后核对；守护也不保证所有保护进程同时丢失时恢复。会话扫描有 2,000 文件/2 秒/64 KiB/12 行/100 候选边界，保留手工入口，Qoder 多目录会话不自动归属。当前仍是技术预览，未执行远端 CI、独立人类可用性或真实模型长稳验收；本轮不关闭 §11 的稳定发布门禁。
+
+## 82. 远程执行 Monitor reconciliation 集成测试（2026-11-17，Asia/Shanghai）
+
+- 用户要求：用真实 reserve/begin + fake SSH 长驻进程做集成测试，断言进程存活时状态保持 `Started`，进程结束或断连后转为正确的 `Disconnected`/`Settled`，并重跑全套。
+- 实现：新增 `tests/AgentLauncher.Tests/RemoteExecutionIntegration.cs`（R23/R24/R25），`tests/fake-ssh/Program.cs` 支持 `hold=<seconds>` 长驻与 `disconnect` 返回 255；`scripts/test.ps1` 注册 `remote-execution-integration` suite。
+- 远程执行跳过本地 Job/custody：`RunPane` 与 `HandleRequest(begin)` 的远程分支不创建本地 Job，不调用 `JobCustody.Retain`；reconciliation 用 SSH PID/创建时间核验存活（PID 复用防护），SSH 进程退出后转为 `Settled`（R23），SSH 255 断连转为 `Disconnected`（R24），crash-before-Started（table-driven：`SpawnIntent`/`CreatedSuspended`/`ResumeIntent`）映射到 `Disconnected`（R25）。
+- `Disconnected` 保持非终止：预算不释放，Detail 说明「远程进程可能仍存活，请手动核对远程主机状态」，防止盲目重启；用户需手动核对远程主机状态后通过系统重启自动释放（`ProcessTime < boot time` 分支）。
+- 测试结果：`./artifacts/test-runtime/AgentLauncher.Tests.exe --remote-execution-integration` **3/3 通过**（R23 SSH alive keeps Started, exit transitions to Settled；R24 SSH 255 transitions to Disconnected；R25 crash-before-Started maps to Disconnected）。
+- 完整门禁：`scripts/test.ps1 -SkipUi -SkipBrowser` **退出 0**，原生 **214/0**（含 R23/R24/R25）。
+- 限制：远程 `Disconnected` entry 保持非终止直到系统重启；不支持用户确认的远程 entry 释放（需要显式记录操作员的远程主机检查）；未执行真实 VPS 测试。
