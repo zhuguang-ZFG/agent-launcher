@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 using AgentLauncher.Worker;
@@ -357,6 +359,31 @@ internal static class RemoteExecutionChecks
                 Created = DateTimeOffset.UtcNow
             };
             assert(!AgentLauncher.Core.ControlEntryStates.IsTerminal(entry), "Disconnected 状态不应是终态（防止盲目重启）");
+        });
+
+        test("R28 operator release request and record round-trip through protocol JSON", () =>
+        {
+            // release-remote 请求携带操作员判断记录；协议往返不得丢失判断、原因或确认位。
+            var attempt = Guid.NewGuid();
+            var release = new OperatorRelease("Gone", "已登录主机核对，agent 进程已退出", true);
+            var request = new Request("release-remote", Guid.NewGuid(), Attempt: attempt, Release: release);
+            using var stream = new MemoryStream();
+            Ipc.WriteAsync(stream, request, default).GetAwaiter().GetResult();
+            stream.Position = 0;
+            var read = Ipc.ReadAsync<Request>(stream, default).GetAwaiter().GetResult();
+            assert(read.Operation == "release-remote" && read.Attempt == attempt && read.Release == release,
+                "release-remote 请求协议往返丢失操作员判断记录");
+
+            // 旧客户端不带 Release 字段：必须反序列化为 null，由监视器 fail-closed 拒绝，而不是默认放行。
+            var legacy = JsonNode.Parse(JsonSerializer.Serialize(new Request("release-remote", Guid.NewGuid(), Attempt: attempt), Store.Json))!.AsObject();
+            legacy.Remove("Release");
+            var legacyRead = JsonSerializer.Deserialize<Request>(legacy.ToJsonString(), Store.Json)!;
+            assert(legacyRead.Release is null, "缺少 Release 字段被反序列化成了默认判断");
+
+            // operator-release.json 证据记录往返一致（主机、目录、判断、原因、确认、摘要）。
+            var record = new OperatorReleaseRecord(1, attempt, "vps.example.com", "/home/agent/work", "Gone", "已核对，进程已退出", true, DateTimeOffset.UtcNow, "digest");
+            var back = JsonSerializer.Deserialize<OperatorReleaseRecord>(JsonSerializer.Serialize(record, Store.Json), Store.Json);
+            assert(back == record, "operator-release.json 记录往返不一致");
         });
     }
 }

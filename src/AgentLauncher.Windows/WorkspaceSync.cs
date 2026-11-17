@@ -6,6 +6,8 @@ namespace AgentLauncher.Windows;
 // 工作区同步：Mutagen 持续同步（推荐）或 SSHFS 挂载（备选）
 public static class WorkspaceSync
 {
+    // 启动器会话名前缀（完整名 = 前缀 + 随机 GUID）；同步健康核对（WorkspaceInsights）用它识别启动器创建的会话。
+    internal const string SessionNamePrefix="agent-launcher-";
     // 启动工作区同步（在 agent 启动前调用）
     public static async Task<IWorkspaceSyncSession> StartAsync(
         WorkspaceSyncSpec spec,
@@ -54,7 +56,7 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         RemoteExecutionSpec remote,
         CancellationToken cancellation)
     {
-        var sessionName = spec.MutagenSessionName ?? $"agent-launcher-{Guid.NewGuid():N}";
+        var sessionName = spec.MutagenSessionName ?? $"{WorkspaceSync.SessionNamePrefix}{Guid.NewGuid():N}";
         
         // 配置真实 SSH 路径（避免 fake SSH 拦截）
         // Mutagen 支持 MUTAGEN_SSH_PATH 环境变量（指向包含 ssh 和 scp 的目录）
@@ -184,62 +186,15 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         }
     }
 
-    // 把远程密钥加载进 ssh-agent，返回是否新启动了 agent（决定 daemon 是否需重启继承 socket）。
-    private static async Task<bool> EnsureSshKeyInAgentAsync(string keyPath,CancellationToken cancellation)
-    {
-        var sock=Environment.GetEnvironmentVariable("SSH_AUTH_SOCK");
-        var newlyStarted=false;
-        if(string.IsNullOrEmpty(sock))
-        {
-            var output=await RunCommandAsync("ssh-agent",new[]{"-s"},cancellation);
-            var match=System.Text.RegularExpressions.Regex.Match(output,@"SSH_AUTH_SOCK=([^;]+);");
-            if(!match.Success)throw new IOException("无法启动 ssh-agent 以加载远程密钥。");
-            sock=match.Groups[1].Value;
-            Environment.SetEnvironmentVariable("SSH_AUTH_SOCK",sock);
-            newlyStarted=true;
-        }
-        await RunCommandAsync("ssh-add",new[]{keyPath},cancellation);  // 幂等：已加载会提示 identity added
-        return newlyStarted;
-    }
+    // 把远程密钥加载进 ssh-agent（共享助手 SshAgent，runner 也用同一逻辑），返回是否新启动了 agent。
+    private static Task<bool> EnsureSshKeyInAgentAsync(string keyPath,CancellationToken cancellation)=>SshAgent.EnsureKeyInAgentAsync(keyPath,cancellation);
     
     private static async Task<string> RunMutagenCommandAsync(string[] args, CancellationToken cancellation)
     {
         return await RunCommandAsync("mutagen", args, cancellation);
     }
     
-    private static async Task<string> RunCommandAsync(string fileName, string[] args, CancellationToken cancellation)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = fileName,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        
-        foreach (var arg in args)
-        {
-            startInfo.ArgumentList.Add(arg);
-        }
-        
-        using var process = Process.Start(startInfo) ?? throw new IOException($"无法启动 {fileName} 进程");
-        
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellation);
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellation);
-        
-        await process.WaitForExitAsync(cancellation);
-        
-        var stdout = await stdoutTask;
-        var stderr = await stderrTask;
-        
-        if (process.ExitCode != 0)
-        {
-            throw new IOException($"{fileName} 失败（退出码 {process.ExitCode}）：{stderr}");
-        }
-        
-        return stdout;
-    }
+    private static Task<string> RunCommandAsync(string fileName, string[] args, CancellationToken cancellation)=>SshAgent.RunCommandAsync(fileName,args,cancellation);
 }
 
 // SSHFS 挂载会话

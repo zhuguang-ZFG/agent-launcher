@@ -48,6 +48,8 @@ public sealed class SshRunnerBackend : IDisposable
         };
 
         // SSH 参数：-tt（强制 PTY）-p port -i key -o options user@host remote-command
+        // 免密连接：BatchMode=yes 禁止任何密码/交互提示；SshKeyPath 为空时依赖 SSH config IdentityFile /
+        // ssh-agent / 默认密钥（ssh 在 BatchMode 下自动尝试）。配置了密钥时 Start() 还会把它加载进 ssh-agent。
         // stdin 必须用独立管道而不是继承：若继承到控制台句柄，ssh -tt 会把本地控制台切到 raw 模式，
         // 窗格/重定向输出会被吞掉（实测：继承控制台 stdin 时远端输出全部丢失，管道 stdin 则正常）。
         psi.RedirectStandardInput = true;
@@ -64,8 +66,8 @@ public sealed class SshRunnerBackend : IDisposable
         psi.ArgumentList.Add("-o");
         psi.ArgumentList.Add("ConnectTimeout=10");
         psi.ArgumentList.Add($"{spec.SshUser}@{spec.Host}");
-        // 远程命令：su - agent -c "<remote-command>"（双引号，因为内部已有单引号 quoting）
-        psi.ArgumentList.Add($"su - {spec.AgentUser} -c \"{remoteCmd.Replace("\"", "\\\"").Replace("$", "\\$").Replace("`", "\\`")}\"");
+        // 远程命令：su - agent -c "<remote-command>"（双引号，因为内部已有单引号 quoting；共享 SshRemoteCommand 的包装逻辑）
+        psi.ArgumentList.Add(SshRemoteCommand.WrapSu(spec.AgentUser, remoteCmd));
 
         return new SshRunnerBackend
         {
@@ -79,6 +81,15 @@ public sealed class SshRunnerBackend : IDisposable
     public void Start()
     {
         if (_started) throw new InvalidOperationException("Already started");
+        // 免密保障：配置了自定义密钥时先加载进 ssh-agent（与工作区同步共用 SshAgent 助手），
+        // 使 ssh 除 -i 外还能经 agent 认证。加载失败仅警告不阻断：-i 仍让 ssh 直接尝试密钥，
+        // BatchMode=yes 保证绝不提示密码；认证失败会由 ssh 以非零退出码 fail-closed。
+        if (!string.IsNullOrEmpty(Spec.SshKeyPath))
+        {
+            try { SshAgent.EnsureKeyInAgent(Spec.SshKeyPath); }
+            catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception)
+            { Console.Error.WriteLine($"警告：SSH 密钥加载进 ssh-agent 失败（{ex.Message}）；将仅用 -i 直接尝试免密连接。"); }
+        }
         _process = Process.Start(StartInfo) ?? throw new InvalidOperationException("Failed to start SSH");
         // 远程 agent 不需要本地 stdin；立即关闭管道给 ssh 一个确定的 EOF，
         // 避免它等待一个永远不会来的输入（与手工 `ssh ... <&-` 的已验证行为一致）。
@@ -193,6 +204,6 @@ public sealed class SshRunnerBackend : IDisposable
         }
     }
 
-    // 单层 shell quoting：只转义单引号，不嵌套双引号
-    private static string EscapeShellArg(string arg) => $"'{arg.Replace("'", "'\\''")}'";
+    // 单层 shell quoting：只转义单引号，不嵌套双引号（共享助手，维护命令用同一实现）
+    private static string EscapeShellArg(string arg) => SshRemoteCommand.QuoteArg(arg);
 }

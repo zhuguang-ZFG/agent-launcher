@@ -47,4 +47,25 @@ public static class RemoteHostEditor
     // 槽位以稳定 Id 引用主机：重命名不会孤立槽位，删除前必须核对引用。
     public static string[] ReferencingSlotNames(IEnumerable<(string Name, Guid? HostId)> slots, Guid id) =>
         slots.Where(s => s.HostId == id).Select(s => s.Name).ToArray();
+
+    // 升级命令覆盖：每行 agent=命令；空文本返回 null（使用默认表）。格式错误返回 null 并给出 error。
+    public static Dictionary<string,string>? ParseUpgradeOverrides(string? text,out string? error)
+    {
+        error=null;
+        var map=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+        foreach(var line in (text??"").Split('\n'))
+        {
+            var trimmed=line.Trim();
+            if(trimmed.Length==0)continue;
+            var separator=trimmed.IndexOf('=');
+            if(separator<=0||separator==trimmed.Length-1){error="升级命令覆盖格式应为 agent=命令，每行一条（如 pi=npm install -g …）。";return null;}
+            var key=trimmed[..separator].Trim();var value=trimmed[(separator+1)..].Trim();
+            if(key.Length==0||value.Length==0){error="升级命令覆盖的 agent 名和命令都不能为空。";return null;}
+            map[key]=value;
+        }
+        return map.Count>0?map:null;
+    }
+
+    public static string UpgradeOverridesText(Dictionary<string,string>? overrides)=>
+        overrides is null?"":string.Join("\n",overrides.Select(pair=>$"{pair.Key}={pair.Value}"));
 }

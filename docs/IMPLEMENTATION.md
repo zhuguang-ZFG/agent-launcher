@@ -1397,3 +1397,16 @@ powershell -NoProfile -File scripts/test.ps1
 - 测试结果：`./artifacts/test-runtime/AgentLauncher.Tests.exe --remote-execution-integration` **3/3 通过**（R23 SSH alive keeps Started, exit transitions to Settled；R24 SSH 255 transitions to Disconnected；R25 crash-before-Started maps to Disconnected）。
 - 完整门禁：`scripts/test.ps1 -SkipUi -SkipBrowser` **退出 0**，原生 **214/0**（含 R23/R24/R25）。
 - 限制：远程 `Disconnected` entry 保持非终止直到系统重启；不支持用户确认的远程 entry 释放（需要显式记录操作员的远程主机检查）；未执行真实 VPS 测试。
+
+## 83. 远程免密直连、本机远程维护、来源区分、实用功能与方案 C 重设计；R28/R29 收口（2026-11-18，Asia/Shanghai）
+
+- 用户要求：VPS 连接必须**直接免密**（不是配置指引）；要能**在本机对 VPS 上的 agent 执行升级**；UI 要区分本机 agent 与 VPS agent；参考 GitHub 同类项目增加实用功能；UI 重设计选定「C 彩色启动台」。
+- 免密直连：新增共享助手 `AgentLauncher.Windows/SshAgent.cs`（ssh-agent 启动/幂等 ssh-add/返回是否新启），runner 与 Mutagen 共用；`SshRunnerBackend.Start` 先把 SshKeyPath 载入 ssh-agent 再 `-i`，`-o BatchMode=yes` 全程绝不提示密码；无显式密钥时走 SSH config IdentityFile / ssh-agent / 默认密钥。新增 `SshRemoteCommand.cs` 非交互维护通道（无 `-tt`、重定向输出、有界超时、杀进程树），提供 `TestConnectionAsync`（`whoami` 免密自检）/`CheckVersionAsync`/`UpgradeAgentAsync`。
+- 本机远程维护：`Core/RemoteAgentMaintenance.cs` 每-agent 默认升级命令映射 + 主机级覆盖（`RemoteHost.AgentUpgradeCommands`，编辑器多行 `agent=命令`）；UI 在远程主机卡片与 VPS 槽位菜单提供「测试免密连接 / 检查版本 / 升级 Agent」，升级前显示确切命令并二次确认，结果含 stdout/stderr/退出码。
+- 来源区分与远程 agent 可选：槽位/侧栏/分屏预览加 🖥 本机 / ☁ VPS·主机名 徽章（按 agent 着色 token AgentPi/AgentKimi/AgentQoder/AgentCodex/AgentOmp）。修复「UI 选不了 VPS agent」：`ChoicesForSlot` 使远程槽位的 agent 下拉来自该主机 `AvailableAgents`（标「☁ VPS 可用」，本机未安装亦可选），`RefreshAgentChoices` 按槽位 Tag 区分远程/本地，不再被本机探测覆盖。
+- 实用功能（借鉴 crystal 的改动审阅、claude-squad 的状态可视、资源感知）：`Windows/WorkspaceInsights.cs` + `App/MainWindow.Practical.cs` 提供「查看改动」（`git status --porcelain=v1 -b` 只读，VPS 槽位注明为本地同步回文件，即远程改本机的证据）、footer 内存看板（本程序/专用/系统可用，5s 刷新、关窗停止）、VPS 同步状态徽章（就绪/同步中/有问题/未同步，判据与 `WaitReadyAsync` 一致：Watching 且无 Transition problems；~15s 节流）。
+- R28 收口：新增协议操作 `release-remote`（`Worker/Program.cs`，`ReleaseRemote`），仅当操作员判断 Gone + 原因 + Confirmed 才写 `attempts/<id>/operator-release.json` 并终态化释放预算；非 Gone/缺原因/未确认/本地 SSH 仍存活/占用_mutex 未释放一律拒绝且账本不变；UI 以「核对并确认释放」判断+原因+二次确认取代旧说明对话框（`MainWindow.RemoteRelease.cs`）。原生回归不依赖真实 VPS（fake-ssh 255）。
+- R29 收口：真实双 VPS 活测证据归档于 `artifacts/remote-live-evidence/jd-sync/`、`artifacts/remote-live-evidence/aliyun-sync/`（proof + summary，仅路径与结论，不含地址/用户/密钥）；链路 reserve/begin→Mutagen 双向→ssh -tt→su agent→pi 写证明文件→flush→本机字节级读回一致。`WorkspaceSync.WaitReadyAsync` 就绪判据补「无 Transition problems」fail-closed（远端父目录属 root 时 Mutagen 仍报 Watching 但 Beta 0 directories 的误就绪）。
+- 方案 C 重设计：`App.xaml` 浅/暗 token、Card 圆角 14 + CardShadow、按钮/输入圆角、StatusPill；`ApplyTheme` 同步浅/暗与 Agent* 提亮色；保留 HighContrast/Preview/UiScale。修复重设计移除旧 `Warning` token 导致释放入口 `FindResource("Warning")` 强转 Brush 抛 InvalidCast（门禁 UI 看门狗判停滞）→ 改用 `WarningInk`；UiChecks 配色断言同步为方案 C 值。
+- 测试结果：隔离根 `--ui-check` **379/379 通过、退出 0**；完整门禁 `scripts/test.ps1`（原生+集成+远程+UI+浏览器）**退出 0**。演示截图 `artifacts/ui-redesign/new-ui.png`（浅色，含 VPS 槽位「☁ VPS 可用」下拉与来源徽章）。
+- 限制：升级命令默认映射按各 CLI 包管理器推断，主机可用覆盖纠正；同步健康按端点匹配会话（会话名为每次启动随机 GUID，未持久化）；R29 不进 CI。

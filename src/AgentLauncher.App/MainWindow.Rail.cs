@@ -27,7 +27,8 @@ public partial class MainWindow
         var active = (status?.Entries ?? []).Where(entry => entry.Plan.Kind == "agent" && !Store.IsTerminal(entry)).OrderByDescending(entry => entry.Created).ToArray();
         foreach (var entry in active.Take(RailSummaryRows))
         {
-            var text = $"{entry.Plan.Position:00} {entry.Plan.Name} · {RailSessionState(entry)}";
+            var remote = entry.Plan.RemoteExecution is { } spec ? " · ☁ VPS " + (config.RemoteHosts.FirstOrDefault(h => h.Address == spec.Host)?.Name ?? spec.Host) : "";
+            var text = $"{entry.Plan.Position:00} {entry.Plan.Name} · {RailSessionState(entry)}{remote}";
             RailSessions.Children.Add(RailRecordButton(text, text + "\n查看这条运行记录", "查看会话 " + entry.Plan.Name, () => NavigateToSession(entry.Plan.Id)));
         }
         if (active.Length == 0) RailSessions.Children.Add(new TextBlock { Text = "无活动会话", FontSize = 12, Foreground = muted, Margin = new Thickness(0, 2, 0, 2) });

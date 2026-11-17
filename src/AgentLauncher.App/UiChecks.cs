@@ -135,8 +135,8 @@ public partial class MainWindow
         }));
         Check("settings apply selected theme scale minimize and notify values",settingsDialog.ShowDialog()==true&&settingsDialog.Values["theme"]=="dark"&&settingsDialog.Values["scale"]=="150"&&settingsDialog.Values["minimize"]=="true"&&settingsDialog.Values["notify"]=="true");
         config.Theme="dark";ApplyTheme();Render();var darkInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var darkPage=((SolidColorBrush)Background).Color;
-        Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1F3B66")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#313438")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
-        Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#C5C5C5"));
+        Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1E2A3F")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#232733")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
+        Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#9AA3B2"));
         var agentCombo=Find<ComboBox>(SlotList).First();ComboBoxItem? selectedItem=null;
         for(var i=0;i<20;i++)
         {
@@ -149,11 +149,11 @@ public partial class MainWindow
         }
         Check("dropdown selection container is generated on the current row",selectedItem is not null);
         var selectionBrush=Find<Border>(selectedItem!).Select(b=>b.Background).OfType<SolidColorBrush>().FirstOrDefault();
-        Check("dropdown selection readable in dark",SystemParameters.HighContrast||(selectionBrush!=null&&selectionBrush.Color==(Color)ColorConverter.ConvertFromString("#1F3B66")));
+        Check("dropdown selection readable in dark",SystemParameters.HighContrast||(selectionBrush!=null&&selectionBrush.Color==(Color)ColorConverter.ConvertFromString("#1E2A3F")));
         agentCombo.IsDropDownOpen=false;
         config.Theme="light";ApplyTheme();Render();var lightInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var lightPage=((SolidColorBrush)Background).Color;
-        Check("theme resources switch",(Color)ColorConverter.ConvertFromString("#F5F5F5")==darkInk&&(Color)ColorConverter.ConvertFromString("#202020")==lightInk);
-        Check("window background follows theme",(Color)ColorConverter.ConvertFromString("#202020")==darkPage&&(Color)ColorConverter.ConvertFromString("#F5F5F5")==lightPage);
+        Check("theme resources switch",(Color)ColorConverter.ConvertFromString("#ECEFF5")==darkInk&&(Color)ColorConverter.ConvertFromString("#1F2430")==lightInk);
+        Check("window background follows theme",(Color)ColorConverter.ConvertFromString("#14161C")==darkPage&&(Color)ColorConverter.ConvertFromString("#F4F6FB")==lightPage);
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();await saveTask;
         await Task.Delay(1000);
         using(var process=Process.GetCurrentProcess()){process.Refresh();Store.Save(System.IO.Path.Combine(folder,"ui-idle-memory.json"),new{PrivateBytes=process.PrivateMemorySize64,WorkingSet=process.WorkingSet64});}
@@ -317,6 +317,45 @@ public partial class MainWindow
             var focusButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="聚焦终端 rail-session-probe");
             Check("active session offers terminal window recall",focusButton!=null);
             if(focusButton!=null){ProgressText.Text="";focusButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check("missing terminal window reports instead of failing",ProgressText.Text.Contains("未找到该批次"));}
+            // R28 operator-confirmed release: Disconnected remote entries expose judgment + reason + second confirm;
+            // non-Gone / missing reason / unconfirmed paths must never reach the release request (hermetic, no monitor IPC).
+            var releaseAttempt=Guid.NewGuid();
+            status=new(true,"remote release probe",[new(){Plan=new LaunchItem(releaseAttempt,Guid.NewGuid(),1,"remote-release-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("pi",[],"remote"),0,RemoteExecution:new RemoteExecutionSpec("release.example.com",22,"root","agent","pi","/home/agent/work",[],null,null)),State="Disconnected",Detail="SSH 连接断开（退出码 255）；远程进程可能仍在运行。"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
+            RenderMonitorStatus();
+            var releaseButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认释放 remote-release-probe");
+            Check("disconnected remote session offers operator release entry",releaseButton!=null);
+            var releaseEntry=status.Entries!.Single(e=>e.Plan.Id==releaseAttempt);
+            var releaseDialog=CreateRemoteReleaseDialog(releaseEntry);
+            string? defaultJudgment=null;
+            releaseDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>{
+                var judgment=FindLogical<ComboBox>(releaseDialog).Single(c=>AutomationProperties.GetName(c)=="远程进程判断");
+                defaultJudgment=(judgment.SelectedItem as ComboBoxItem)?.Tag as string;
+                judgment.SelectedIndex=0;
+                FindLogical<TextBox>(releaseDialog).Single(t=>AutomationProperties.GetName(t)=="释放原因（必填）").Text="远程仍在运行";
+                FindLogical<Button>(releaseDialog).Single(b=>b.Content as string=="提交判断").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }));
+            var releaseApplied=releaseDialog.ShowDialog();
+            var releaseNote=FindLogical<TextBlock>(releaseDialog).FirstOrDefault(t=>t.Text.Contains("release.example.com"));
+            Check("release dialog defaults to Unknown and records judgment and reason",releaseApplied==true&&defaultJudgment=="Unknown"&&releaseDialog.Values["judgment"]=="Running"&&releaseDialog.Values["reason"]=="远程仍在运行");
+            Check("release dialog names host and remote directory",releaseNote!=null&&releaseNote.Text.Contains("/home/agent/work"));
+            Check("release dialog keeps Enter apply and Esc cancel",FindLogical<Button>(releaseDialog).Single(b=>b.Content as string=="提交判断").IsDefault&&FindLogical<Button>(releaseDialog).Single(b=>b.Content as string=="取消").IsCancel);
+            var priorConfirm=TestConfirm;var releaseConfirms=0;var releasePrompt="";
+            try
+            {
+                TestConfirm=(text,_,_)=>{releaseConfirms++;releasePrompt=text;return MessageBoxResult.No;};
+                ProgressText.Text="";await SubmitRemoteReleaseAsync(releaseEntry,"Running","进程仍在运行");
+                Check("Running judgment never asks to release",releaseConfirms==0&&ProgressText.Text.Contains("不释放"));
+                ProgressText.Text="";await SubmitRemoteReleaseAsync(releaseEntry,"Unknown","无法判断");
+                Check("Unknown judgment never asks to release",releaseConfirms==0&&ProgressText.Text.Contains("不释放"));
+                ProgressText.Text="";await SubmitRemoteReleaseAsync(releaseEntry,"Gone","");
+                Check("missing reason refuses before second confirm",releaseConfirms==0&&ProgressText.Text.Contains("释放原因"));
+                ProgressText.Text="";await SubmitRemoteReleaseAsync(releaseEntry,"Gone",new string('x',2049));
+                Check("overlong reason refuses before second confirm",releaseConfirms==0&&ProgressText.Text.Contains("2048"));
+                ProgressText.Text="";await SubmitRemoteReleaseAsync(releaseEntry,"Gone","已核对，进程已退出");
+                Check("Gone judgment requires second confirm and No keeps the entry",releaseConfirms==1&&ProgressText.Text.Contains("已取消二次确认")&&releaseEntry.State=="Disconnected");
+                Check("second confirm names host and never ends remote processes",releasePrompt.Contains("release.example.com")&&releasePrompt.Contains("不会结束远程主机"));
+            }
+            finally{TestConfirm=priorConfirm;ProgressText.Text="";}
             // P2 session-card wiring: settled agent entries expose read-only change summary; review routing follows the linked run's terminal transition without any monitor-entry change.
             var settledAttempt=Guid.NewGuid();var settledTask=Guid.NewGuid();
             status=new(true,"settled probe",[new(){Plan=new LaunchItem(settledAttempt,Guid.NewGuid(),1,"settled-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Settled"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));

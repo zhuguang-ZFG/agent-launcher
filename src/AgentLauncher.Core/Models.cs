@@ -171,9 +171,15 @@ public sealed class Ledger : IJsonOnDeserialized
     internal void ConfirmTaskClaimsMigrated() => TaskClaimsAbsentFromJson = false;
 }
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? JobMemory = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? PoolMemory = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? HandshakeAt = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] long? HandshakeWaitMs = null);
-public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null);
+public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null, OperatorRelease? Release = null);
 public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null, bool? ReconcileOffered = null, PoolRecord[]? Pools = null, BudgetItem[]? Budgets = null, string? AdmissionHardBlockedReason = null, bool AdmissionPressure = false);
 
 public sealed record ArchivedAttempt(int SchemaVersion,Guid AttemptId,string Digest,ControlEntry Entry);
+
+// R28 操作员核对释放：Judgment 取值 Running（仍在）/ Gone（已不在）/ Unknown（无法判断）。
+// 结束本地 SSH 不能证明远程进程已退出；只有 Gone + 释放原因 + Confirmed（二次确认）才允许释放 Disconnected 远程条目。
+public sealed record OperatorRelease(string Judgment,string Reason,bool Confirmed);
+// 释放成功时写入 attempts/<id>/operator-release.json 的身份绑定证据，先于账本终态化发布。
+public sealed record OperatorReleaseRecord(int SchemaVersion,Guid AttemptId,string Host,string RemoteDirectory,string Judgment,string Reason,bool Confirmed,DateTimeOffset At,string Digest);
 
 public sealed record PoolLimitNotice(Guid PoolId,int Pid,DateTimeOffset At);

@@ -960,6 +960,7 @@ internal sealed class Monitor : IDisposable
             if(entry.State!="Creating"||request.Epoch!=epoch||entry.Epoch!=epoch||request.Digest!=entry.Digest)throw new IOException("控制器代次或计划不符，请核对原尝试。");
             return new(true,"允许本次恢复线程",[entry],sample,epoch);
         }
+        if(request.Operation=="release-remote")return ReleaseRemote(entry,request.Release);
         throw new IOException("未知协议操作。");
     }
     private Response Status()=>BuildStatus(null);
@@ -1054,6 +1055,35 @@ internal sealed class Monitor : IDisposable
             ledgerBroken=true;blocked=ledgerBrokenDetail="核对结果未写入，已停止启动与回收；原占用和证据保留，请修复记录目录后重新核对："+e.Message;
             return false;
         }
+    }
+    // R28 操作员确认释放：结束本地 SSH 客户端不能证明远程进程已退出，只有 Disconnected 远程条目在
+    // 「已不在（Gone）+ 释放原因 + 二次确认」齐备时才终态化；其余组合一律拒绝且账本不变（fail-closed）。
+    // 系统重启后的 boot 证明仍走 ReconcileRequests 的既有分支；本操作不提供会盲目再拉起远程进程的重试。
+    private Response ReleaseRemote(ControlEntry entry,OperatorRelease? release)
+    {
+        if(ledgerBroken)return new(false,ledgerBrokenDetail,[entry],sample,epoch);
+        if(entry.Plan.RemoteExecution is not {} remote||entry.State!="Disconnected")return new(false,"只有连接断开（Disconnected）的远程条目才能操作员确认释放；当前条目状态不变。",[entry],sample,epoch);
+        if(release is null)return new(false,"缺少操作员核对记录（判断与释放原因），未释放。",[entry],sample,epoch);
+        if(release.Judgment!="Gone")return new(false,"判断为仍在或无法判断时拒绝释放：结束本地 SSH 不能证明远程进程已退出。账本不变，请继续在远程主机核对。",[entry],sample,epoch);
+        var reason=release.Reason?.Trim()??"";
+        if(reason.Length==0)return new(false,"缺少释放原因，未释放；请填写核对结论后重新提交。",[entry],sample,epoch);
+        if(reason.Length>2048)return new(false,"释放原因超过 2048 字上限，未释放；请精简后重新提交。",[entry],sample,epoch);
+        if(!release.Confirmed)return new(false,"操作员尚未二次确认，未释放；条目保持连接断开，预算保留。",[entry],sample,epoch);
+        var receipt=ReadReceipt(entry.Plan.Id);
+        if(receipt?.Phase=="Started"&&receipt.Pid>0&&ProcessAlive(receipt.Pid,receipt.ProcessTime))return new(false,"本地 SSH 客户端仍在运行，条目不是断开状态；请等待核对刷新后再决定。",[entry],sample,epoch);
+        using var gate=new Mutex(false,Store.AttemptLock(entry.Plan.Id));bool own;
+        try{own=gate.WaitOne(0);}catch(AbandonedMutexException){own=true;}
+        if(!own)return new(false,"创建者仍在运行，不能核对释放；请稍后重试。",[entry],sample,epoch);
+        try
+        {
+            // 先发布身份绑定的操作员证据，再终态化账本（与裁剪前归档 outcome.json 同一纪律）；写入失败不终态化。
+            Store.Save(Store.OperatorReleasePath(entry.Plan.Id),new OperatorReleaseRecord(1,entry.Plan.Id,remote.Host,remote.RemoteWorkingDirectory,release.Judgment,reason,true,DateTimeOffset.UtcNow,entry.Digest));
+            var previousState=entry.State;var previousDetail=entry.Detail;
+            entry.State="Settled";entry.Detail=$"操作员确认释放：已核对 {remote.Host} 的 {remote.RemoteWorkingDirectory}，判断远程进程已不在；原因：{reason}";
+            try{Save();}catch{entry.State=previousState;entry.Detail=previousDetail;throw;}
+            return new(true,"操作员确认释放完成：条目已终态，占用与预算已释放；核对记录见 operator-release.json。",[entry],sample,epoch);
+        }
+        finally{gate.ReleaseMutex();}
     }
     // PID reuse is not survival: the recorded start time (FILETIME UTC) must match exactly. When the start time cannot be read, treat the process as alive and refuse release. Only used to refine the refusal reason; a dead parent never proves the tree exited.
     private static bool ProcessAlive(int pid,long processTimeUtc)

@@ -274,6 +274,125 @@ internal static class RemoteExecutionIntegration
                     Assert(entry.Detail.Contains("远程进程可能仍存活"), $"Detail should mention remote process may survive for {phase}, got: {entry.Detail}");
                 }
             });
+
+            await Test("R28 operator-confirmed release of Disconnected remote session", async () =>
+            {
+                // 不依赖真实 VPS：fake SSH 255 制造 Disconnected，再走 release-remote 协议。
+                // 合同 C14：结束本地 SSH 不能证明远程进程退出；只有 Gone + 原因 + 二次确认才释放。
+                var r28Cwd = Path.Combine(Store.Root, "remote-release-cwd");
+                Directory.CreateDirectory(r28Cwd);
+                var plan = new LaunchItem(
+                    Id: Guid.NewGuid(),
+                    BatchId: Guid.NewGuid(),
+                    Position: 1,
+                    Name: "remote-release-test",
+                    Cwd: r28Cwd,
+                    Workspace: PhysicalDirectory.Workspace(r28Cwd),
+                    Shared: false,
+                    Command: new("pi", ["disconnect"], "remote"),
+                    Budget: 0,
+                    RemoteExecution: new RemoteExecutionSpec(
+                        Host: "disconnect.example.com",
+                        SshPort: 22,
+                        SshUser: "testuser",
+                        AgentUser: "agent",
+                        AgentType: "pi",
+                        RemoteWorkingDirectory: "/home/agent/work",
+                        Arguments: ["disconnect"],
+                        MemoryLimitBytes: null,
+                        SshKeyPath: null
+                    )
+                );
+                var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), 16 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB);
+                var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [plan], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([plan]), DraftRevision: 3));
+                Assert(reserved.Ok, "Remote plan reserve failed: " + reserved.Message);
+
+                async Task<ControlEntry?> EntryAsync()
+                {
+                    var s = await Ipc.SendAsync(new("status", Guid.NewGuid()));
+                    Assert(s.Ok, "Status failed: " + s.Message);
+                    return s.Entries?.FirstOrDefault(e => e.Plan.Id == plan.Id);
+                }
+
+                // 非 Disconnected（Pending）即使判断齐备也拒绝释放。
+                var pendingRefusal = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: plan.Id, Release: new OperatorRelease("Gone", "已核对", true)));
+                Assert(!pendingRefusal.Ok, "Pending remote entry was released by release-remote");
+                Assert((await EntryAsync())!.State == "Pending", "Pending refusal changed state");
+                Assert(!File.Exists(Store.OperatorReleasePath(plan.Id)), "Pending refusal wrote operator-release.json");
+
+                // 本地（非远程）条目同样拒绝：release-remote 只属于远程域。
+                var localCwd = Path.Combine(Store.Root, "remote-release-local-cwd");
+                Directory.CreateDirectory(localCwd);
+                var localPlan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "release-local", localCwd, PhysicalDirectory.Workspace(localCwd), false, new CommandSpec(Environment.ProcessPath!, ["--hold", "1"], "exe"), ResourcePolicy.DefaultJobMemoryLimit);
+                var localReserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [localPlan], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([localPlan]), DraftRevision: 3));
+                Assert(localReserved.Ok, "Local plan reserve failed: " + localReserved.Message);
+                var localRefusal = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: localPlan.Id, Release: new OperatorRelease("Gone", "已核对", true)));
+                Assert(!localRefusal.Ok, "local entry was released by release-remote");
+                var localRevoked = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: localPlan.Id));
+                Assert(localRevoked.Ok, "Local probe revoke failed: " + localRevoked.Message);
+
+                // 启动 pane：fake SSH 返回 255 → Disconnected（预算保留，非终止）。
+                var workerStart = new System.Diagnostics.ProcessStartInfo(Store.WorkerPath)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                workerStart.ArgumentList.Add("pane");
+                workerStart.ArgumentList.Add(plan.Id.ToString());
+                workerStart.Environment["AGENT_LAUNCHER_TEST_ROOT"] = Store.Root;
+                workerStart.Environment["PATH"] = fakeSshDir + Path.PathSeparator + originalPath;
+                var workerProcess = System.Diagnostics.Process.Start(workerStart)!;
+                workerProcess.StandardInput.Close();
+                workerProcesses.Add(workerProcess);
+                ControlEntry? entry = null;
+                for (var i = 0; i < 60; i++) { entry = await EntryAsync(); if (entry?.State == "Disconnected") break; await Task.Delay(250); }
+                Assert(entry?.State == "Disconnected", $"State should be Disconnected after SSH 255, got: {entry?.State}");
+
+                // 拒绝矩阵：缺少记录 / 仍在 / 无法判断 / 缺原因 / 未二次确认 —— 账本不变，不写证据。
+                async Task Refuse(string name, OperatorRelease? release)
+                {
+                    var response = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: plan.Id, Release: release));
+                    Assert(!response.Ok, name + " was accepted: " + response.Message);
+                    var current = await EntryAsync();
+                    Assert(current?.State == "Disconnected", name + " changed state: " + current?.State);
+                    Assert(!File.Exists(Store.OperatorReleasePath(plan.Id)), name + " wrote operator-release.json");
+                }
+                await Refuse("missing judgment record", null);
+                await Refuse("Running judgment", new OperatorRelease("Running", "进程仍在运行", true));
+                await Refuse("Unknown judgment", new OperatorRelease("Unknown", "无法登录主机", true));
+                await Refuse("missing reason", new OperatorRelease("Gone", "", true));
+                await Refuse("whitespace reason", new OperatorRelease("Gone", "   ", true));
+                await Refuse("unconfirmed", new OperatorRelease("Gone", "已核对，进程已退出", false));
+
+                // Gone + 原因 + Confirmed → 终态化 + 身份证据 + 释放占用。
+                const string reason = "已登录远程主机核对，agent 进程已退出";
+                var released = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: plan.Id, Release: new OperatorRelease("Gone", reason, true)));
+                Assert(released.Ok, "R28 confirmed release failed: " + released.Message);
+                Assert(released.Entries is { Length: 1 } && released.Entries[0].State == "Settled" && Store.IsTerminal(released.Entries[0]), "released entry should be terminal Settled");
+                var record = Store.Read<OperatorReleaseRecord>(Store.OperatorReleasePath(plan.Id));
+                Assert(record is { SchemaVersion: 1, Judgment: "Gone", Confirmed: true } && record.AttemptId == plan.Id && record.Host == "disconnect.example.com" && record.RemoteDirectory == "/home/agent/work" && record.Reason == reason && record.Digest == Store.Digest(plan), "operator-release.json evidence invalid");
+                var ledger = Store.Read<Ledger>(Store.FilePath("control.json"))!;
+                var ledgerEntry = ledger.Entries.FirstOrDefault(e => e.Plan.Id == plan.Id);
+                Assert(ledgerEntry is not null && Store.IsTerminal(ledgerEntry), "ledger entry not terminal after release");
+
+                // exactly-once：二次释放拒绝，证据不被重写，状态保持终态。
+                var second = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: plan.Id, Release: new OperatorRelease("Gone", reason, true)));
+                Assert(!second.Ok, "second release was accepted (not exactly-once)");
+                Assert(Store.Read<OperatorReleaseRecord>(Store.OperatorReleasePath(plan.Id)) == record, "second release rewrote evidence");
+                Assert((await EntryAsync())!.State == "Settled", "second release changed terminal state");
+
+                // 占用已释放：同目录的新远程计划可以再次预约（释放前会被工作目录占用拒绝）。
+                var probe = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "release-probe", r28Cwd, PhysicalDirectory.Workspace(r28Cwd), false, new CommandSpec("pi", [], "remote"), 0,
+                    RemoteExecution: new RemoteExecutionSpec("probe.example.com", 22, "root", "agent", "pi", "/home/agent/work", [], null, null));
+                var probeReserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [probe], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([probe]), DraftRevision: 3));
+                Assert(probeReserved.Ok, "workspace occupancy was not released: " + probeReserved.Message);
+                var probeRevoked = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: probe.Id));
+                Assert(probeRevoked.Ok, "Probe revoke failed: " + probeRevoked.Message);
+                Assert(workerProcess.WaitForExit(5000), "Worker process did not exit after SSH 255");
+            });
             
             await Test("R26 remote domain bypasses local pressure admission but not local-domain refusal", async () =>
             {
