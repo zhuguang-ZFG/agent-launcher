@@ -27,6 +27,7 @@ public static class Native
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool SetInformationJobObject(SafeFileHandle job, int kind, IntPtr data, uint size);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool QueryInformationJobObject(SafeFileHandle job, int kind, IntPtr data, uint size, IntPtr returned);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool IsProcessInJob(IntPtr process, SafeFileHandle job, out bool result);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool IsProcessInJob(SafeFileHandle process, SafeFileHandle job, out bool result);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, uint flags, ref UIntPtr size);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, UIntPtr attribute, IntPtr value, UIntPtr size, IntPtr previous, IntPtr returned);
@@ -34,6 +35,8 @@ public static class Native
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool CreateProcess(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string cwd, ref StartupInfoEx startup, out ProcessInfo process);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern uint ResumeThread(IntPtr thread);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern SafeFileHandle OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool K32EmptyWorkingSet(SafeFileHandle process);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInfo info);
@@ -139,6 +142,34 @@ public sealed class Job : IDisposable
     }
     [StructLayout(LayoutKind.Sequential)]
     private struct MemoryUsage { public ulong Current, Peak; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Accounting { public long TotalUser, TotalKernel, PeriodUser, PeriodKernel; public uint PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses; }
+    // JobObjectBasicAccountingInformation: aggregate user+kernel ticks of every member, used as the idle signal.
+    public long? QueryCpuTicks()
+    {
+        if(Handle.IsClosed||Handle.IsInvalid)return null;
+        var size=Marshal.SizeOf<Accounting>();var p=Marshal.AllocHGlobal(size);
+        try
+        {
+            if(!Native.QueryInformationJobObject(Handle,1,p,(uint)size,IntPtr.Zero))return null;
+            var a=Marshal.PtrToStructure<Accounting>(p);
+            return checked(a.TotalUser+a.TotalKernel);
+        }
+        finally{Marshal.FreeHGlobal(p);}
+    }
+    // Best-effort working-set trim; pages may enter standby/modified lists, not necessarily the page file.
+    // Pin the opened handle and recheck membership: a PID can be reused after Members() returns.
+    public (int Trimmed,int Skipped) TrimWorkingSets()
+    {
+        var trimmed=0;var skipped=0;
+        foreach(var pid in Members())
+        {
+            using var process=Native.OpenProcess(0x0100|0x1000,false,pid);
+            if(process.IsInvalid||!Native.IsProcessInJob(process,Handle,out var member)||!member){skipped++;continue;}
+            if(Native.K32EmptyWorkingSet(process))trimmed++;else skipped++;
+        }
+        return (trimmed,skipped);
+    }
     public ulong? QueryCurrentCommit()
     {
         if(Handle.IsClosed||Handle.IsInvalid)return null;

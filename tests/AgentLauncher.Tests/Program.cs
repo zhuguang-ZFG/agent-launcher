@@ -4,6 +4,25 @@ using System.Text.Json;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
+if(args is ["--delivery-capability-check",var capabilityRoot])
+{
+    if(!capabilityRoot.Contains("AgentLauncher-tests-"))throw new IOException("Isolated root required.");
+    Directory.CreateDirectory(capabilityRoot);var checks=new List<object>();
+    foreach(var agent in new[]{"codex","claude","omp","pi","qoder"})
+    {
+        var task=new TaskCard{AgentId=agent,Project=capabilityRoot,Name="任务传递测试",Description="只准备参数，不执行任务",DeliveryMode="automatic"};
+        try{var profile=await TaskDelivery.PrepareAsync(task);var cap=await AgentProbe.ProbeCapabilityAsync(agent,new(),capabilityRoot,TimeSpan.FromSeconds(8));var resume=await ResumeCapability.CheckAsync(agent,new(),capabilityRoot,cap);checks.Add(new{agent,ok=true,cap.Version,Delivery=profile.Arguments[..^1],Resume=resume?.Arguments});Console.WriteLine("PASS capability "+agent+" "+cap.Version);}
+        catch(Exception e){checks.Add(new{agent,ok=false,error=e.Message});Console.WriteLine("FAIL capability "+agent+": "+e.Message);}
+    }
+    Store.Save(Path.Combine(capabilityRoot,"capabilities.json"),checks);return checks.Any(c=>c.GetType().GetProperty("ok")!.GetValue(c) is false)?1:0;
+}
+
+if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_DELIVERY_FIXTURE") is {Length:>0} deliveryFixture)
+{
+    if(args.Contains("--help")){Console.WriteLine("Usage: fixture [PROMPT]\n --print  Non-interactive mode\n --resume <id>\n [SESSION_ID]");return 0;}
+    File.WriteAllText(deliveryFixture,JsonSerializer.Serialize(args));return 0;
+}
+
 if(args.Length>=2&&args[0]=="--mode"&&args[1]=="rpc"&&Environment.GetEnvironmentVariable("AGENT_LAUNCHER_SOAK_RPC_FIXTURE") is {Length:>0} rpcFixture)
 {
     Console.WriteLine("{\"type\":\"ready\",\"protocolVersion\":1,\"maxFrameBytes\":4096}");Console.Out.Flush();
@@ -23,6 +42,8 @@ if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsy
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
 if(args is ["--allocate-hold",var holdMib,var holdMs]) return MemoryFixture.AllocateHold(int.Parse(holdMib),int.Parse(holdMs));
 if(args is ["--memory-cycle",var memoryPrefix]) return MemoryFixture.Cycle(memoryPrefix);
+if(args is ["--memory-trim-cycle",var trimPrefix]) return MemoryFixture.Cycle(trimPrefix,verifyAfterTrim:true);
+if(args is ["--spin",var spinMs]){var until=Stopwatch.GetTimestamp()+(long)(Stopwatch.Frequency*(double)int.Parse(spinMs)/1000);long spin=0;while(Stopwatch.GetTimestamp()<until)spin=(spin+1)&0xFFFF;return (int)(spin&1);}
 if(args is ["--qoder-live",var liveCli,var liveWorker,var liveRoot]) return await QoderLiveChecks.RunAsync(liveCli,liveWorker,liveRoot);
 if(args is ["--qoder-resume-check",var resumeCli,var resumeWorker,var resumeRoot]) return await QoderLiveChecks.ResumeAsync(resumeCli,resumeWorker,resumeRoot);
 if(args is ["--qoder-live-session",var sessionCli,var sessionWorker,var sessionRoot]) return await QoderLiveChecks.RunAsync(sessionCli,sessionWorker,sessionRoot,true);
@@ -229,6 +250,26 @@ Test("P02 Job memory evidence survives child exit and never invents crash cause"
  Assert(JsonSerializer.Deserialize<Receipt>(JsonSerializer.Serialize(receipt,Store.Json),Store.Json)?.JobMemory==evidence,"receipt lost evidence");
  Assert(JsonSerializer.Deserialize<Receipt>("{\"Phase\":\"Finished\",\"Pid\":1,\"ProcessTime\":2,\"ExitCode\":0,\"Detail\":\"old\",\"At\":\"2026-11-11T00:00:00Z\"}",Store.Json)?.JobMemory==null,"legacy receipt compatibility lost");
 });
+IdleWorkingSetChecks.Run(Test,Assert);
+SlotConvenienceChecks.Run(Test,Assert);
+Test("W1 idle working-set trim reclaims physical and preserves data on page-in",()=>{
+ using var root=new Job(@"Local\AL-trim-root-"+Guid.NewGuid(),root:true);using var job=new Job(@"Local\AL-trim-child-"+Guid.NewGuid(),512*ResourcePolicy.MiB);
+ var prefix=Path.Combine(temp,"trim-"+Guid.NewGuid().ToString("N"));
+ using var p=new ProtectedProcess(new(Environment.ProcessPath!,["--memory-trim-cycle",prefix],"exe"),temp,root,job);p.Resume();
+ try {
+ var deadline=Stopwatch.StartNew();while(!File.Exists(prefix+".allocated")){Assert(deadline.Elapsed.TotalSeconds<15,"holder did not allocate");Thread.Sleep(50);}
+ var before=JobUsageReader.Read(job).PrivateWorkingSetBytes??0;Assert(before>=48UL*1024*1024,"fixture working set too small to prove trim: "+before);
+ var (trimmed,skipped)=job.TrimWorkingSets();Assert(trimmed>=1&&skipped==0,$"trim did not reach the holder: trimmed={trimmed} skipped={skipped}");
+ var after=JobUsageReader.Read(job).PrivateWorkingSetBytes??0;Assert(after+16UL*1024*1024<before,$"trim reclaimed too little: before={before} after={after}");
+ File.WriteAllText(prefix+".touch","1");
+ deadline.Restart();while(!File.Exists(prefix+".touched")){Assert(deadline.Elapsed.TotalSeconds<15,"holder could not read and rewrite its original pages after trim");Thread.Sleep(50);}
+ var restored=JobUsageReader.Read(job).PrivateWorkingSetBytes??0;Assert(restored>=48UL*1024*1024,"pages did not return on use: "+restored);
+ Console.WriteLine($"W1 private working set MiB: before={before/1048576.0:0.0}, after={after/1048576.0:0.0}, restored={restored/1048576.0:0.0}");
+ File.WriteAllText(prefix+".free","1");
+ deadline.Restart();while(!File.Exists(prefix+".freed")){Assert(deadline.Elapsed.TotalSeconds<15,"holder died after trim");Thread.Sleep(50);}
+ File.WriteAllText(prefix+".exit","1");Assert(p.Process.WaitForExit(10000),"holder timeout after trim");Assert(p.Process.ExitCode==0,"holder exited abnormally after trim: "+p.Process.ExitCode);
+ } finally {if(!p.Process.HasExited){p.Process.Kill();p.Process.WaitForExit(5000);}}
+});
 Test("ACC-A01 preset argv keeps every argument exact and isolated per agent",()=>{
  var omp=AgentPresets.For("omp",AgentPresets.OmpVerifiedVersion);
  Assert(omp.Count==5&&AgentPresets.For("omp","19.0.0").Count==0,"unknown version exposed presets");
@@ -398,6 +439,7 @@ ConfigurationReviewChecks.Run(Test,temp);
 AgentLauncher.Tests.PaneLayoutChecks.Run(Test);
 AgentLauncher.Tests.TaskChecks.Run(Test,temp);
 AgentLauncher.Tests.TaskUsabilityChecks.Run(Test,temp);
+AgentLauncher.Tests.PracticalFixChecks.Run(Test,temp);
 AgentLauncher.Tests.AgentIdentityChecks.Run(Test,temp);
 AgentLauncher.Tests.ReviewPolicyChecks.Run(Test,temp);
 ReviewChecks.Run(Test,temp);

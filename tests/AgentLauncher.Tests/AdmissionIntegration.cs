@@ -329,6 +329,93 @@ internal static class AdmissionIntegration
             }
         });
 
+        // W2: the idle working-set trim is a monitor behavior — only latched physical pressure unlocks it, only CPU-silent
+        // Started panes are paged out, the reclaim is reported on the entry, and a busy pane in the same set is spared.
+        await Test("W2 pressure trims only idle Started panes and reports the reclaim", async () =>
+        {
+            var type = System.Reflection.Assembly.LoadFrom(Store.WorkerPath.Replace(".exe", ".dll", StringComparison.OrdinalIgnoreCase)).GetType("AgentLauncher.Worker.Monitor", true)!;
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            System.Reflection.FieldInfo Field(string name) => type.GetField(name, flags) ?? throw new MissingFieldException(type.FullName, name);
+            var refresh = type.GetMethod("Refresh", flags) ?? throw new MissingMethodException(type.FullName, "Refresh");
+            var sample = new MemorySnapshot(16 * ResourcePolicy.GiB, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 5, DateTimeOffset.UtcNow);
+            var isolatedRoot = Store.RootJob + "-trim-" + Guid.NewGuid().ToString("N");
+            using var rootJob = new Job(isolatedRoot, root: true);
+            var idleItem = Item("trim-idle");
+            var busyItem = Item("trim-busy");
+            var idleOk = Path.Combine(Store.Root, "trim-idle-" + Guid.NewGuid().ToString("N") + ".ok");
+            using var idleJob = new Job(Store.JobName(idleItem.Id), ResourcePolicy.AgentBudget);
+            using var busyJob = new Job(Store.JobName(busyItem.Id), ResourcePolicy.AgentBudget);
+            using var idleHolder = new ProtectedProcess(new(Environment.ProcessPath!, ["--allocate-mib", "384", "30000", idleOk], "exe"), cwd, rootJob, idleJob);
+            using var busyHolder = new ProtectedProcess(new(Environment.ProcessPath!, ["--spin", "30000"], "exe"), cwd, rootJob, busyJob);
+            try
+            {
+                idleHolder.Resume();
+                busyHolder.Resume();
+                for (var i = 0; i < 100 && !File.Exists(idleOk); i++) await Task.Delay(100);
+                Assert(File.Exists(idleOk), "idle fixture did not allocate its pages");
+                var idleEntry = new ControlEntry { Plan = idleItem, Digest = Store.Digest(idleItem), State = "Started", Detail = "已启动进程（不代表任务完成）" };
+                var busyEntry = new ControlEntry { Plan = busyItem, Digest = Store.Digest(busyItem), State = "Started", Detail = "已启动进程（不代表任务完成）" };
+                Store.Save(Store.ReceiptPath(idleItem.Id), new Receipt("Started", idleHolder.Process.Id, idleHolder.CreationTime, null, "已启动进程（不代表任务完成）", DateTimeOffset.UtcNow));
+                Store.Save(Store.ReceiptPath(busyItem.Id), new Receipt("Started", busyHolder.Process.Id, busyHolder.CreationTime, null, "已启动进程（不代表任务完成）", DateTimeOffset.UtcNow));
+                using var monitor = (IDisposable)Activator.CreateInstance(type, true)!;
+                Field("sample").SetValue(monitor, sample);
+                Field("ledger").SetValue(monitor, new Ledger { Entries = [idleEntry, busyEntry] });
+                Field("ledgerPath").SetValue(monitor, Path.Combine(Store.Root, "trim-" + Guid.NewGuid().ToString("N") + ".json"));
+                Field("root").SetValue(monitor, new Job(isolatedRoot, root: true));
+                var elapsed = TimeSpan.Zero;
+                Field("trimClockOverride").SetValue(monitor, (Func<TimeSpan>)(() => elapsed));
+                Field("trimPhysicalFloor").SetValue(monitor, ResourcePolicy.DefaultPhysicalFloor(sample.Total));
+                var jobsDict = (Dictionary<Guid, Job>)Field("jobs").GetValue(monitor)!;
+                jobsDict[idleItem.Id] = idleJob;
+                jobsDict[busyItem.Id] = busyJob;
+                var tracker = (PressureTracker)Field("pressureTracker").GetValue(monitor)!;
+                void RefreshNow(MemorySnapshot? reading = null)
+                {
+                    // A fresh injected sample keeps Refresh from resampling the real machine, so the manually
+                    // latched tracker is the only pressure signal in this fixture.
+                    Field("sample").SetValue(monitor, (reading ?? sample) with { At = DateTimeOffset.UtcNow });
+                    refresh.Invoke(monitor, [false]);
+                }
+                var idleBefore = JobUsageReader.Read(idleJob).PrivateWorkingSetBytes ?? 0;
+                Assert(idleBefore >= 320UL * 1024 * 1024, "idle fixture working set too small to prove trim: " + idleBefore);
+                RefreshNow();
+                await Task.Delay(350);
+                RefreshNow();
+                var idleAfterCalm = JobUsageReader.Read(idleJob).PrivateWorkingSetBytes ?? 0;
+                Assert(idleAfterCalm + 64UL * 1024 * 1024 > idleBefore, $"off-pressure trim must not run: before={idleBefore} after={idleAfterCalm}");
+                Assert(!idleEntry.Detail.Contains("换出"), "off-pressure detail reported a trim: " + idleEntry.Detail);
+                for (var i = 0; i < 3; i++) tracker.Observe(sample with { CpuPercent = 95 }, ResourcePolicy.DefaultPhysicalFloor(sample.Total));
+                Assert(tracker.Pressure, "pressure fixture did not latch");
+                elapsed = TimeSpan.FromSeconds(31);
+                RefreshNow(sample with { CpuPercent = 95 });
+                Assert(!idleEntry.Detail.Contains("工作集减少"), "CPU-only pressure triggered paging");
+                RefreshNow(sample with { CommitAvailable = ResourcePolicy.MiB });
+                Assert(!idleEntry.Detail.Contains("工作集减少"), "commit-only pressure triggered paging");
+                var busyBefore = JobUsageReader.Read(busyJob).PrivateWorkingSetBytes ?? 0;
+                await Task.Delay(350);
+                var lowMemory = sample with { Available = ResourcePolicy.GiB };
+                RefreshNow(lowMemory);
+                var idleAfter = JobUsageReader.Read(idleJob).PrivateWorkingSetBytes ?? 0;
+                var busyAfter = JobUsageReader.Read(busyJob).PrivateWorkingSetBytes ?? 0;
+                Assert(idleAfter + 64UL * 1024 * 1024 < idleBefore, $"pressured trim reclaimed too little: before={idleBefore} after={idleAfter}");
+                Assert(busyAfter + 8UL * 1024 * 1024 > busyBefore, $"busy pane was trimmed: before={busyBefore} after={busyAfter}");
+                Assert(idleEntry.Detail.Contains("工作集减少") && idleEntry.Detail.Contains("MiB"), "trim reclaim was not reported on the entry: " + idleEntry.Detail);
+                Assert(!busyEntry.Detail.Contains("工作集减少"), "busy pane reported a trim: " + busyEntry.Detail);
+                Assert(!idleHolder.Process.HasExited, "trim killed the idle pane process");
+                var nextTrimAt = Field("nextTrimAt").GetValue(monitor);
+                elapsed = TimeSpan.FromSeconds(40);
+                RefreshNow(lowMemory);
+                Assert(Equals(nextTrimAt, Field("nextTrimAt").GetValue(monitor)), "pane was trimmed again during cooldown");
+                Assert(idleEntry.State == "Started" && busyEntry.State == "Started", "trim changed launch authority");
+                Console.WriteLine($"W2 private working set MiB: idle={idleBefore/1048576.0:0.0}->{idleAfter/1048576.0:0.0}, busy={busyBefore/1048576.0:0.0}->{busyAfter/1048576.0:0.0}");
+            }
+            finally
+            {
+                try { idleHolder.Process.Kill(); } catch { }
+                try { busyHolder.Process.Kill(); } catch { }
+            }
+        });
+
         await Test("R21 legacy ledger with nine pending agents is refused at begin and eight still begins", async () =>
         {
             SaveAuthority();

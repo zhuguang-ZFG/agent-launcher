@@ -2,6 +2,8 @@
 
 日期：2026-11-09。结论：**已交付可运行技术预览；未达到完整稳定发布门禁。** 本页区分实现、已测子场景、未测要求。测试由实现者执行；§0 第三轮经三个独立评审代理审查并修复确认项，仍无人类独立可用性测试。
 
+最新交付：2026-11-17 的操作便利性改进、完整门禁和生产预览更新见 §79；空闲工作集回收见 §78。旧章节是各自时点的记录，不代表当前实现。
+
 ## 0. v0.7 界面重设计实施（2026-11-09 续）
 
 按 [UI-REDESIGN-v0.7.md](UI-REDESIGN-v0.7.md) 执行，未修改资源保护与启动合同。本轮改动：
@@ -1317,3 +1319,71 @@ powershell -NoProfile -File scripts/test.ps1
 - 测试（RED→GREEN）：新集成用例 `R-pool-handle-lost reconcile keeps unprovable pool charged and discloses retention`（Integration.cs，紧随 R-handle-lost）——真实池 Job+ACC-S3B03 类直接成员幸存者（[root,pool]、无 item）+句柄处置后按名打开失败（code 2）的夹具；Finished 回执成员条目经核对释放，断言：池记录保留（不变量）、AdmissionBlockedReason 含「资源池」与新措辞「自动释放」、结果消息披露滞留池、幸存者不被杀死；随后杀死直接成员做第二次核对，断言池记录仍保留、阻塞与披露仍在（成员之死同样不可证明，保留至启动轮转）。RED 实证：旧代码全套件 **124 过 1 挂**，唯一失败即本用例且挂在「自动释放」措辞断言，错误文本正是旧文案「需人工核对后释放」；条目释放/池保留/准入阻塞三项不变量断言在旧代码即绿（属守护而非新行为）。GREEN 与变异证据：见下门禁。
 - 门禁：原生套件 **188/0**（复跑，证据根 8d2e2610；前一次 187/1 为 ACC-R07 真实内存分配用例，发生在本机准入连环拒止的内存危机窗口，复跑转绿与压力窗口瞬时失败特征一致，但单次复跑不构成因果证明；该路径未被本轮改动）；集成套件 **125/0**（EXIT=0，证据根 b43300f5，含新用例两阶段断言：直接成员存活时保留计费、成员死后仍保留至启动轮转）。RED→GREEN 闭环：旧代码 124/1 → 本轮 125/0，唯一新增用例先红后绿；RED 同时构成对旧措辞的变异证红。
 - 待评审：测试基线 +1（只增不削）；两处横幅文案变更；reconcile 结果消息追加；新增 `scripts/run-integration-once.ps1` 窄工具（保留；已修正套件退出码透传——初版 `Write-Host` 会把非零退出掩盖为成功）。
+
+## 77. 突破轮：压力触发的空闲窗格工作集换出——物理容量跟随活跃工作（2026-11-16 夜，Asia/Shanghai）
+
+以下为接续工作区中的初稿记录；“30 拍约 30 秒”、CPU/提交压力触发和“换出”表述已由 §78 修正，当前合同以 C10 为准。
+
+- 动因：用户指令「不能光内存保护，要想办法突破内存的限制，不能比单跑 cmd 的数量还少」。本机 15.19 GiB 物理 / 30.38 GiB 提交上限：裸 cmd 靠 Windows 自然换页实现超订；本程序的任务组硬上限+准入预算把每个窗格的峰值记为长期占用，若不处理，并发体感反而低于裸 cmd。核心杠杆：**空闲窗格的物理页不应与活跃窗格竞争**——被换出的只是页，进程语义不变。
+- 机制（Worker 监控，纯进程外、可证伪、默认关闭于无压力时）：
+  1. 空闲判定：`Job.QueryCpuTicks()`（JOBOBJECT_BASIC_ACCOUNTING_INFORMATION，kind=1）汇总整棵进程树的 user+kernel 时间；Refresh 每拍比对，零增量累计 ≥30 拍（约 30 秒）视为空闲。CPU 活跃窗格永不换出。
+  2. 触发门：仅 `pressureTracker` 锁定（连续 3 次高读数：CPU≥80% 或可用物理/提交低于下限）时才换出；压力之外一拍不换（W2 Phase A 实证）。压力锁本身沿用既有迟滞（健康连读后解除）。
+  3. 换出：`Job.TrimWorkingSets()` 对成员逐个 `OpenProcess(PROCESS_SET_QUOTA|PROCESS_QUERY_INFORMATION)` + `K32EmptyWorkingSet`；拒绝/已退出成员跳过，整体异常静默跳过（catch IOException/Win32Exception/UnauthorizedAccessException），绝不改变条目状态——只分页，不动语义。每窗格 120 秒冷却；git 短任务与 Pending/Creating 条目不换。
+  4. 披露：换出前后以 JobUsageReader 量任务组私有工作集，回收 ≥32 MiB 才在运行记录追加「；空闲换出 N MiB 腾给活跃任务」（10 分钟衰减，随 Refresh 重组自然消失；IPC 形状不变，仅 Detail 文本）。
+- 拒绝的假设：按进程设工作集硬上限（多进程 node 树下按进程计费泄漏）；撤销或降低既有保护（用户已否，主机死机风险）；进程内存优先级 ProcessMemoryPriority（更温和但效果不可确定性断言，留作后续）。
+- 测试（RED→GREEN）：
+  1. `W1 idle working-set trim reclaims physical and keeps the process functional`（原生套件）：--memory-cycle 夹具 64 MiB 触页，断言换出前 ≥48 MiB、换出后跌落 ≥16 MiB、进程继续完成标记生命周期且退出码 0——证明换出只分页不杀进程。旧代码无 `TrimWorkingSets`/`QueryCpuTicks`，编译即 RED。
+  2. `W2 pressure trims only idle Started panes and reports the reclaim`（admission-integration，直构 Monitor 反射夹具，同 ACC-R07 模式）：`--allocate-mib 384` 空闲夹具 + `--spin` CPU 繁忙夹具。Phase A（无压力两拍）：工作集稳定、无换出文案；Phase B（反射锁定压力）：空闲窗格工作集跌 ≥64 MiB、运行记录出现「空闲换出 … MiB 腾给活跃任务」，繁忙窗格工作集不变（±8 MiB）且无文案；两夹具进程换出后均存活。旧代码无换出通道，断言必红。
+  3. 新增测试宿主夹具 `--spin <ms>`（3 行）：忙窗格 CPU 信号源。待评审：测试基线 +2 用例 +1 夹具（只增不削）。
+- 门禁：原生套件 **189/0**（含 W1）；admission-integration **EXIT=0**（含 W2 两阶段断言）；完整门禁见下条更新。
+
+## 78. 空闲工作集回收收口与可运行包（2026-11-17，Asia/Shanghai）
+
+- 依据：检查当前工作区差异、§67/75–77 日志和 GitHub AgentHub / Mem Reduct，详细来源、读取范围及采用边界见 [本轮审查](PRACTICAL-REVIEW-20261117.md)。保留已有草稿功能，补齐实用性缺口；未以新功能替代异常占用保护。
+- 修复：30 次 Refresh 改为整 Job CPU 无增量的单调 30 秒；无效/缺失读数重置。只在物理内存低于策略保留线且既有压力锁已置位时回收，CPU/commit 单独告急不回收。单项尝试冷却 120 秒（包括失败），全局 5 秒并要求新系统样本；异常不退出 Monitor、不变更授权。OpenProcess 后用固定句柄核对 Job 归属，避免 PID 复用误触无关进程。
+- 呈现：回收后在同轮运行状态披露私有工作集减少量，至少 32 MiB 才显示，十分钟有效，并说明再次使用时按需载入。不再声称页面必已写盘或减少 commit。没有改动窗口布局；实测仍不能推出固定并发增益或任意 CLI 不再 OOM。
+- 测试补齐：新增 W3 的三个策略回归，覆盖快速轮询、CPU 活动/计数倒退/未知值、冷却；W1 增加原始页面逐页校验、改写、重新载入与正常退出；W2 增加 CPU-only、commit-only 和冷却断言。发现 `--admission-integration` 从未纳入统一入口，现加入 `scripts/test.ps1` 并保留独立诊断目录，CI gate 调用同一入口。
+- 本机验证：Windows x64 / .NET SDK **8.0.419**；`powershell -NoProfile -File scripts/test.ps1 -RuntimeDirectory artifacts/practical-20261117-runtime` **退出 0**，没有 SkipUi/SkipBrowser。原生 **192/0**、repair **36/0**、admission **16/0**、完整 integration **134/0**，启动队列/直接批次/真实 Terminal 批次均通过；WPF **311** 断言、Node 原型 **5/5**、Omp 协议 **6/6**、Edge **5/5**。日志 `artifacts/practical-20261117-gate.log`，JSON 在 `artifacts/ci-diagnostics/admission-integration/`、`artifacts/integration-results.json`、`artifacts/ui/ui-checks.json`、`artifacts/prototype-browser-results.json`。已查看本次 `artifacts/ui/simple-start.png`；该截图是启动流程回归，不能充当工作集提示的视觉证据。
+- 定向实测：W1 私有工作集 **69.5 → 接近 0 → 64.4 MiB**，回收后全部原始触页数据可读且可改写，最终退出码 0；W2 空闲分配夹具 **391.1 → 接近 0 MiB**，CPU 忙夹具 **6.9 → 6.9 MiB**，两者状态保持 Started；W2 的压力与单调时间由测试注入，工作集测量和 Job 操作是真实 OS 行为，不当作真实整机缺内存性能基准。
+- 交付：`scripts/build.ps1` **退出 0**，更新 `artifacts/preview`，生产程序集测试标记检查、配套哈希和 .NET Desktop Runtime 检查通过。原包备份为 `artifacts/preview.before-beda4d5fecd34788b3e0aee7267335cf`，固定 `Start-AgentLauncher.cmd` 使用新包。生产真实 Terminal F12/Enter 自动化 **退出 0**：`artifacts/production-pane-8b38cd6acad74ad49124dffd2ff73692/result.json`，记录实际 Worker SHA-256；构建与生产测试日志分别为 `artifacts/practical-20261117-build.log`、`artifacts/practical-20261117-production-pane.log`。
+- 边界：本轮源码未提交，发布 manifest 明确 `SourceDirty=true`，未推送 GitHub、未运行远端 CI。尚无本次回收策略下真实 Omp/Qoder 代表性长任务的吞吐/延迟或长期换页数据；§11 本机长稳、独立人类可用性与完整稳定发布门禁不据此关闭。新增与加强的测试已执行，未冒充独立评审。
+
+## 79. 操作便利性：项目常驻、快捷搜索与准确跳转（2026-11-17，Asia/Shanghai）
+
+- 用户要求继续提升可用性和操作便利性。按当前 WPF 入口与截图审查，采用既有 Windows 工具风格；方向、发现及技能署名见 [快捷导航设计](CONVENIENCE-20261117.md)。本轮修改 App 交互，沿用 §78 的 Core/Windows/Worker 改动。
+- 当前项目切换按钮常驻主区顶部，窄窗口及 150% 文字缩放仍可达；点击可选最近项目。失效/不可访问目录不替换当前项目，核对期间有新编辑或新请求则舍弃旧结果；最近列表即时刷新、忽略大小写去重，上限仍为 8。
+- 新增「快捷操作」/`Ctrl+K`：搜索已有操作、Agent 配置、最近项目、活动会话和等待项，多词 AND、中文及大小写不敏感；方向键保留输入焦点，Enter 选择后关闭窗口再执行，取消不执行，空结果禁用打开。列表不含 argv，不提供自动启动/重试/派发动作。`Alt+1…9` 切换 Agent，`F5` 重新检查；已有 `Ctrl+O`/`Ctrl+Enter` 保留，主窗口命令忽略长按重复。
+- Agent 选择只刷新编辑区，保留侧栏焦点及待确认项目输入，不改变勾选。侧栏前三条会话/等待项改为可点击按钮，按 attempt/queue ID 定位、展开并聚焦具体记录。队列摘要正确区分暂停、暂缓、范围外和等待调度。
+- 视觉核对：快捷窗口初版遗漏 WPF Window 样式，截图暴露白底与暗色输入混用；已显式绑定 Window/列表主题，选中文字使用 SelectionInk、长路径截断并保留悬停全文，新增断言。最终已查看 [150% 快捷操作截图](../artifacts/convenience-20261117/quick-actions-150.png)；[150% 窄窗口截图](../artifacts/convenience-20261117/quick-navigation-150.png)及几何断言证明入口可达。截图使用隔离夹具数据，不是真实用户会话。
+- 回归过程：首轮 `convenience-20261117-gate.log` 原生/repair/admission/integration 全通过，UI 在 CR09 最近项目切换断言失败；原断言紧跟异步事件，现等待明确的 `recentProjectTask` 完成后保持同一断言。一次单独 UI 检查误把测试根放在仓库 artifacts 下，使“非 Git 目录”夹具实际属于本仓库而失败；改回 `%TEMP%/AgentLauncher-tests-*` 后恢复。没有放宽生产保护或测试阈值。修复后独立 UI 330 项通过，主题断言纳入最终全门禁。
+- 最终验证：Windows x64 / .NET SDK **8.0.419**，`powershell -NoProfile -File scripts/test.ps1 -RuntimeDirectory artifacts/convenience-final-runtime` **退出 0**，UI/浏览器均未跳过。原生 **192/0**、repair **36/0**、admission **16/0**、integration **134/0**，启动队列、直接批次与真实 Terminal 批次通过；WPF **331** 断言（新增 UX10 **20** 项）、Node 原型 **5/5**、Omp 协议 **6/6**、Edge **5/5**。日志 `artifacts/convenience-final-gate.log`；本轮报告与截图归档 `artifacts/convenience-20261117/`，避免与历史的 `artifacts/ui/ui-exception.json` 混淆。
+- 交付：`scripts/build.ps1` **退出 0**，固定入口使用更新的 `artifacts/preview`，生产标记剥离、哈希和运行时检查通过；旧包保留于 `artifacts/preview.before-98605386788d415086176a0f8f3c871b`。真实生产 F12/Enter 检查 **退出 0**，结果 `artifacts/production-pane-af71506439154d13a5a6e16a037e2693/result.json`。构建与生产检查日志为 `artifacts/convenience-20261117-build.log` / `artifacts/convenience-20261117-production-pane.log`。
+- 边界：源码未提交/推送，manifest 保留 `SourceDirty=true`；未执行远端 CI。终端召回沿用原按窗口标题匹配的能力，同标题批次仍可能歧义；本轮不改变原有稳定发布和真实 CLI 长稳验收状态。
+
+## 80. 多 Agent 配置复用、分工名称与侧栏勾选（2026-11-17，Asia/Shanghai）
+
+- 用户要求继续改进可用性。新增后自动选中新项并聚焦 Agent 类型，不再停在原项；详情「⋯」及 Ctrl+K 增加复制与重命名。复制插在源项之后，分配新 ID 和可区分的副本名、深复制所有 Agent profile/参数数组，保留目录、未解决的目录要求与备注，默认不勾选。既有快照 Copy 保留原身份。
+- 内置 Agent 和自定义 Agent 均可设置分工名称。复用原 `CustomName` 字段，留空回退类型名，实际 AgentId/程序/参数不随名称变化；切换 Agent 类型继续保留分工名。名称只影响配置与之后创建的计划，不改写已启动/已排队快照，不作为自动 prompt 发送。独立重命名表单立即打开、选中原名称，无 CLI 版本探测；取消无修改，旧修订拒绝覆盖新编辑。
+- 侧栏每项增加独立复选框，直接选择本次启动项；点击名称/序号只切换详情。与详情共用 Checked/Unchecked 编辑路径，UIA TogglePattern 同样生效，编辑后恢复焦点。宽侧栏名称和命令状态分两行；窄侧栏从 56 增至 72 DIP，为满 16 项时的滚动条保留空间。只读/忙碌/关闭中拒绝编辑并恢复勾选显示，旧快捷动作在执行时重查容量和目标。
+- 回归基线：`ReviewRemoveFirstSlot` 明确先选择首项再移除，以继续验证“移除首项”原行为；新增自动选择不再符合旧夹具暗含的“当前永远是首项”。没有削弱原断言。新增原生 UX11 **3** 项覆盖深复制、目录要求及名称/通用模板持久化；WPF UX11 **26** 项覆盖菜单、复制、焦点、UIA、名称取消/过期、保护拒绝、原子保存、满额与窄屏布局。
+- 首次完整 `scripts/test.ps1 -RuntimeDirectory artifacts/slot-convenience-runtime` **退出 0**：原生 **195/0**、repair **36/0**、admission **16/0**、integration **134/0**，WPF 当时 **354** 项，Node 原型 **5/5**、Omp 协议 **6/6**、Edge **5/5**。日志 `artifacts/slot-convenience-gate.log`。
+- 视觉检查发现：150% 切回宽窗口时顶部快捷操作按钮的动态文案与测量宽度不同步，出现文字截断。新增几何断言复现；改为固定单行「快捷操作 Ctrl+K」后，按钮宽 **117.89 DIP**，文字宽 **91.89 DIP**、起点 **13 DIP**，完整容纳。满项窄侧栏扩宽后暴露品牌图标半截，已在窄态隐藏品牌整体，设置仍可达。最终布局之前的独立 WPF 检查 **357** 项通过，`artifacts/slot-layout-ui/` 保留测量 JSON 和宽/窄截图；已查看宽屏及满项 150% 截图。截图使用隔离夹具数据。
+- 最终统一验证：Windows x64 / .NET SDK **8.0.419**，`powershell -NoProfile -File scripts/test.ps1 -RuntimeDirectory artifacts/slot-convenience-final-runtime` **退出 0**，UI/浏览器均未跳过。原生 **195/0**、repair **36/0**、admission **16/0**、integration **134/0**，启动队列、直接批次及真实 Terminal 批次通过；WPF **357** 项（UX11 新增 **26** 项），Node 原型 **5/5**、Omp 协议 **6/6**、Edge **5/5**。日志 `artifacts/slot-convenience-final-gate.log`，最终报告、截图、源码哈希归档于 `artifacts/slot-convenience-20261117/`。已查看最终满 16 项、150% 窄屏截图，品牌半截问题消失，勾选、序号、设置和启动入口可达。
+- 交付：`scripts/build.ps1` **退出 0**，更新固定 `artifacts/preview`，程序集测试标记剥离、配套哈希及运行时检查通过；旧包保留于 `artifacts/preview.before-0291585917244275b6b6d46ac425327c`。生产真实 Terminal F12/Enter 检查 **退出 0**，结果 `artifacts/production-pane-f69ee478a89d4d948a27d16b8c2d2389/result.json`；构建与生产检查日志为 `artifacts/slot-convenience-build.log` / `artifacts/slot-convenience-production-pane.log`。源码未提交/推送，manifest 如实保留 `SourceDirty=true`。
+- 边界：当前仍为技术预览。旧版会忽略内置 Agent 的分工名，已有 CustomName 在切换类型后现在继续显示；不迁移 schema，不改变已有启动命令。未执行远端 CI、真实 CLI 长稳或独立人类可用性验收。
+
+## 81. 八项实用性问题修复与交付（2026-11-17，Asia/Shanghai）
+
+- 用户同意完整修复实用性审查中的八项问题。实现与操作见 [修复清单](USABILITY-FIXES-20261117.md)，合同 C13、验收 UX12。本轮延续 §78–80 的未提交改动，不替换或撤销此前便利性优化。
+- 任务结果：Worker 保留结构化退出码，主进程退出与后代排空分别呈现/通知；非零码显示失败及原诊断，0 退出仍须人工验收，未知码明确未知。Runner 创建 Agent 之前保存 attempt/workspace 绑定的 HEAD，摘要优先比较此提交并单列未跟踪文件；旧记录、原有未提交内容及共享目录均说明比较边界。
+- 任务交付与后台：schema **4**，1–3 在内存迁移，原任务默认手动；可选择发送后交互或非交互执行。帮助检查通过后把任务说明/验收作为单个 argv 传入，修改内容撤销旧排队，续接不重复发送初始任务。CLI 工具授权保持由其自身控制。GUI 可收起托盘继续现有队列，双击/再次启动/通知恢复；关闭仍暂停后续派发。
+- 恢复与操作：独立 `job-custody` 在 Runner 创建 Agent 前确认保留 root/pool/item 句柄，只有保留操作，没有执行授权；账本损坏时继续保留，终态且实际为空才释放。终端标题含完整批次身份，按持久化创建编号切窗格并核对实际标题/前台结果。详情立即打开、异步探测可取消。会话候选只读取有界元数据并匹配物理目录；升级后重新核对并明确确认当前程序，保留原指纹。清理检查显示已跟踪/未跟踪/忽略内容，支持复制、刷新与打开目录，不删除文件。
+- 回归修正：初版把句柄握手放在 monitor 授权阶段，CR04 反射夹具没有真实 `Store.RootJob` 导致失败；移到 Runner 持有真实 Jobs 后、创建子进程前，回滚保护保持原断言。守护 pipe 改为保留同一个待连接请求，避免每秒取消重建造成握手竞态。ACC-S3B03 改为核对真实成员与预约预算，移除测试中手动删池账本的做法；旧全部句柄丢失用例仍验证拒绝释放。会话输入改为可编辑候选框后，原 UI 夹具通过字段接口填值，保留登记/取消/续接断言。
+- 补充检查：数组/null/数值 type/非对象 payload 的合法 JSON 曾中断整个候选扫描；新增用例先得到 **205 通过 / 1 失败**（`usability-metadata-red.log`），补字段类型校验后 **206/0**（`usability-metadata-green.log`），覆盖 Codex/Qoder/Claude，异常文件不隐藏有效候选。截图测试初次误用了跨程序集内部 `ReviewProcess` 而编译失败，现使用公开 `AgentProbe` 受控进程接口，测试构建 **0 警告 / 0 错误**。未扩大生产访问权限。
+- 首轮完整统一门禁：`scripts/test.ps1 -RuntimeDirectory artifacts/usability-release-runtime` **退出 0**，UI/浏览器均未跳过；原生 **205/0**、repair **36/0**、admission **16/0**、integration **126/0**（只计含 `passed` 的测试项，不把路径/版本证据计作测试），WPF **366**、Node 原型 **5/5**、Omp 协议 **6/6**、Edge **5/5**。日志 `artifacts/usability-release-gate.log`。原始同名历史日志 `usability-final-gate.log` 在本轮开始前已记录一次 Terminal 批次失败，不当作本轮成功证据。
+- 最新独立 WPF：完整四组件配套测试 runtime，隔离 `%TEMP%/AgentLauncher-tests-usability-visual-*`，**退出 0，368 项，Dpi 120**；新增真实 Git 清理分类/不删除、三种交付方式及默认手动的检查。已查看 `artifacts/usability-visual-check/practical-cleanup-inventory.png`、`practical-task-delivery.png`：深色主题一致，清单/底部操作可达；表单滚动后交付选择及取消/应用可达。`practical-details-loading.png` 保存慢探测时的可编辑表单。截图均为隔离夹具。
+- 本机 CLI 能力核对：最终再次只运行帮助/版本，Codex **0.169.0**、Claude **2.1.325**、Omp **18.22.0**、Pi **1.5.2**、Qoder **1.1.90** 确认初始任务与指定会话参数，**5/5，退出 0**；证据 `artifacts/AgentLauncher-tests-delivery-final/capabilities.json`、`usability-delivery-capabilities.log`，各 Agent 配置指向隔离目录。早先能力证据中 Omp 为 **18.21.0**，保留两次结果以说明安装变化；不据此声称真实联网模型任务或长稳通过。
+- 最终全量本地门禁：Windows x64 / .NET SDK **8.0.419**，`powershell -NoProfile -File scripts/test.ps1 -RuntimeDirectory artifacts/usability-delivery-runtime` **退出 0**，UI/浏览器均未跳过。原生 **206/0**、repair **36/0**、admission **16/0**、integration **126/0**，启动队列/直接批次/真实 Terminal 批次全部通过；WPF **368**、Node 原型 **5/5**、Omp 协议 **6/6**、Edge **5/5**。日志 `artifacts/usability-delivery-gate.log`，报告和配套证明归档到 `artifacts/usability-20261117-release/verification.json`。本轮按报告的测试布尔字段计数；早前章节的集成数量包含元数据记录，不沿用其算法。
+- 可运行包：`scripts/build.ps1` **退出 0**，固定 `artifacts/preview` 已更新；20 个配套文件哈希全部一致、生产程序集无测试钩子、.NET Desktop Runtime 检查通过。旧包保留于 `artifacts/preview.before-f148faf7e3504664a85a4303b5da1205`。`test-production-pane.ps1 -PackageDirectory artifacts/preview` **退出 0**，真实 Terminal 的缓冲 Enter 拒绝、F12 退出和正常 Enter 退出均通过；结果 `artifacts/production-pane-c5981d601a1e4d75948d8caba1659eb8/result.json`，Worker SHA-256 **11CC582153E0B6A006CD70E755AC46C47EA44B82C0C8BCAD4DE4A52E083AC654**。构建/生产日志为 `usability-release-build.log` / `usability-release-production-pane.log`，生产包 manifest 如实保留 `SourceDirty=true`，源码未提交或推送。
+- 最终截图核对：全门禁的清理截图早于 TextBox 文字绘制，数据断言通过但截图为空；只在 `INTEGRATION_TESTS` 抓图前增加 Dispatcher 布局等待。独立完整 WPF 再次 **退出 0，368 项**（`artifacts/usability-final-ui/`），已查看最终清理与交付截图，文字/按钮完整可见。该调整不编入生产包；独立 UI 报告/截图另存归档根目录，首轮全门禁原始截图保留在 `gate-ui/`，不覆盖历史证据。`git diff --check` 在 CRLF 规则下通过。
+- 限制：全部句柄已丢失的旧资源池仍无法凭名称消失证明后代退出，需重启后核对；守护也不保证所有保护进程同时丢失时恢复。会话扫描有 2,000 文件/2 秒/64 KiB/12 行/100 候选边界，保留手工入口，Qoder 多目录会话不自动归属。当前仍是技术预览，未执行远端 CI、独立人类可用性或真实模型长稳验收；本轮不关闭 §11 的稳定发布门禁。

@@ -14,6 +14,7 @@ internal static class Program
         {
             if(args is ["qoder-memory-hook"])return QoderMemoryHook.RunAsync(Console.OpenStandardInput(),Console.Out,Environment.GetEnvironmentVariable(OmpMemoryGuard.PipeEnvironment)).GetAwaiter().GetResult();
             if(args is ["monitor"])return new Monitor().Run();
+            if(args is ["job-custody"])return JobCustody.Run();
             if(args is ["root-anchor"])return 0;
             if(args.Length>=7&&args[0]=="pool-items")return PoolItems(args);
             if(args.Length>=6&&args[0]=="pool-host")return PoolHost(args);
@@ -159,6 +160,8 @@ internal static class Program
             catch(System.ComponentModel.Win32Exception e){memoryNotificationError=$"Win32 {e.NativeErrorCode}: {e.Message}";}
             if(plan.PoolId is {} poolId){panePoolId=poolId;pool=new Job(Store.PoolName(poolId),openOnly:true);}
             if(PhysicalDirectory.Workspace(plan.Cwd).Key!=plan.Workspace.Key)throw new IOException("工作目录物理身份变化，已阻止启动。");
+            JobCustody.Retain(plan);
+            LaunchEvidence.CaptureBaseline(plan);
             if(interactive)TerminalAppearance.WritePaneHeading(plan);
             Dictionary<string,string>? guardEnvironment=null;
             var qoderGuard=QoderMemoryGuard.IsAttached(plan.Command);
@@ -318,6 +321,13 @@ internal sealed class Monitor : IDisposable
     private readonly string configurationPath=Store.FilePath("configuration.json");
     private readonly Dictionary<Guid,ReceiptCacheEntry> receiptCache=[];
     private readonly Dictionary<Guid,StatusEntryCache> statusEntryCache=[];
+    private readonly Dictionary<Guid,PaneActivity> paneActivity=[];
+    private ulong trimPhysicalFloor;
+    private TimeSpan nextTrimAt;
+    private DateTimeOffset lastTrimSampleAt;
+#if INTEGRATION_TESTS
+    private Func<TimeSpan>? trimClockOverride=null;
+#endif
     private int? rootCpuRate;
     private string? rootCpuReason;
     private bool retireForCpuChange;
@@ -338,6 +348,8 @@ internal sealed class Monitor : IDisposable
     private static readonly TimeSpan IdleTimeout=TimeSpan.FromSeconds(ResourcePolicy.IdleTimeoutSeconds);
     private static readonly TimeSpan AcceptTick=TimeSpan.FromSeconds(1);
     private const long LedgerBudget=6L*1024*1024;
+    private static readonly TimeSpan TrimNoteLifetime=TimeSpan.FromMinutes(10);
+    private const ulong TrimReportFloor=32UL*1024*1024;
     public int Run()
     {
         using var single=new Mutex(false,@"Local\"+Store.Pipe+"-monitor");bool own;
@@ -532,6 +544,7 @@ internal sealed class Monitor : IDisposable
                     catch(System.ComponentModel.Win32Exception ex)when(ex.NativeErrorCode==2){/* Last handle may be gone while processes still exist; absence is not exit evidence. */}
                 }
                 var receipt=ReadReceipt(e.Plan.Id);
+                if(receipt?.Phase is "Exited" or "Finished" && e.ExitCode!=receipt.ExitCode){e.ExitCode=receipt.ExitCode;changed=true;}
                 if(j==null && receipt?.Phase is not ("Finished" or "FailedBeforeStart")) {blocked="资源组句柄丢失，无法证明后代已退出；保留预算，系统重启后可核对释放。";e.Detail=blocked;reconcileOffered=true;continue;}
                 var members=j?.Members()??[];
                 if(members.Length==0){e.State=receipt?.Phase is "Started" or "Exited" or "ResumeIntent" or "Finished"?"Settled":"FailedBeforeStart";e.Detail=receipt?.Detail??"创建者已退出，核对无存活进程";changed=true;continue;}
@@ -561,6 +574,7 @@ internal sealed class Monitor : IDisposable
         {
             PersistRefresh();
         }
+        RefreshIdleWorkingSets();
         // Save can prune a just-finished record in the same tick, so absence from the book means "no longer active", not a defect.
         var activeIds=ledger.Entries.Where(e=>!Store.IsTerminal(e)).Select(e=>e.Plan.Id).ToHashSet();
         foreach(var id in jobs.Keys.Where(id=>!activeIds.Contains(id)).ToArray()){jobs[id].Dispose();jobs.Remove(id);receiptCache.Remove(id);}
@@ -584,6 +598,53 @@ internal sealed class Monitor : IDisposable
     }
     private bool CanRetire()=>!ledgerBroken&&blocked==null&&jobs.Count==0&&pools.Count==0&&ledger.Entries.All(Store.IsTerminal);
     private sealed record ReceiptCacheEntry(DateTime Written,long Length,Receipt? Receipt);
+    private sealed class PaneActivity
+    {
+        public IdleWorkingSetTracker Tracker { get; }=new();
+        public string? Note { get; set; }
+        public TimeSpan NotedAt { get; set; }
+    }
+    private void RefreshIdleWorkingSets()
+    {
+        var now=Stopwatch.GetElapsedTime(0);
+#if INTEGRATION_TESTS
+        if(trimClockOverride is not null)now=trimClockOverride();
+#endif
+        var candidates=ledger.Entries.Where(e=>e.State=="Started"&&e.Plan.Kind!="git").ToArray();
+        var ids=candidates.Select(e=>e.Plan.Id).ToHashSet();
+        foreach(var id in paneActivity.Keys.Where(id=>!ids.Contains(id)).ToArray())paneActivity.Remove(id);
+        var validSample=sample is not null&&ResourcePolicy.IsSampleValid(sample);
+        // Trimming cannot relieve commit-only or CPU-only pressure. Pace attempts across panes and demand a
+        // newer system sample after each attempt so an old shortage cannot trigger a burst of paging.
+        var memoryPressure=blocked==null&&!ledgerBroken&&pressure&&validSample&&sample!.Available<trimPhysicalFloor;
+        foreach(var e in candidates)
+        {
+            if(!paneActivity.TryGetValue(e.Plan.Id,out var activity))paneActivity[e.Plan.Id]=activity=new();
+            try
+            {
+                jobs.TryGetValue(e.Plan.Id,out var job);
+                activity.Tracker.Observe(validSample?job?.QueryCpuTicks():null,now);
+                if(job is not null&&memoryPressure&&now>=nextTrimAt&&sample!.At>lastTrimSampleAt&&activity.Tracker.TryBeginTrim(now))
+                {
+                    nextTrimAt=now+TimeSpan.FromSeconds(5);lastTrimSampleAt=sample.At;
+                    var before=JobUsageReader.Read(job).PrivateWorkingSetBytes;
+                    var result=job.TrimWorkingSets();
+                    var after=JobUsageReader.Read(job).PrivateWorkingSetBytes;
+                    if(result.Trimmed>0&&before is {} b&&after is {} a&&b>a&&b-a>=TrimReportFloor)
+                    {
+                        activity.Note=$"空闲会话工作集减少 {(b-a)/1048576.0:0} MiB；再次使用时按需载入";
+                        activity.NotedAt=now;
+                    }
+                }
+            }
+            catch(Exception ex)when(ex is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException or InvalidOperationException or OverflowException)
+            {
+                // An optional optimization cannot corrupt launch authority or terminate the monitor.
+                activity.Tracker.Observe(null,now);
+            }
+            if(activity.Note is {Length:>0} note&&now-activity.NotedAt<TrimNoteLifetime&&!e.Detail.Contains(note,StringComparison.Ordinal))e.Detail+="；"+note;
+        }
+    }
     private Receipt? ReadReceipt(Guid id)
     {
         var info=new FileInfo(Store.ReceiptPath(id));
@@ -847,11 +908,11 @@ internal sealed class Monitor : IDisposable
         catch(ArgumentException){return false;}
         catch(Exception e)when(e is InvalidOperationException or System.ComponentModel.Win32Exception){return true;}
     }
-    private readonly record struct StatusFields(LaunchItem Plan,string State,string Epoch,string Digest,DateTimeOffset Created,string Detail,string? Mode,ulong? JobMemoryLimit,ulong? PlanningBytes,ulong? PhysicalFloor,ulong? CommitFloor,int? CpuRate);
+    private readonly record struct StatusFields(LaunchItem Plan,string State,string Epoch,string Digest,DateTimeOffset Created,string Detail,string? Mode,ulong? JobMemoryLimit,ulong? PlanningBytes,ulong? PhysicalFloor,ulong? CommitFloor,int? CpuRate,int? ExitCode);
     private sealed record StatusEntryCache(StatusFields Fields,string Signature,long Bytes,bool Representable);
     private StatusEntryCache StatusEntry(ControlEntry entry)
     {
-        var fields=new StatusFields(entry.Plan,entry.State,entry.Epoch,entry.Digest,entry.Created,entry.Detail,entry.Mode,entry.JobMemoryLimit,entry.PlanningBytes,entry.PhysicalFloor,entry.CommitFloor,entry.CpuRate);
+        var fields=new StatusFields(entry.Plan,entry.State,entry.Epoch,entry.Digest,entry.Created,entry.Detail,entry.Mode,entry.JobMemoryLimit,entry.PlanningBytes,entry.PhysicalFloor,entry.CommitFloor,entry.CpuRate,entry.ExitCode);
         if(statusEntryCache.TryGetValue(entry.Plan.Id,out var cached)&&cached.Fields==fields)return cached;
         var data=JsonSerializer.SerializeToUtf8Bytes(entry,Store.Json);
         cached=new(fields,Convert.ToHexString(SHA256.HashData(data)),data.LongLength,Ipc.EntryRepresentable(entry));
@@ -964,7 +1025,7 @@ internal sealed class Monitor : IDisposable
         catch(Exception e)when(e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){authority=e.Message;conservative=true;}
         return authority??UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!StatusEntry(e).Representable).ToArray())??blocked??rootCpuReason??(includePressure&&pressure&&conservative?"资源压力尚未连续恢复，稍后重新检查。":null);
     }
-    public void Dispose(){foreach(var watch in poolWatches.Values)watch.Dispose();poolWatches.Clear();poolWatchErrors.Clear();foreach(var j in jobs.Values)j.Dispose();jobs.Clear();foreach(var j in pools.Values)j.Dispose();pools.Clear();receiptCache.Clear();statusEntryCache.Clear();root?.Dispose();}
+    public void Dispose(){foreach(var watch in poolWatches.Values)watch.Dispose();poolWatches.Clear();poolWatchErrors.Clear();foreach(var j in jobs.Values)j.Dispose();jobs.Clear();foreach(var j in pools.Values)j.Dispose();pools.Clear();receiptCache.Clear();statusEntryCache.Clear();paneActivity.Clear();root?.Dispose();}
     private List<BudgetItem> ActiveBudgets()
     {
         SampleResources();budgetBaseline=sample;
@@ -1136,6 +1197,7 @@ internal sealed class Monitor : IDisposable
         ulong floor,commitFloor;
         try{var policy=AuthorityPolicy();floor=policy.PhysicalFloor;commitFloor=policy.CommitFloor;}
         catch(Exception e)when(e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){floor=ResourcePolicy.DefaultPhysicalFloor(sample.Total);commitFloor=ResourcePolicy.DefaultCommitFloor(sample.CommitLimit);}
+        trimPhysicalFloor=floor;
         if(DateTimeOffset.UtcNow-pressureObservedAt>=TimeSpan.FromSeconds(2))
         {
             pressureTracker.Observe(sample,floor,commitFloor);pressureObservedAt=DateTimeOffset.UtcNow;
