@@ -22,6 +22,7 @@
 | [扩展实施计划](superpowers/plans/2026-11-11-vibe-workbench-plan.md) | 稳定性前置门槛、分阶段改动、验收与回退 |
 | [远程执行规格](superpowers/specs/2026-11-17-remote-execution-spec.md) | SSH 远程主机、执行域分域、生命周期、工作区同步与安全边界；三台同权见该规格第 6 节与本文 3.4 |
 | [缺口收口计划](superpowers/plans/2026-11-17-gap-close-plan.md) | 对照 `6daa7de` 已收口的远程项与仍开放的发布门禁；三台同权见该计划 2b |
+| [同步可靠性设计](superpowers/specs/2026-11-18-sync-reliability-design.md) | 冲突、离线与传播延迟的目标行为。待实现。R34～R44 均为未执行。不改写重新挂接段落 |
 | [prototype.html](prototype.html) | v0.6 离线交互稿，3 项状态问题已修复并通过浏览器回归 |
 
 现已有 C# / WPF 原生源码、可运行技术预览、真实 Windows Job/Git/Terminal 测试和 WPF 截图。发布包入口和证据见 IMPLEMENTATION；不能将局部断言等同于 51 项完整验收通过。性能阈值仍是门槛，未测项目和失败数据必须保留。
@@ -87,7 +88,7 @@
 
 上述能力仍是技术预览。下面这些不因本节关闭：G4；ACCEPTANCE §11 浸泡；独立人类可用性；远端 CI；配置窗口完全退出后的会话通知补播（托盘后台可以继续）；同标题终端召回可能选错窗口；句柄全部丢失的旧池仍须重启后再核对；工作集回收不证明 commit 下降。
 
-远程执行的状态、分域、校验、同步和安全合同见 [远程执行规格](superpowers/specs/2026-11-17-remote-execution-spec.md) 与 CONTRACTS C14。已收口项与仍开放的发布条件见[收口计划](superpowers/plans/2026-11-17-gap-close-plan.md)。
+远程执行的状态、分域、校验、同步和安全合同见 [远程执行规格](superpowers/specs/2026-11-17-remote-execution-spec.md) 与 CONTRACTS C14。已收口项与仍开放的发布条件见[收口计划](superpowers/plans/2026-11-17-gap-close-plan.md)。冲突、离线与传播延迟的目标行为见 [同步可靠性设计](superpowers/specs/2026-11-18-sync-reliability-design.md)。该设计尚未实现；现有单链路徽章和 §83–§84 的单对活测仍保持原记录，不构成三台当前已收敛。
 
 ## 4. 使用流程
 
