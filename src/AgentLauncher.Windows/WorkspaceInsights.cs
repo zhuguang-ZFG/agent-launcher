@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using AgentLauncher.Core;
 
 namespace AgentLauncher.Windows;
 
@@ -9,19 +10,28 @@ public sealed record WorkspaceChangeList(bool Ok,string Branch,string[] Entries,
     public static WorkspaceChangeList Fail(string error)=>new(false,"",[],error);
 }
 
-/// <summary>远程同步健康状态；就绪判据与 WorkspaceSync.WaitReadyAsync 完全一致（Watching 且无 Transition problems）。</summary>
-public enum SyncHealthState { NotSynced, Syncing, Ready, Problems }
+/// <summary>单文件只读 diff（B1）；Ok=false 时 Text 为空且 Error 给出可读原因。未跟踪文件 Ok=true 并给出提示文本。</summary>
+public sealed record WorkspaceFileDiff(bool Ok,string Text,string Error)
+{
+    public static WorkspaceFileDiff Fail(string error)=>new(false,"",error);
+}
+
+/// <summary>远程同步健康状态；就绪判据与 WorkspaceSync.WaitReadyAsync 完全一致（Watching 且无 Transition problems）。
+/// Synced/SyncProblem 是终态回退（A1）：会话已终止，依据 attempts/<id>/sync-final.json 显示「已同步」/「同步有问题」。</summary>
+public enum SyncHealthState { NotSynced, Syncing, Ready, Problems, Synced, SyncProblem }
 
 /// <summary>同步健康结果；SessionName 为匹配到的 Mutagen 会话名（未匹配时为空），Detail 是可读说明。</summary>
 public sealed record SyncHealth(SyncHealthState State,string SessionName,string Detail)
 {
-    public string Label=>State switch{SyncHealthState.Ready=>"就绪",SyncHealthState.Problems=>"有问题",SyncHealthState.Syncing=>"同步中",_=>"未同步"};
+    public string Label=>State switch{SyncHealthState.Ready=>"就绪",SyncHealthState.Problems=>"有问题",SyncHealthState.Syncing=>"同步中",SyncHealthState.Synced=>"已同步",SyncHealthState.SyncProblem=>"同步有问题",_=>"未同步"};
 }
 
 /// <summary>实用只读助手：本机改动列表 + Mutagen 同步健康。外部命令一律结构化参数、重定向输出、有界超时、超时杀进程；失败返回可读错误，不抛未处理异常。</summary>
 public static class WorkspaceInsights
 {
     private const int TimeoutSeconds=10;
+    /// <summary>B1 单文件 diff 行数上限；对话框累计上限由 UI 层用 TruncateLines 另行约束（2000 行）。</summary>
+    public const int MaxDiffLines=400;
 
     /// <summary>读取目录的分支与改动条目（porcelain v1 原始行，含 ## 分支行解析）。只读，不修改任何内容。</summary>
     public static WorkspaceChangeList ReadChanges(string directory)
@@ -46,6 +56,69 @@ public static class WorkspaceInsights
         var hasBranch=lines.Length>0&&lines[0].StartsWith("## ",StringComparison.Ordinal);
         var branch=hasBranch?lines[0][3..]:"未知分支";
         return new(true,branch,hasBranch?lines[1..]:lines,"");
+    }
+
+    /// <summary>B1 单文件只读 diff：git diff -- &lt;file&gt;（core.quotepath=false，10s 有界，超时杀进程树）。
+    /// 未跟踪文件返回「未跟踪，无 diff」提示；仅暂存的改动回退 git diff --cached；超过 MaxDiffLines 行截断并提示。绝不写入。</summary>
+    public static async Task<WorkspaceFileDiff> ReadDiffAsync(string directory,string file,CancellationToken cancellation=default)
+    {
+        if(string.IsNullOrWhiteSpace(directory))return WorkspaceFileDiff.Fail("工作目录为空，请先选择项目或为此项指定工作目录。");
+        if(string.IsNullOrWhiteSpace(file))return WorkspaceFileDiff.Fail("文件路径为空，无法查看 diff。");
+        string root;
+        try{root=Path.GetFullPath(directory);}
+        catch(Exception e)when(e is ArgumentException or NotSupportedException or PathTooLongException){return WorkspaceFileDiff.Fail("工作目录路径无效。");}
+        if(!Directory.Exists(root))return WorkspaceFileDiff.Fail("工作目录不存在或尚未创建："+root);
+        var git=Commands.FindExe("git.exe");
+        if(git is null||!File.Exists(git))return WorkspaceFileDiff.Fail("未找到 Git，无法查看文件 diff。");
+        // 先核对该文件的状态行：未跟踪文件没有 diff；X 位非空说明改动已暂存，工作区 diff 为空时回退 --cached。
+        var status=await ReviewGit.CaptureAsync(git,root,["-C",root,"status","--porcelain=v1","--",file],cancellation,TimeoutSeconds,64*1024);
+        if(status.TimedOut)return WorkspaceFileDiff.Fail($"Git 状态读取超时（{TimeoutSeconds} 秒），已终止；请稍后重试。");
+        if(status.Code!=0)return WorkspaceFileDiff.Fail("读取文件状态失败："+ReviewGit.Clean(status.Error));
+        var line=Encoding.UTF8.GetString(status.Output).Replace("\r\n","\n").Split('\n',StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()??"";
+        if(line.StartsWith("?? ",StringComparison.Ordinal))return new(true,"未跟踪，无 diff（新文件尚未纳入 Git；git diff 只覆盖已跟踪文件）。","");
+        var (text,diffError)=await CaptureDiffAsync(git,root,file,cancellation);
+        if(text is null)return WorkspaceFileDiff.Fail(diffError);
+        if(text.Length==0&&line.Length>=2&&line[0]is not (' ' or '?'))
+        {
+            var (cachedText,cachedError)=await CaptureDiffAsync(git,root,file,cancellation,cached:true);
+            if(cachedText is null)return WorkspaceFileDiff.Fail(cachedError);
+            text=cachedText;
+        }
+        if(text.Trim().Length==0)return new(true,"该文件没有可显示的 diff（内容未变化或改动已提交）。","");
+        var (bounded,truncated)=TruncateLines(text,MaxDiffLines);
+        return new(true,bounded+(truncated?$"\n…（单文件 diff 超过 {MaxDiffLines} 行已截断，请在终端运行 git diff -- {file} 查看完整内容）":""),"");
+    }
+
+    // Text=null 表示失败（Error 给出可读原因）；Text="" 表示无 diff。只读，超时杀进程树由 ReviewProcess 保证。
+    private static async Task<(string? Text,string Error)> CaptureDiffAsync(string git,string root,string file,CancellationToken cancellation,bool cached=false)
+    {
+        string[] args=cached?["-C",root,"diff","--cached","--",file]:["-C",root,"diff","--",file];
+        var capture=await ReviewGit.CaptureAsync(git,root,args,cancellation,TimeoutSeconds,1024*1024);
+        if(capture.TimedOut)return(null,$"Git diff 读取超时（{TimeoutSeconds} 秒），已终止；请稍后重试。");
+        if(capture.Truncated)return(null,"diff 超出读取边界，已停止；请直接在终端运行 git diff 查看。");
+        if(capture.Code!=0)return(null,"读取 diff 失败："+ReviewGit.Clean(capture.Error));
+        return(Encoding.UTF8.GetString(capture.Output).Replace("\r\n","\n"),"");
+    }
+
+    /// <summary>行数截断（纯函数）：最多保留 maxLines 行内容（末尾换行不计行），并报告是否发生截断。单文件 400 行与对话框累计 2000 行共用。</summary>
+    public static (string Text,bool Truncated) TruncateLines(string text,int maxLines)
+    {
+        if(maxLines<0)throw new ArgumentOutOfRangeException(nameof(maxLines),"行数上限不能为负。");
+        var lines=text.Replace("\r\n","\n").Split('\n');
+        var count=lines.Length;if(count>0&&lines[^1].Length==0)count--;
+        if(count<=maxLines)return(text,false);
+        return(string.Join("\n",lines.Take(maxLines)),true);
+    }
+
+    /// <summary>porcelain v1 行取文件路径：XY&lt;空格&gt;路径；重命名/复制取 " -&gt; " 之后的新路径；去掉外层引号（quotepath=false 已避免八进制转义）。</summary>
+    public static string ChangePath(string line)
+    {
+        if(line.Length<4)return "";
+        var path=line[3..];
+        var arrow=path.IndexOf(" -> ",StringComparison.Ordinal);
+        if(arrow>=0)path=path[(arrow+4)..];
+        if(path.Length>=2&&path[0]=='"'&&path[^1]=='"')path=path[1..^1];
+        return path;
     }
 
     /// <summary>运行 mutagen sync list（可指定会话名）；mutagen 缺失/失败/超时返回 Ok=false 与可读原因，不抛出。</summary>
@@ -88,6 +161,26 @@ public static class WorkspaceInsights
         }
         if(fallbackBlock is not null)return EvaluateBlock(fallbackName!,fallbackBlock);
         return new(SyncHealthState.NotSynced,"","未找到匹配的 Mutagen 同步会话（可能尚未启动或已终止）；远端改动不会落回本机。");
+    }
+
+    /// <summary>A1 徽章状态机（纯函数）：有活会话（Ready/Syncing/Problems）原样沿用；无活会话（NotSynced）时回退
+    /// Worker 在远程会话终态写入的 sync-final 记录——synced→已同步，其余一律 fail-closed→同步有问题；无记录→未同步。
+    /// 调用方只在条目终态时传入 final；Disconnected 等非终态传 null，仍按活会话评估。</summary>
+    public static SyncHealth EvaluateSyncBadge(SyncHealth live,SyncFinalRecord? final)
+    {
+        if(live.State!=SyncHealthState.NotSynced||final is null)return live;
+        var at=final.At.ToString("u");
+        return final.State==SyncFinalRecord.Synced
+            ?new(SyncHealthState.Synced,"",$"远程会话已结束；结束时 Mutagen flush 成功，远端改动已收敛落回本机（sync-final.json {at}）。"+final.Detail)
+            :new(SyncHealthState.SyncProblem,"",$"远程会话已结束，但结束时同步未确认收敛（sync-final.json {at}）。"+final.Detail);
+    }
+
+    /// <summary>读取同步证据（sync-session.json / sync-final.json）；缺失、损坏或不可读一律返回 null，不抛出。
+    /// 调用方须再核对 SchemaVersion==1（未知版本按无记录处理，fail-closed 显示未同步）。</summary>
+    public static T? ReadSyncEvidence<T>(string path) where T:class
+    {
+        try{return Store.Read<T>(path);}
+        catch(Exception e)when(e is IOException or System.Text.Json.JsonException or InvalidDataException or UnauthorizedAccessException){return null;}
     }
 
     // 与 MutagenSyncSession.WaitReadyAsync 相同的就绪判据：只看 Watching 会误判（远端目录无写权时仍 Watching 但带 Transition problems）。

@@ -109,6 +109,7 @@ internal static class RemoteExecutionChecks
             assert(remoteCmd.Contains("cd '/home/agent/work dir'"), "应包含工作目录（内部单引号 quoting）");
             assert(remoteCmd.Contains("pi '--arg with spaces' 'another'\\''arg'"), "应包含 agent 命令（转义单引号）");
             assert(remoteCmd.StartsWith("su - agent -c \"") && remoteCmd.EndsWith("\""), "远程命令应用双引号包裹（内部已有单引号）");
+            assert(remoteCmd.Contains("export NODE_OPTIONS=--max-old-space-size=1024;"), "远程命令应注入 Node 堆上限，防止小 VPS 被 agent 吃满内存");
             // stdout/stderr 必须继承控制台：重定向而无人读取会丢输出，远端写满管道缓冲会挂死 agent。
             assert(!backend.StartInfo.RedirectStandardOutput && !backend.StartInfo.RedirectStandardError, "SSH stdout/stderr 不应重定向（无人读取会丢输出/挂死远端）");
             // stdin 必须用独立管道（Start 后立即关闭）：若继承到控制台句柄，ssh -tt 会把本地控制台切到 raw 模式吞掉输出。

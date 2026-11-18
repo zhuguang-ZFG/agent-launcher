@@ -27,6 +27,9 @@ public static class WorkspaceSync
 // 工作区同步会话（生命周期管理）
 public interface IWorkspaceSyncSession : IAsyncDisposable
 {
+    // Mutagen 会话名（B3 持久化到 attempts/<id>/sync-session.json，App 重启后按名匹配）；非 Mutagen 模式为 null。
+    string? SessionName { get; }
+
     // 等待同步就绪（初始同步完成）
     Task WaitReadyAsync(CancellationToken cancellation = default);
     
@@ -60,12 +63,11 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         
         // 配置真实 SSH 路径（避免 fake SSH 拦截）
         // Mutagen 支持 MUTAGEN_SSH_PATH 环境变量（指向包含 ssh 和 scp 的目录）
-        // 注意：Windows OpenSSH 有阻塞问题，推荐 Git for Windows OpenSSH
-        // 全局配置（在 daemon 首次启动前稳定完成，不停止共享 daemon）
-        const string GitSshDir = @"C:\Program Files\Git\usr\bin";
-        if (File.Exists(Path.Combine(GitSshDir, "ssh.exe")) && File.Exists(Path.Combine(GitSshDir, "scp.exe")))
+        // Windows OpenSSH 用不了 MSYS agent 套接字，必须与 ssh-agent 同源于 Git 安装目录（按 git.exe 位置推导）。
+        var gitSshDir=SshAgent.GitSshBinDirectory();
+        if(gitSshDir!=null&&File.Exists(Path.Combine(gitSshDir,"ssh.exe"))&&File.Exists(Path.Combine(gitSshDir,"scp.exe")))
         {
-            Environment.SetEnvironmentVariable("MUTAGEN_SSH_PATH", GitSshDir);
+            Environment.SetEnvironmentVariable("MUTAGEN_SSH_PATH",gitSshDir);
         }
         
         // 启动 Mutagen daemon（如果未运行）
@@ -98,6 +100,8 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         return new MutagenSyncSession(sessionName, spec.RemotePath, daemonProcess);
     }
     
+    public string? SessionName => _sessionName;
+
     public async Task WaitReadyAsync(CancellationToken cancellation)
     {
         // 就绪判据：整体 Watching 且无 Transition problems。只看 Watching 会误判——远端目录创建失败
@@ -259,6 +263,8 @@ internal sealed class SshfsMountSession : IWorkspaceSyncSession
         throw new TimeoutException($"SSHFS 挂载超时（30 秒）：{mountPoint}");
     }
     
+    public string? SessionName => null;  // SSHFS 挂载无 Mutagen 会话名
+
     public Task WaitReadyAsync(CancellationToken cancellation)
     {
         // SSHFS 挂载在 StartAsync 中已等待
@@ -334,6 +340,7 @@ internal sealed class SshfsMountSession : IWorkspaceSyncSession
 // 无操作同步会话（不同步）
 internal sealed class NoOpSyncSession : IWorkspaceSyncSession
 {
+    public string? SessionName => null;
     public Task WaitReadyAsync(CancellationToken cancellation) => Task.CompletedTask;
     public string GetRemoteWorkingDirectory() => throw new InvalidOperationException("同步模式为 None，无远程工作目录");
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;

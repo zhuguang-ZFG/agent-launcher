@@ -102,8 +102,20 @@ public partial class MainWindow
         config.SaveTemplate("fourth");config.Edit(d=>d.DirectoryMode="shared");config.Restore(config.Templates["fourth"]);Render();
         Check("native mode restore renders isolated",DirectoryMode.SelectedIndex==0&&config.Draft.DirectoryMode=="isolated");
         var firstId=config.Draft.Slots[0].Id;config.Edit(d=>d.Slots[0].Profiles["pi"]=new(){Executable="C:\\Example\\pi.exe",Arguments=["--only-pi"]});Render();
-        var select=Find<ComboBox>(SlotList).First();select.SelectedValue="codex";Check("native Agent selector separates profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Executable=="");
-        select=Find<ComboBox>(SlotList).First();select.SelectedValue="pi";Check("native Agent selector restores profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Arguments.SequenceEqual(new[]{"--only-pi"}));
+        var select=Find<ComboBox>(SlotList).First();select.SelectedValue="local:codex";Check("native Agent selector separates profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Executable=="");
+        select=Find<ComboBox>(SlotList).First();select.SelectedValue="local:pi";Check("native Agent selector restores profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Arguments.SequenceEqual(new[]{"--only-pi"}));
+        var cloudHost=new RemoteHost(Guid.NewGuid(),"候选云 VPS","choices.example.com",22,"root","agent",["pi","kimi"],null);
+        config.RemoteHosts=[cloudHost];Render();
+        await SelectRailSlot(2);
+        var cloudSelect=Find<ComboBox>(SlotList).First();
+        Check("UX14 unbound slot lists cloud candidates",cloudSelect.Items.OfType<AgentChoice>().Any(c=>c.HostId==cloudHost.Id&&c.Label.Contains("☁")));
+        cloudSelect.SelectedValue=cloudHost.Id+":pi";
+        var boundSlot=config.Draft.Slots[1];
+        Check("UX14 picking cloud candidate binds host and derives remote dir",boundSlot.RemoteHostId==cloudHost.Id&&boundSlot.AgentId=="pi"&&RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(boundSlot.RemoteDirectory??"")&&boundSlot.RemoteDirectory!.StartsWith("~/work/"));
+        cloudSelect.SelectedValue="local:pi";
+        Check("UX14 picking local candidate unbinds host",config.Draft.Slots[1].RemoteHostId==null&&config.Draft.Slots[1].RemoteDirectory==null);
+        config.RemoteHosts=[];Render();
+        await SelectRailSlot(1);
         config.Edit(d=>{d.Slots[0].Profiles.Clear();d.Slots.ForEach(s=>s.Enabled=true);});Render();
         var firstMenu=Find<MenuButton>(SlotList).First();((Button)firstMenu.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         var openItems=firstMenu.menu.Items.OfType<MenuItem>().ToArray();Check("menu enable states at open",openItems[0].IsEnabled==false&&openItems[1].IsEnabled&&openItems[2].IsEnabled);firstMenu.menu.IsOpen=false;
@@ -407,6 +419,7 @@ public partial class MainWindow
         await RunQuickActionsChecksAsync(folder,Check,ResizeForCheckAsync);
         await RunSlotConvenienceChecksAsync(folder,Check,ResizeForCheckAsync);
         await RunPracticalFixChecksAsync(folder,Check);
+        await RunSyncReviewUiChecksAsync(folder,Check);
         // P1 session notifications: runtime transitions only, deduped, rate-limited and path-safe.
         var notifier = SessionNotifier.For(this);
         notifier.Reset(); notifier.TestMode = true;
@@ -447,6 +460,117 @@ public partial class MainWindow
         notifier.Now = () => DateTimeOffset.UtcNow; notifier.TestMode = false;
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});Close();
+    }
+
+    // A1 同步徽章终态回退 / B3 会话名持久化恢复 / B1 逐文件只读 diff 审阅的 UI 回归。
+    // 不依赖 mutagen/VPS：list 失败或无匹配会话时徽章必须走 sync-final 回退链；git 夹具在隔离测试根内构造。
+    private async Task RunSyncReviewUiChecksAsync(string folder,Action<string,bool> check)
+    {
+        var originalConfig=config;var originalStatus=status;var polling=timer.IsEnabled;
+        timer.Stop();await saveTask;
+        IEnumerable<T> FindLogical<T>(DependencyObject root) where T:DependencyObject
+        {
+            foreach(var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()){if(child is T target)yield return target;foreach(var nested in FindLogical<T>(child))yield return nested;}
+        }
+        try
+        {
+            var git=Commands.FindExe("git.exe")??throw new System.IO.IOException("同步审阅 UI 检查需要 Git。");
+            var repo=System.IO.Path.Combine(Store.Root,"sync-review-repo");System.IO.Directory.CreateDirectory(repo);
+            async Task Git(params string[] args)
+            {
+                var result=await AgentProbe.RunAsync(new(git,args,"exe"),repo,TimeSpan.FromSeconds(15),64*1024);
+                if(result.TimedOut||result.ExitCode!=0)throw new System.IO.IOException("同步审阅夹具 git 失败："+result.Error);
+            }
+            await Git("init","-q");
+            var tracked=System.IO.Path.Combine(repo,"tracked.txt");
+            await System.IO.File.WriteAllTextAsync(tracked,string.Join("\n",Enumerable.Range(1,500).Select(i=>"line "+i))+"\n");
+            await Git("add","--","tracked.txt");
+            await Git("-c","user.email=fixture@example.com","-c","user.name=fixture","commit","-qm","init");
+            await System.IO.File.WriteAllTextAsync(tracked,string.Join("\n",Enumerable.Range(1,500).Select(i=>"changed "+i))+"\n");
+            var small=System.IO.Path.Combine(repo,"small.txt");
+            await System.IO.File.WriteAllTextAsync(small,"base\n");
+            await Git("add","--","small.txt");
+            await Git("-c","user.email=fixture@example.com","-c","user.name=fixture","commit","-qm","small");
+            await System.IO.File.WriteAllTextAsync(small,"base\nchanged line\n");
+            await System.IO.File.WriteAllTextAsync(System.IO.Path.Combine(repo,"新增.txt"),"untracked\n");
+            var host=new RemoteHost(Guid.NewGuid(),"同步审阅 VPS","sync-review.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.Mutagen);
+            config=new Configuration();config.RemoteHosts=[host];
+            config.Edit(d=>{d.Project=repo;d.Slots.ForEach(s=>s.Enabled=false);d.Slots[0].Enabled=true;d.Slots[0].Directory=repo;d.Slots[0].RemoteHostId=host.Id;d.Slots[0].RemoteDirectory="/home/agent/work";});
+            Render();
+            var railButton=FindLogical<Button>(RailSlots).FirstOrDefault(b=>AutomationProperties.GetName(b)=="第 1 项 Agent 行");
+            railButton?.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+            var slot=config.Draft.Slots[0];
+            var badge=FindLogical<TextBlock>(this).FirstOrDefault(t=>AutomationProperties.GetName(t)==$"同步状态 {slot.DisplayName}");
+            check("UX12 VPS slot renders sync badge",badge!=null);
+            var attempt=Guid.NewGuid();
+            var plan=new LaunchItem(attempt,Guid.NewGuid(),1,"sync-review",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:slot.Id,RemoteExecution:new RemoteExecutionSpec(host.Address,22,"root","agent","pi","/home/agent/work",[],null,null));
+            ControlEntry Entry(string state)=>new(){Plan=plan,State=state};
+            status=new(true,"sync review probe",[Entry("Settled")]);
+            Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Synced,"Mutagen flush 成功，会话已终止。",DateTimeOffset.UtcNow));
+            await ProbeSyncHealthAsync(force:true);
+            check("UX12 A1 terminal synced attempt shows 已同步 badge",badge!.Text=="同步：已同步"&&badge.ToolTip!.ToString()!.Contains("sync-final"));
+            Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Problem,"Mutagen flush 失败，会话已保留。",DateTimeOffset.UtcNow));
+            await ProbeSyncHealthAsync(force:true);
+            check("UX12 A1 terminal problem attempt shows 同步有问题 badge",badge.Text=="同步：同步有问题");
+            System.IO.File.Delete(Store.SyncFinalPath(attempt));
+            await ProbeSyncHealthAsync(force:true);
+            check("UX12 A1 terminal attempt without record shows 未同步",badge.Text=="同步：未同步");
+            Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Synced,"Mutagen flush 成功，会话已终止。",DateTimeOffset.UtcNow));
+            status=new(true,"sync review probe",[Entry("Disconnected")]);
+            await ProbeSyncHealthAsync(force:true);
+            check("UX12 A1 Disconnected stays live-evaluated and never claims 已同步",badge.Text=="同步：未同步");
+            // B3：持久化会话名让无活 spec 匹配的条目在重启后按名恢复健康（直接驱动回退链，注入 list 输出，不依赖真实 mutagen）。
+            status=new(true,"sync review probe",[Entry("Settled")]);
+            var sessionName="agent-launcher-"+Guid.NewGuid().ToString("N");
+            Store.Save(Store.SyncSessionPath(attempt),new SyncSessionRecord(1,sessionName,repo,"/home/agent/work",DateTimeOffset.UtcNow));
+            var listOutput=$"Name: {sessionName}\nAlpha:\n\tURL: {repo}\nBeta:\n\tURL: ssh://agent@{host.Address}:22/home/agent/work\nStatus: Watching for changes\n";
+            var live=new SyncHealth(SyncHealthState.NotSynced,"","未找到匹配的 Mutagen 同步会话。");
+            var recovered=ResolveTerminalSync(live,slot,host,repo,listOutput);
+            check("UX12 B3 persisted session name recovers live health after restart",recovered.State==SyncHealthState.Ready&&recovered.SessionName==sessionName);
+            var terminal=ResolveTerminalSync(live,slot,host,repo,null);
+            check("UX12 B3 terminated session falls back to sync-final",terminal.State==SyncHealthState.Synced);
+            // B1：文件列表 + 只读 diff 对话框（未跟踪提示、已跟踪 diff、400 行截断）。
+            var dialogSeen=false;
+            var inspect=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};
+            inspect.Tick+=(_,_)=>{
+                if(dialogSeen)return;
+                var window=OwnedWindows.OfType<Window>().FirstOrDefault(w=>w.Title=="查看改动 · "+slot.DisplayName);
+                if(window is null)return;
+                dialogSeen=true;inspect.Stop();
+                _=Dispatcher.InvokeAsync(async()=>{
+                    try
+                    {
+                        var list=FindLogical<ListBox>(window).Single(l=>AutomationProperties.GetName(l)=="改动文件列表");
+                        var diffBox=FindLogical<TextBox>(window).Single(t=>AutomationProperties.GetName(t)=="文件 diff");
+                        check("UX12 B1 changes dialog lists files with read-only diff",diffBox.IsReadOnly&&list.Items.OfType<ListBoxItem>().Count()>=2);
+                        async Task WaitDiff(Func<string,bool> ready){for(var i=0;i<100&&!ready(diffBox.Text);i++)await Task.Delay(100);}
+                        list.SelectedItem=list.Items.OfType<ListBoxItem>().First(i=>(i.Content as string)!.Contains("未跟踪"));
+                        await WaitDiff(t=>t.Contains("未跟踪，无 diff"));
+                        check("UX12 B1 untracked file shows 未跟踪无 diff",diffBox.Text.Contains("未跟踪，无 diff"));
+                        list.SelectedItem=list.Items.OfType<ListBoxItem>().First(i=>(i.Content as string)!.Contains("small.txt"));
+                        await WaitDiff(t=>t.Contains("+changed line"));
+                        check("UX12 B1 tracked file shows exact read-only diff",diffBox.Text.Contains("+changed line")&&!diffBox.Text.Contains("已截断"));
+                        list.SelectedItem=list.Items.OfType<ListBoxItem>().First(i=>(i.Content as string)!.Contains("tracked.txt"));
+                        await WaitDiff(t=>t.Contains("已截断"));
+                        check("UX12 B1 diff truncates at 400 lines with notice",diffBox.Text.Contains("-line 1")&&diffBox.Text.Split('\n').Length<=401);
+                        await Dispatcher.InvokeAsync(window.UpdateLayout,DispatcherPriority.ApplicationIdle);
+                        CaptureQuickActions(window,System.IO.Path.Combine(folder,"sync-review-diff.png"));
+                        window.Close();
+                    }
+                    catch(Exception e){check("UX12 B1 dialog inspection failed: "+e.Message,false);try{window.Close();}catch{}}
+                });
+            };
+            inspect.Start();
+            try{await ShowSlotChangesAsync(slot.Id);}finally{inspect.Stop();}
+            check("UX12 B1 changes dialog opened for inspection",dialogSeen);
+            check("UX12 B1 review left worktree untouched",await System.IO.File.ReadAllTextAsync(tracked)==string.Join("\n",Enumerable.Range(1,500).Select(i=>"changed "+i))+"\n");
+        }
+        finally
+        {
+            config=originalConfig;status=originalStatus;Render();RenderMonitorStatus();
+            if(polling)timer.Start();
+        }
     }
 }
 #endif

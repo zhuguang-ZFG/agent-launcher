@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Threading;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
@@ -11,10 +12,13 @@ using AgentLauncher.Windows;
 namespace AgentLauncher.App;
 
 // 实用三件套（参考 crystal / claude-squad 的多 Agent 管理实践，全部只读、additive）：
-// F1 查看改动：按槽位核对本机工作目录的 git status（VPS 槽位即同步落回本机的文件，证明远端 agent 改了本机文件）。
+// F1 查看改动：按槽位核对本机工作目录的 git status（VPS 槽位即同步落回本机的文件，证明远端 agent 改了本机文件）；
+//    B1 逐文件审阅：文件列表选中后显示只读 diff（单文件 400 行、本次查看累计 2000 行截断并提示）。
 // F2 内存看板：页脚实时显示本进程工作集/专用内存与系统可用内存，提示 VPS 会话降低本机内存占用。
 // F3 同步状态：VPS 槽位的 Mutagen 健康徽标（就绪/同步中/有问题/未同步），判据与 WorkspaceSync.WaitReadyAsync 一致；
 //    菜单「刷新同步状态」按需刷新，内存定时器顺带每 ~15 秒节流探测一次（单次 mutagen sync list 覆盖全部槽位）。
+//    A1 终态回退：会话终止后按 attempts/<id>/sync-final.json 显示「已同步」/「同步有问题」；
+//    B3 名字持久化：无活 spec 匹配时按 attempts/<id>/sync-session.json 的会话名匹配 mutagen list（重启后恢复）。
 public partial class MainWindow
 {
     private readonly DispatcherTimer memoryTimer=new(){Interval=TimeSpan.FromSeconds(5)};
@@ -58,14 +62,47 @@ public partial class MainWindow
         var changes=await Task.Run(()=>WorkspaceInsights.ReadChanges(directory));
         if(!changes.Ok){ErrorText.Text="查看改动失败："+changes.Error;return;}
         const int maxRows=400;
-        var files=changes.Entries.Length==0?"工作区干净，没有未提交改动。":string.Join("\n",changes.Entries.Take(maxRows).Select(DescribeChange))+(changes.Entries.Length>maxRows?$"\n…（其余 {changes.Entries.Length-maxRows} 项未显示，请在终端运行 git status 查看）":"");
         var note=host!=null
             ?$"此项绑定 VPS「{host.Name}」。以下是本机工作目录的改动：Mutagen 双向同步把远端 agent 的修改落回这里，看到改动即证明远端修改了本机文件。只读核对，不修改任何内容。"
             :"只读核对本机工作目录的改动（git status --porcelain=v1 -b），不修改任何内容。";
-        var dialog=new FormWindow(this,"查看改动 · "+slot.DisplayName,
-            [("dir","本机工作目录",directory,false),("branch","分支（git status -b）",changes.Branch,false),("files","改动文件",files,true)],note);
-        dialog.ShowDialog();
+        // B1 逐文件审阅：左侧文件列表，右侧只读等宽 diff。单文件 400 行（ReadDiffAsync）、本次查看累计 2000 行截断并提示。
+        var window=new Window{Owner=this,Title="查看改动 · "+slot.DisplayName,Width=Math.Min(980,SystemParameters.WorkArea.Width-32),Height=Math.Min(700,SystemParameters.WorkArea.Height-32),WindowStartupLocation=WindowStartupLocation.CenterOwner,Style=(Style)Application.Current.Resources[typeof(Window)]};
+        var root=new DockPanel{Margin=new(24)};
+        var footer=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new(0,16,0,0)};DockPanel.SetDock(footer,Dock.Bottom);
+        var close=new Button{Content="关闭",IsCancel=true,IsDefault=true,MinWidth=88};footer.Children.Add(close);root.Children.Add(footer);
+        var header=new StackPanel{Margin=new(0,0,0,12)};DockPanel.SetDock(header,Dock.Top);
+        header.Children.Add(new TextBlock{Text=note,TextWrapping=TextWrapping.Wrap,Foreground=(Brush)FindResource("Muted")});
+        header.Children.Add(new TextBlock{Text="本机工作目录："+directory+" · 分支（git status -b）："+changes.Branch,TextWrapping=TextWrapping.Wrap,Margin=new(0,8,0,0)});
+        root.Children.Add(header);
+        var grid=new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(300)});
+        grid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});
+        var list=new ListBox{Margin=new(0,0,12,0)};AutomationProperties.SetName(list,"改动文件列表");
+        var diffBox=new TextBox{IsReadOnly=true,FontFamily=new FontFamily("Consolas"),TextWrapping=TextWrapping.NoWrap,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Text=changes.Entries.Length==0?"工作区干净，没有未提交改动。":"选择左侧文件查看只读 diff（单文件 400 行、本次查看累计 2000 行，超出截断并提示）。"};
+        AutomationProperties.SetName(diffBox,"文件 diff");
+        foreach(var line in changes.Entries.Take(maxRows))list.Items.Add(new ListBoxItem{Content=DescribeChange(line),Tag=WorkspaceInsights.ChangePath(line)});
+        if(changes.Entries.Length>maxRows)list.Items.Add(new ListBoxItem{Content=$"…（其余 {changes.Entries.Length-maxRows} 项未显示，请在终端运行 git status 查看）",IsEnabled=false});
+        Grid.SetColumn(list,0);Grid.SetColumn(diffBox,1);grid.Children.Add(list);grid.Children.Add(diffBox);
+        root.Children.Add(grid);window.Content=root;UiScale.Apply(window);
+        var shownLines=0;const int totalCap=2000;var diffGeneration=0;
+        list.SelectionChanged+=async(_,_)=>{
+            if(list.SelectedItem is not ListBoxItem{Tag:string file}||file.Length==0)return;
+            if(shownLines>=totalCap){diffBox.Text="本次查看累计已达 2000 行上限，不再加载更多 diff；请重新打开对话框或在终端运行 git diff 查看。";return;}
+            var generation=++diffGeneration;diffBox.Text="正在读取 diff…";
+            try
+            {
+                var diff=await WorkspaceInsights.ReadDiffAsync(directory,file);
+                if(generation!=diffGeneration)return;  // 选择已切换，丢弃过期结果
+                var text=diff.Ok?diff.Text:"读取 diff 失败："+diff.Error;
+                var (bounded,capped)=WorkspaceInsights.TruncateLines(text,totalCap-shownLines);
+                diffBox.Text=capped?bounded+"\n…（本次查看累计已达 2000 行上限，其余内容未显示；请在终端运行 git diff 查看）":bounded;
+                shownLines+=CountLines(diffBox.Text);
+            }
+            catch(Exception e)when(e is not OutOfMemoryException){if(generation==diffGeneration)diffBox.Text="读取 diff 失败："+e.Message;}
+        };
+        window.ShowDialog();
     }
+    private static int CountLines(string text){var lines=text.Replace("\r\n","\n").Split('\n');return lines.Length>0&&lines[^1].Length==0?lines.Length-1:lines.Length;}
     // porcelain v1 行：XY<空格>路径；X=暂存区状态，Y=工作区状态。
     private static string DescribeChange(string line)
     {
@@ -100,7 +137,7 @@ public partial class MainWindow
     private void ApplySyncBadge(Guid slotId,TextBlock badge,SyncHealth health,bool cache=true)
     {
         badge.Text="同步："+health.Label;
-        badge.SetResourceReference(TextBlock.ForegroundProperty,health.State switch{SyncHealthState.Ready=>"StatusOk",SyncHealthState.Problems=>"StatusBad",SyncHealthState.Syncing=>"Muted",_=>"StatusOff"});
+        badge.SetResourceReference(TextBlock.ForegroundProperty,health.State switch{SyncHealthState.Ready or SyncHealthState.Synced=>"StatusOk",SyncHealthState.Problems or SyncHealthState.SyncProblem=>"StatusBad",SyncHealthState.Syncing=>"Muted",_=>"StatusOff"});
         badge.ToolTip=health.Detail+(health.SessionName.Length>0?"\n会话："+health.SessionName:"");
         if(cache)syncHealthCache[slotId]=health;
     }
@@ -131,6 +168,8 @@ public partial class MainWindow
                 var host=RemoteHostForSlot(slot)!;
                 var local=string.IsNullOrWhiteSpace(slot.Directory)?config.Draft.Project:slot.Directory;
                 var health=ok?WorkspaceInsights.EvaluateSync(output,local,host.Address,slot.RemoteDirectory??""):new SyncHealth(SyncHealthState.NotSynced,"",error+"；视为未同步。");
+                // A1/B3：无活会话时先按持久化会话名匹配（重启后恢复），仍无匹配且条目终态则回退 sync-final；文件读取离开 UI 线程。
+                if(health.State==SyncHealthState.NotSynced)health=await Task.Run(()=>ResolveTerminalSync(health,slot,host,local,ok?output:null));
                 ApplySyncBadge(slot.Id,badge,health);
             }
         }
@@ -139,5 +178,31 @@ public partial class MainWindow
             foreach(var slot in targets)if(syncBadges.TryGetValue(slot.Id,out var badge))ApplySyncBadge(slot.Id,badge,new(SyncHealthState.NotSynced,"","同步状态探测失败："+e.Message));
         }
         finally{syncProbing=false;}
+    }
+    // A1/B3 回退链（只读）：持久化会话名匹配 mutagen list → 条目终态时回退 sync-final → 维持原「未同步」判定。
+    // Disconnected 非终态不传 final，仍按活会话评估；mutagen list 失败（listOutput=null）时跳过名字匹配。
+    private SyncHealth ResolveTerminalSync(SyncHealth live,Slot slot,RemoteHost host,string local,string? listOutput)
+    {
+        var entry=LatestRemoteEntryForSlot(slot.Id);
+        if(entry is null)return live;
+        if(listOutput is not null&&WorkspaceInsights.ReadSyncEvidence<SyncSessionRecord>(Store.SyncSessionPath(entry.Plan.Id)) is {SchemaVersion:1} session)
+        {
+            var named=WorkspaceInsights.EvaluateSync(listOutput,local,host.Address,slot.RemoteDirectory??"",session.Name);
+            if(named.State!=SyncHealthState.NotSynced)return named;
+        }
+        var final=Store.IsTerminal(entry)?WorkspaceInsights.ReadSyncEvidence<SyncFinalRecord>(Store.SyncFinalPath(entry.Plan.Id)):null;
+        return WorkspaceInsights.EvaluateSyncBadge(live,final is {SchemaVersion:1}?final:null);
+    }
+    // 槽位最近一次远程尝试：优先监视器快照；重启或账本归档后回退磁盘控制账本（只读，失败按无记录处理）。
+    private ControlEntry? LatestRemoteEntryForSlot(Guid slotId)
+    {
+        bool Remote(ControlEntry e)=>e.Plan.SourceSlotId==slotId&&e.Plan.RemoteExecution is not null;
+        var entries=status?.Entries;
+        if(entries is null||!entries.Any(Remote))
+        {
+            try{entries=TaskRecoveryReader.ReadLedger()?.Entries.ToArray();}
+            catch(Exception e)when(e is IOException or System.Text.Json.JsonException or InvalidDataException or UnauthorizedAccessException){}
+        }
+        return entries?.Where(Remote).OrderByDescending(e=>e.Created).FirstOrDefault();
     }
 }

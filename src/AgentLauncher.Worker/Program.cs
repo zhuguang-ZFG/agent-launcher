@@ -42,6 +42,12 @@ internal static class Program
         catch(Exception e)when(e is InvalidOperationException or IOException){Console.Error.WriteLine("无法读取关闭确认；请在启动器运行记录中核对错误。");}
 #endif
     }
+    // 同步证据尽力写入（A1 sync-final / B3 sync-session）：失败只警告不阻断启动/退出——回执已携带同步结论，证据仅供徽章回退。
+    private static void TryWriteSyncEvidence<T>(string path,T record)
+    {
+        try{Store.Save(path,record);}
+        catch(Exception e)when(e is IOException or UnauthorizedAccessException or NotSupportedException){Console.Error.WriteLine($"同步证据写入失败（{Path.GetFileName(path)}）：{e.Message}");}
+    }
     // A job created by a process that is already inside a job becomes its child. The pool therefore needs a short-lived
     // helper that the monitor starts inside the root job; the helper creates the pool/items, the monitor opens them by
     // name while the helper still holds handles, and only then is the helper released.
@@ -208,14 +214,18 @@ internal static class Program
                         // 超时 30 秒（Mutagen/SSHFS 启动可能需要时间）
                         using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(30));
                         syncSession=WorkspaceSync.StartAsync(remoteSpec.WorkspaceSync,remoteSpec,timeout.Token).GetAwaiter().GetResult();
+                        // B3 会话名持久化：会话名含随机 GUID 无法从配置反推；创建后立即落盘，App 重启后据此按名匹配 mutagen sync list。
+                        if(syncSession.SessionName is {} syncSessionName)TryWriteSyncEvidence(Store.SyncSessionPath(id),new SyncSessionRecord(1,syncSessionName,remoteSpec.WorkspaceSync.LocalPath,remoteSpec.WorkspaceSync.RemotePath,DateTimeOffset.UtcNow));
                         try
                         {
                             syncSession.WaitReadyAsync(timeout.Token).GetAwaiter().GetResult();
                         }
-                        catch
+                        catch(Exception readyError)when(readyError is not OutOfMemoryException)
                         {
                             // 就绪失败：dispose 会话（清理 Mutagen 会话/SSHFS 挂载）
                             try{syncSession.DisposeAsync().AsTask().Wait(5000);}catch{}
+                            // A1：WaitReady 报问题/超时后启动被阻止（FailedBeforeStart 终态）；徽章回退该记录而不是显示「未同步」。
+                            TryWriteSyncEvidence(Store.SyncFinalPath(id),new SyncFinalRecord(1,SyncFinalRecord.Problem,"同步就绪失败："+readyError.Message,DateTimeOffset.UtcNow));
                             throw;
                         }
                         // 用同步会话的远程路径替换 RemoteWorkingDirectory
@@ -290,6 +300,8 @@ internal static class Program
                 catch(Exception ex){flushError="工作区同步收敛异常："+ex.Message;}
                 sshChild.SyncSession=null;  // 已处置，避免 Dispose 重复 flush
                 syncNote=flushError is null?" 工作区已同步收敛回本机。":" "+flushError;
+                // A1 终态证据：会话即将终止，App 之后找不到活会话；徽章回退该记录（synced/problem），不再误报「未同步」。
+                TryWriteSyncEvidence(Store.SyncFinalPath(id),new SyncFinalRecord(1,flushError is null?SyncFinalRecord.Synced:SyncFinalRecord.Problem,flushError??"Mutagen flush 成功，会话已终止；远端改动已收敛落回本机。",DateTimeOffset.UtcNow));
             }
             exitMemory=child is not null?MemoryEvidence():null;var detail=ExitDiagnostics.Describe(exit,exitMemory)+syncNote;
             

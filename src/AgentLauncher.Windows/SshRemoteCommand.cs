@@ -20,6 +20,7 @@ public static class SshRemoteCommand
     // SshKeyPath 为空时依赖 SSH config IdentityFile / ssh-agent / 默认密钥（BatchMode 下 ssh 自动尝试）。
     public static ProcessStartInfo CreateStartInfo(string host,int port,string user,string? keyPath,string remoteCommand)
     {
+        SshAgent.PreferGitSshTools();
         var psi=new ProcessStartInfo
         {
             FileName="ssh",
@@ -86,9 +87,34 @@ public static class SshRemoteCommand
     public static Task<SshCommandResult> CheckVersionAsync(RemoteHost host,string agentType,string remoteDirectory,CancellationToken cancellation=default)=>
         RunMaintenanceAsync(host,agentType,remoteDirectory,RemoteAgentMaintenance.VersionCommandFor(agentType),"版本检查",TimeSpan.FromSeconds(60),cancellation);
 
-    // 升级 Agent：执行该 agent 的升级命令（主机覆盖优先，10 分钟上限）。
-    public static Task<SshCommandResult> UpgradeAgentAsync(RemoteHost host,string agentType,string remoteDirectory,CancellationToken cancellation=default)=>
-        RunMaintenanceAsync(host,agentType,remoteDirectory,RemoteAgentMaintenance.UpgradeCommandFor(host,agentType),"升级",TimeSpan.FromMinutes(10),cancellation);
+    // 升级 Agent：执行该 agent 的升级命令（command 显式指定时优先，其次主机覆盖，10 分钟上限）。
+    public static Task<SshCommandResult> UpgradeAgentAsync(RemoteHost host,string agentType,string remoteDirectory,CancellationToken cancellation=default,string? command=null)=>
+        RunMaintenanceAsync(host,agentType,remoteDirectory,command??RemoteAgentMaintenance.UpgradeCommandFor(host,agentType),"升级",TimeSpan.FromMinutes(10),cancellation);
+
+    // B2 远端资源采样：单条 ssh 取 free -b / nproc / loadavg（15 秒有界）。
+    // 以 SSH 用户执行即可（资源是主机整体指标，无需 su）；超时/非零退出/解析失败一律返回 null（fail-closed）。
+    public static async Task<RemoteResourceSample?> SampleResourcesAsync(RemoteHost host,CancellationToken cancellation=default)
+    {
+        if(await PrepareKeyAsync(host,cancellation) is not null)return null;
+        var result=await RunAsync(CreateStartInfo(host.Address,host.SshPort,host.SshUser,host.SshKeyPath,"free -b && nproc && cat /proc/loadavg"),TimeSpan.FromSeconds(15),cancellation);
+        if(result.TimedOut||result.ExitCode!=0)return null;
+        return RemoteAgentMaintenance.ParseResourceSample(result.StdOut);
+    }
+
+    // C1 续接前帮助核对：远程 <agent> --help（60 秒上限）。
+    public static Task<SshCommandResult> CheckHelpAsync(RemoteHost host,string agentType,string remoteDirectory,CancellationToken cancellation=default)=>
+        RunMaintenanceAsync(host,agentType,remoteDirectory,RemoteAgentMaintenance.HelpCommandFor(agentType),"帮助核对",TimeSpan.FromSeconds(60),cancellation);
+
+    // C1 fail-closed 核对：help 读取失败或输出不含全部续接 flag（单词边界）都拒绝续接。
+    public static async Task<(bool Ok,string Message)> VerifyResumeFlagsAsync(RemoteHost host,string agentType,string remoteDirectory,string[] flags,CancellationToken cancellation=default)
+    {
+        var result=await CheckHelpAsync(host,agentType,remoteDirectory,cancellation);
+        if(result.TimedOut)return(false,"远程 --help 核对超时，本地 SSH 连接已终止；无法确认续接参数，已拒绝续接。");
+        if(result.ExitCode!=0)return(false,$"无法读取远程 {agentType} --help（退出码 {result.ExitCode}）；无法确认续接参数，已拒绝续接。");
+        var help=result.StdOut+"\n"+result.StdErr;
+        foreach(var flag in flags)if(!RemoteAgentMaintenance.HelpContainsFlag(help,flag))return(false,$"远程 {agentType} --help 输出未包含 {flag}（按单词边界核对）；已拒绝续接，请核对远程 Agent 版本。");
+        return(true,"");
+    }
 
     private static async Task<SshCommandResult> RunMaintenanceAsync(RemoteHost host,string agentType,string remoteDirectory,string? command,string action,TimeSpan timeout,CancellationToken cancellation)
     {

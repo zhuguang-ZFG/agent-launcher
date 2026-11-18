@@ -40,6 +40,8 @@ if(args is ["--parallel-batch-checks"]) return await Integration.RunAsync(termin
 if(args is ["--startup-queue-checks"]) return await Integration.RunAsync(startupOnly:true);
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
 if(args is ["--remote-execution-integration"])return await RemoteExecutionIntegration.RunAsync();
+if(args is ["--sync-review-checks"])return await AgentLauncher.Tests.SyncReviewChecks.RunAsync();
+if(args is ["--remote-maintenance-checks"])return await AgentLauncher.Tests.RemoteMaintenanceChecks.RunAsync();
 if(args is ["--workspace-sync"])return await WorkspaceSyncIntegration.RunAsync();
 if(args is ["--remote-host-editor-checks"]){var editorFailures=0;void EditorTest(string name,Action action){try{action();Console.WriteLine("PASS "+name);}catch(Exception e){editorFailures++;Console.WriteLine("FAIL "+name+": "+e.Message);}}AgentLauncher.Tests.RemoteHostEditorChecks.Run(EditorTest,(value,message)=>{if(!value)throw new Exception(message);});return editorFailures==0?0:1;}
 if(args is ["--remote-startup-e2e"])return await RemoteE2EIntegration.RunAsync();

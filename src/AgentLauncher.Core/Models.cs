@@ -182,4 +182,14 @@ public sealed record OperatorRelease(string Judgment,string Reason,bool Confirme
 // 释放成功时写入 attempts/<id>/operator-release.json 的身份绑定证据，先于账本终态化发布。
 public sealed record OperatorReleaseRecord(int SchemaVersion,Guid AttemptId,string Host,string RemoteDirectory,string Judgment,string Reason,bool Confirmed,DateTimeOffset At,string Digest);
 
+// A1/B3 工作区同步证据（attempts/<id>/）：sync-session.json 在 Mutagen 会话创建后持久化会话名（名字含随机 GUID，
+// 无法从配置反推；App 重启后据此按名匹配 mutagen sync list）。sync-final.json 在远程会话终态时（flush 成功/失败后）
+// 写入；会话终止后徽章不再显示「未同步」，而是回退到该记录（synced→已同步，其余 fail-closed→同步有问题）。
+public sealed record SyncSessionRecord(int SchemaVersion,string Name,string LocalPath,string RemotePath,DateTimeOffset At);
+public sealed record SyncFinalRecord(int SchemaVersion,string State,string Detail,DateTimeOffset At)
+{
+    public const string Synced="synced";
+    public const string Problem="problem";
+}
+
 public sealed record PoolLimitNotice(Guid PoolId,int Pid,DateTimeOffset At);

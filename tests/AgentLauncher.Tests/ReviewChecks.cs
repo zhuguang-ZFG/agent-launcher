@@ -303,6 +303,35 @@ internal static class ReviewChecks
             }
             finally{Environment.SetEnvironmentVariable("PATH",original);}
         });
+
+        test("R30 capture returns promptly when a surviving grandchild holds the output pipe",()=>
+        {
+            var marker="PARENT_"+Guid.NewGuid().ToString("N");
+            var watch=Stopwatch.StartNew();
+            var capture=ReviewProcess.CaptureAsync("cmd.exe",fixtureRoot,["/d","/c","echo "+marker+" & start /b ping -n 31 127.0.0.1"],CancellationToken.None,8).GetAwaiter().GetResult();
+            watch.Stop();
+            Assert(!capture.TimedOut,"存活的孙进程不应把捕获判成超时");
+            Assert(capture.Code==0,"父进程退出码丢失："+capture.Code);
+            Assert(Encoding.UTF8.GetString(capture.Output).Contains(marker),"父进程输出丢失");
+            Assert(watch.Elapsed<TimeSpan.FromSeconds(6),"捕获被孙进程持有的管道挂住（"+watch.Elapsed.TotalSeconds.ToString("0.0",CultureInfo.InvariantCulture)+"s）");
+        });
+
+        test("R31 ssh toolchain derives Git usr/bin from the resolved git.exe",()=>
+        {
+            var layout=Path.Combine(fixtureRoot,"gitssh-"+Guid.NewGuid().ToString("N"));
+            var cmd=Path.Combine(layout,"cmd");var usrBin=Path.Combine(layout,"usr","bin");
+            Directory.CreateDirectory(cmd);Directory.CreateDirectory(usrBin);
+            File.WriteAllText(Path.Combine(cmd,"git.exe"),"fixture");
+            File.WriteAllText(Path.Combine(usrBin,"ssh-agent.exe"),"fixture");
+            var original=Environment.GetEnvironmentVariable("PATH");
+            try
+            {
+                Environment.SetEnvironmentVariable("PATH",cmd);
+                var bin=SshAgent.GitSshBinDirectory();
+                Assert(bin==usrBin,"未从 git.exe 位置推导 usr/bin："+(bin??"null"));
+            }
+            finally{Environment.SetEnvironmentVariable("PATH",original);}
+        });
     }
 }
 

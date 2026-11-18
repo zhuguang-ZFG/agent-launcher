@@ -12,6 +12,36 @@ class Program
 {
     static int Main(string[] args)
     {
+        // 维护通道夹具：任一参数（如主机地址）含标记时输出固定内容并立即退出（不打印 FAKE-SSH 前缀，
+        // 保证 --version 首行/资源输出可被真实解析器消费）。标记互不为子串，既有 disconnect/hold 行为不变。
+        foreach (var arg in args)
+        {
+            if (arg.Contains("resources-ok"))
+            {
+                Console.WriteLine("               total        used        free      shared  buff/cache   available");
+                Console.WriteLine("Mem:     17179869184  4294967296  2147483648   1048576 10737418240 12884901888");
+                Console.WriteLine("Swap:              0           0           0");
+                Console.WriteLine("4");
+                Console.WriteLine("0.52 0.58 0.59 1/234 5678");
+                return 0;
+            }
+            if (arg.Contains("resources-bad")) { Console.WriteLine("Mem: not-a-number garbage"); return 0; }
+            if (arg.Contains("help-ok"))
+            {
+                Console.WriteLine("Usage: pi [options]");
+                Console.WriteLine("  -c, --continue       Continue the last session in this directory");
+                Console.WriteLine("  -r, --resume [id]    Resume a session");
+                return 0;
+            }
+            if (arg.Contains("help-missing"))
+            {
+                Console.WriteLine("Usage: pi [options]");
+                Console.WriteLine("  --model <name>       Model to use");
+                return 0;
+            }
+            if (arg.Contains("version-ok")) { Console.WriteLine("1.2.3"); return 0; }
+        }
+
         Console.WriteLine("FAKE-SSH: " + string.Join(" ", args));
         
         // 长驻进程（hold=<seconds>）

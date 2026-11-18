@@ -20,8 +20,9 @@ internal static class ReviewProcess
         if(stdinBytes!=null)inputTask=WriteInputAsync(process,stdinBytes,null,ct);
         else if(stdin!=null)inputTask=WriteInputAsync(process,null,stdin,ct);
         else process.StandardInput.Close();
-        var outputTask=ReadBoundedAsync(process.StandardOutput.BaseStream,maxOutput,process);
-        var errorTask=ReadTextBoundedAsync(process.StandardError.BaseStream,256*1024);
+        var outputSink=new OutputSink();var errorSink=new OutputSink();
+        var outputTask=ReadBoundedAsync(process.StandardOutput.BaseStream,maxOutput,process,outputSink);
+        var errorTask=ReadBoundedAsync(process.StandardError.BaseStream,256*1024,process,errorSink);
         var timedOut=false;
         using(var deadline=CancellationTokenSource.CreateLinkedTokenSource(ct))
         {
@@ -38,10 +39,21 @@ internal static class ReviewProcess
         }
         if(!process.HasExited)Kill(process);
         if(inputTask!=null)await inputTask;
-        var(output,truncated)=await outputTask;
-        var(error,errorTruncated)=await errorTask;
+        // A surviving descendant (e.g. an auto-spawned mutagen daemon) can inherit the pipes and
+        // withhold EOF after the captured process exits; drain briefly, then return what arrived.
+        var drain=Task.WhenAll(outputTask,errorTask);
+        await Task.WhenAny(drain,Task.Delay(2000));
+        byte[] output;bool truncated;string error;bool errorTruncated;
+        lock(outputSink.Gate){output=outputSink.Bytes.ToArray();truncated=outputSink.Truncated;}
+        lock(errorSink.Gate){error=Utf8.GetString(errorSink.Bytes.ToArray());errorTruncated=errorSink.Truncated;}
         if(errorTruncated)error+="\n…（错误输出已截断）";
         return new(process.HasExited?process.ExitCode:-1,output,error,timedOut,truncated);
+    }
+    private sealed class OutputSink
+    {
+        public readonly object Gate=new();
+        public readonly MemoryStream Bytes=new();
+        public bool Truncated;
     }
     private static async Task WriteInputAsync(Process process,byte[]? bytes,Stream? stream,CancellationToken ct)
     {
@@ -54,35 +66,22 @@ internal static class ReviewProcess
         catch(Exception e)when(e is IOException or ObjectDisposedException){}
         finally{try{process.StandardInput.Close();}catch(IOException){}catch(ObjectDisposedException){}}
     }
-    private static async Task<(byte[] Output,bool Truncated)> ReadBoundedAsync(Stream stream,int max,Process process)
+    private static async Task ReadBoundedAsync(Stream stream,int max,Process process,OutputSink sink)
     {
-        using var memory=new MemoryStream();var buffer=new byte[64*1024];var truncated=false;
+        var buffer=new byte[64*1024];
         try
         {
             int count;
             while((count=await stream.ReadAsync(buffer))>0)
             {
-                if(memory.Length+count<=max)memory.Write(buffer,0,count);
-                else{truncated=true;Kill(process);break;}
+                lock(sink.Gate)
+                {
+                    if(sink.Bytes.Length+count<=max)sink.Bytes.Write(buffer,0,count);
+                    else{sink.Truncated=true;Kill(process);break;}
+                }
             }
         }
         catch(Exception e)when(e is IOException or ObjectDisposedException){}
-        return (memory.ToArray(),truncated);
-    }
-    private static async Task<(string Text,bool Truncated)> ReadTextBoundedAsync(Stream stream,int max)
-    {
-        using var memory=new MemoryStream();var buffer=new byte[16*1024];var truncated=false;
-        try
-        {
-            int count;
-            while((count=await stream.ReadAsync(buffer))>0)
-            {
-                if(memory.Length+count<=max)memory.Write(buffer,0,count);
-                else truncated=true;
-            }
-        }
-        catch(Exception e)when(e is IOException or ObjectDisposedException){}
-        return (Utf8.GetString(memory.ToArray()),truncated);
     }
     private static void Kill(Process process)
     {

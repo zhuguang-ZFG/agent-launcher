@@ -37,7 +37,9 @@ public sealed class SshRunnerBackend : IDisposable
             _ => throw new ArgumentException($"Unknown agent type: {spec.AgentType}")
         };
 
-        var remoteCmd = $"cd {EscapeShellArg(spec.RemoteWorkingDirectory)} && {agentCmd}";
+        // V8 默认堆上限随物理内存增长（4 GiB 机器约 2 GiB），小 VPS 会被 agent 吃满触发 OOM。
+        // 注入 Node 堆上限（非 Node 进程忽略 NODE_OPTIONS）；1024 MiB 适配 2–4 GiB 级 VPS。
+        var remoteCmd = $"export NODE_OPTIONS=--max-old-space-size=1024; cd {EscapeShellArg(spec.RemoteWorkingDirectory)} && {agentCmd}";
 
         // 用 ArgumentList 而不是字符串拼接，避免引号嵌套问题
         var psi = new ProcessStartInfo

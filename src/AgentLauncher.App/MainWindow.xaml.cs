@@ -59,7 +59,10 @@ public partial class MainWindow : Window
     private bool discovering;
     private bool applyingSettings;
     private long projectInputRevision;
-    private sealed record AgentChoice(string Id,string Name,string Label);
+    private sealed record AgentChoice(string Id,string Name,string Label,Guid? HostId=null)
+    {
+        public string Key=>HostId==null?"local:"+Id:HostId+":"+Id;
+    }
     private enum TemplateAction { LastEdited }
     public MainWindow(string[] args)
     {
@@ -298,14 +301,17 @@ public partial class MainWindow : Window
     private AgentChoice[] AgentChoices()=>Agents.All.OrderBy(a=>a.Id=="custom"?3:config.RecentAgents.Contains(a.Id)?0:discoveredInstalls.GetValueOrDefault(a.Id)?.Length>0?1:2).ThenBy(a=>config.RecentAgents.Contains(a.Id)?config.RecentAgents.IndexOf(a.Id):int.MaxValue).Select(a=>new AgentChoice(a.Id,a.Name,a.Name+(a.Id=="custom"?"":discoveredInstalls.TryGetValue(a.Id,out var paths)?paths.Length>0?" · 找到命令":" · 未找到":""))).ToArray();
     private AgentChoice[] ChoicesForSlot(Slot slot)
     {
-        var host=RemoteHostForSlot(slot);
-        if(host==null)return AgentChoices();
-        // 远程槽位：候选来自该 VPS 声明的可用 agent（本机未安装也能选），不再按本机探测标「未找到」。
-        var ids=host.AvailableAgents.Any()?host.AvailableAgents.ToList():new List<string>{"pi"};
-        if(!ids.Contains(slot.AgentId))ids.Insert(0,slot.AgentId);
-        return ids.Select(id=>{var name=Agents.All.FirstOrDefault(a=>a.Id==id)?.Name??id;return new AgentChoice(id,name,name+" · ☁ VPS 可用");}).ToArray();
+        // 云候选对所有槽位可见：选中即绑定该 VPS（不必先去详情绑主机），选本机候选即解绑。
+        var remote=config.RemoteHosts.SelectMany(host=>
+        {
+            var ids=host.AvailableAgents.Any()?host.AvailableAgents.ToList():new List<string>{"pi"};
+            if(host.Id==slot.RemoteHostId&&!ids.Contains(slot.AgentId))ids.Insert(0,slot.AgentId);
+            return ids.Select(id=>{var name=Agents.All.FirstOrDefault(a=>a.Id==id)?.Name??id;return new AgentChoice(id,name,name+" · ☁ "+host.Name,host.Id);});
+        });
+        return AgentChoices().Concat(remote).ToArray();
     }
-    private AgentChoice[] FilterChoices(IEnumerable<AgentChoice> choices,string? selected)=>choices.Where(a=>a.Id==selected||a.Name.Contains(AgentSearch.Text.Trim(),StringComparison.OrdinalIgnoreCase)).ToArray();
+    private static string SelectedKey(Slot slot)=>slot.RemoteHostId is Guid host?host+":"+slot.AgentId:"local:"+slot.AgentId;
+    private AgentChoice[] FilterChoices(IEnumerable<AgentChoice> choices,string? selected)=>choices.Where(a=>a.Key==selected||a.Name.Contains(AgentSearch.Text.Trim(),StringComparison.OrdinalIgnoreCase)).ToArray();
     private void RefreshAgentChoices()
     {
         if(SlotList==null)return;var previous=rendering;rendering=true;
@@ -320,9 +326,9 @@ public partial class MainWindow : Window
         row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});
         var enabled=CreateSlotToggle(slot,position,false);enabled.Margin=new(16,0,8,0);enabled.MinWidth=28;row.Children.Add(enabled);
         var number=new TextBlock{Text=$"{position:00}",Foreground=(Brush)FindResource("Muted"),FontFamily=new FontFamily("Consolas"),VerticalAlignment=VerticalAlignment.Center,Margin=new(0,0,12,0)};Grid.SetColumn(number,1);row.Children.Add(number);
-        var choices=FilterChoices(ChoicesForSlot(slot),slot.AgentId);
-        var choice=new ComboBox{ItemsSource=choices,Tag=slot.Id,DisplayMemberPath="Label",SelectedValuePath="Id",SelectedValue=slot.AgentId,VerticalAlignment=VerticalAlignment.Center,MinWidth=180,MaxWidth=240,MinHeight=36};AutomationProperties.SetName(choice,$"第 {position} 项 Agent");TextSearch.SetTextPath(choice,"Name");
-        choice.SelectionChanged+=(_,_)=>{if(rendering||choice.SelectedValue is not string id)return;if(Edit(d=>d.Slots.Single(s=>s.Id==slot.Id).AgentId=id)){config.RecentAgents.Remove(id);config.RecentAgents.Insert(0,id);config.RecentAgents=config.RecentAgents.Take(9).ToList();QueueSave();RefreshAgentChoices();}else{rendering=true;choice.SelectedValue=slot.AgentId;rendering=false;}};Grid.SetColumn(choice,2);row.Children.Add(choice);
+        var choices=FilterChoices(ChoicesForSlot(slot),SelectedKey(slot));
+        var choice=new ComboBox{ItemsSource=choices,Tag=slot.Id,DisplayMemberPath="Label",SelectedValuePath="Key",SelectedValue=SelectedKey(slot),VerticalAlignment=VerticalAlignment.Center,MinWidth=180,MaxWidth=240,MinHeight=36};AutomationProperties.SetName(choice,$"第 {position} 项 Agent");TextSearch.SetTextPath(choice,"Name");
+        choice.SelectionChanged+=(_,_)=>{if(rendering||choice.SelectedItem is not AgentChoice picked)return;var before=SelectedKey(slot);if(Edit(d=>{var target=d.Slots.Single(s=>s.Id==slot.Id);target.AgentId=picked.Id;target.RemoteHostId=picked.HostId;if(picked.HostId!=null){if(string.IsNullOrEmpty(target.RemoteDirectory))target.RemoteDirectory=RemoteWorkspaceMappingHelper.DeriveRemoteDirectory(target.Directory is {Length:>0} local?local:d.Project);}else target.RemoteDirectory=null;})){config.RecentAgents.Remove(picked.Id);config.RecentAgents.Insert(0,picked.Id);config.RecentAgents=config.RecentAgents.Take(9).ToList();QueueSave();RefreshAgentChoices();}else{rendering=true;choice.SelectedValue=before;rendering=false;}};Grid.SetColumn(choice,2);row.Children.Add(choice);
         var command=new TextBlock{Text=slot.Enabled?"正在检查…":"未勾选 · 不启动、不预约",Foreground=(Brush)FindResource("Muted"),FontSize=12,Margin=new(16,4,12,0),TextWrapping=TextWrapping.Wrap};commandLabels[slot.Id]=command;Grid.SetColumnSpan(command,6);Grid.SetRow(command,1);row.Children.Add(command);
         command.SetResourceReference(TextBlock.ForegroundProperty,"Muted");
         var detail=new Button{Content="详情",ToolTip="程序路径、启动参数、工作目录与分工备注",Style=(Style)FindResource("QuietButton"),Padding=new(8,4,8,4),VerticalAlignment=VerticalAlignment.Center};AutomationProperties.SetName(detail,$"第 {position} 项详情");
@@ -402,6 +408,7 @@ public partial class MainWindow : Window
             Menu("测试远程免密连接",()=>_=Owner.GuardAsync(()=>Owner.RunSlotRemoteMaintenanceAsync(slot.Id,"test")),Remote);
             Menu("检查远程版本",()=>_=Owner.GuardAsync(()=>Owner.RunSlotRemoteMaintenanceAsync(slot.Id,"version")),Remote);
             Menu("升级远程 Agent",()=>_=Owner.GuardAsync(()=>Owner.RunSlotRemoteMaintenanceAsync(slot.Id,"upgrade")),Remote);
+            Menu("续接上次远程会话…",()=>_=Owner.GuardAsync(()=>Owner.ResumeRemoteSessionAsync(slot.Id)),()=>Owner.config.Draft.Slots.FirstOrDefault(s=>s.Id==slot.Id) is {} current&&Owner.CanResumeRemoteSlot(current));
             // 实用追加（末尾追加，既有菜单项索引不变）：工作区改动查看 + VPS 同步健康刷新。
             menu.Items.Add(new Separator());
             Menu("查看改动",()=>_=Owner.GuardAsync(()=>Owner.ShowSlotChangesAsync(slot.Id)),()=>true);
@@ -851,6 +858,9 @@ public partial class MainWindow : Window
                 fields.Add(("remoteHost","远程主机（留空本地执行）",slot.RemoteHostId?.ToString()??"",false));
                 fields.Add(("remoteDir","远程工作目录（如 /home/agent/work）",slot.RemoteDirectory??"",false));
             }
+            // B2 VPS 槽位详情也显示一行远端资源（只读展示，保存时忽略该字段；30 秒节流共享主机卡片缓存）。
+            var detailHost=slot.RemoteHostId is {} detailHostId?remoteHosts.FirstOrDefault(h=>h.Id==detailHostId):null;
+            if(detailHost!=null)fields.Add(("remoteResources","远端资源（只读，自动刷新）",remoteResourceCache.TryGetValue(detailHost.Id,out var cachedResources)&&cachedResources.Sample.IsCompletedSuccessfully?RemoteResourceText(cachedResources.Sample.Result):"远端资源：读取中…",false));
             
             var actions=new Dictionary<string,Action<Window>>();
             actions["重新检查版本"]=window=>probeTask=ProbeAsync((FormWindow)window);
@@ -864,6 +874,7 @@ public partial class MainWindow : Window
             dialog.SetActionEnabled("套用预设…",false);
             dialog.Loaded+=(_,_)=>probeTask=ProbeAsync(dialog);
             dialog.Closed+=(_,_)=>probeCancellation.Cancel();
+            if(detailHost!=null)_=FillRemoteResourcesAsync(dialog,detailHost);
             if(dialog.ShowDialog()==true){if(revision!=config.Draft.Revision){ErrorText.Text="配置已改变，请重新打开编辑。";return;}Edit(d=>{var target=d.Slots.Single(s=>s.Id==id);target.Profiles[target.AgentId]=new(){Executable=dialog.Values["exe"].Trim(),Arguments=dialog.ArgumentValues["args"]};target.CustomName=string.IsNullOrWhiteSpace(dialog.Values["name"])?null:dialog.Values["name"].Trim();target.Directory=dialog.Values["cwd"].Trim();if(dialog.Values.GetValueOrDefault("inheritDirectory")=="true")target.RequiresDirectory=false;target.Note=dialog.Values["note"];
                 // 远程执行字段
                 if(remoteHosts.Count>0)
@@ -895,6 +906,11 @@ public partial class MainWindow : Window
                 catch(OperationCanceledException)when(probeCancellation.IsCancellationRequested){}
                 catch(Exception ex)when(ex is not OutOfMemoryException){if(!probeCancellation.IsCancellationRequested)form.SetNote("版本检查未完成："+ex.Message+"。仍可编辑和保存。");}
                 finally{probing=false;if(!probeCancellation.IsCancellationRequested)form.SetActionEnabled("重新检查版本",true);}
+            }
+            async Task FillRemoteResourcesAsync(FormWindow form,RemoteHost resourceHost)
+            {
+                var text=RemoteResourceText(await SampleRemoteResourcesThrottledAsync(resourceHost));
+                if(!probeCancellation.IsCancellationRequested)form.SetValue("remoteResources",text);
             }
         }
         finally{editingSlot=false;}
@@ -997,9 +1013,9 @@ public partial class MainWindow : Window
                     deleteButton.Click+=(_,_)=>DeleteRemoteHost(host.Id);
                     buttons.Children.Add(editButton);buttons.Children.Add(deleteButton);
                     stack.Children.Add(buttons);
-                    // 远程维护：免密自检 / 检查版本 / 升级 Agent（短命令、有界超时，结果显示在卡片内）。
+                    // 远程维护：免密自检 / 检查版本 / 升级 Agent / 远端资源（短命令、有界超时，结果显示在卡片内）。
                     var remoteActions=CreateRemoteHostActions(window,host);
-                    stack.Children.Add(remoteActions.Buttons);stack.Children.Add(remoteActions.Status);
+                    stack.Children.Add(remoteActions.Buttons);stack.Children.Add(remoteActions.Status);stack.Children.Add(remoteActions.Resources);
                     card.Child=stack;
                     panel.Children.Add(card);
                 }
