@@ -79,7 +79,18 @@ public static class Store
 }
 public static class Ipc
 {
-    public static Task<Response> SendAsync(Request request,CancellationToken ct=default)=>SendCoreAsync(request,ct,false);
+    public static async Task<Response> SendAsync(Request request,CancellationToken ct=default)
+    {
+        var response=await SendCoreAsync(request,ct,false);
+        if(request.Operation!="reattach-remote")return response;
+        var poll=request with{Operation="reattach-poll",Epoch=response.Epoch};
+        while(response.ReattachProbePending)
+        {
+            await Task.Delay(250,ct);
+            response=await SendCoreAsync(poll,ct,false);
+        }
+        return response;
+    }
     public static Task<Response> EnsureAsync(Request request,CancellationToken ct=default)=>SendCoreAsync(request,ct,true);
     private static async Task<Response> SendCoreAsync(Request request,CancellationToken ct,bool ensureMonitor)
     {

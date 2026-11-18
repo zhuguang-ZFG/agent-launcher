@@ -4,7 +4,7 @@ namespace AgentLauncher.Core;
 public static class RemoteHostEditor
 {
     public static string[] ParseAgents(string? text) =>
-        (text ?? "").Split(',').Select(a => a.Trim()).Where(a => a.Length > 0).ToArray();
+        (text ?? "").Split(',').Select(a => RemoteAgentMaintenance.CatalogId(a.Trim())).Where(a => a.Length > 0).Distinct().ToArray();
 
     public static WorkspaceSyncMode ParseSyncMode(string? text, WorkspaceSyncMode fallback) =>
         (text ?? "").Trim().ToLowerInvariant() switch
@@ -29,6 +29,7 @@ public static class RemoteHostEditor
         if (string.IsNullOrWhiteSpace(address)) return "地址不能为空。";
         if (!int.TryParse(portText, out var port) || port is < 1 or > 65535) return "端口必须是 1-65535 的数字。";
         if (ParseAgents(agentsText).Length == 0) return "至少指定一个可用 agent 类型。";
+        if (ParseAgents(agentsText).Any(id=>RemoteAgentMaintenance.AgentCommand(id) is null)) return "可用 Agent 中含有不支持的类型。";
         return null;
     }
 

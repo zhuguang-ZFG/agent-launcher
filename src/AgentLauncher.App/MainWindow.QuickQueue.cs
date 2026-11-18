@@ -16,6 +16,7 @@ public partial class MainWindow
         && taskBook is not null && SaveHealthy && submittedAttempts.Length == 0 && submittedRevision != config.Draft.Revision
         && validationError.Length == 0 && string.Equals(ProjectPath.Text.Trim(), config.Draft.Project, StringComparison.Ordinal)
         && config.Draft.Slots.Any(slot => slot.Enabled)
+        && !config.Draft.Slots.Any(slot => slot.Enabled && slot.RemoteHostId.HasValue)
         && config.Draft.Slots.Where(slot => slot.Enabled).All(slot => (!slot.RequiresDirectory || !string.IsNullOrWhiteSpace(slot.Directory))
             && (!string.IsNullOrWhiteSpace(slot.Directory) || !string.IsNullOrWhiteSpace(config.Draft.Project)));
 
@@ -28,6 +29,11 @@ public partial class MainWindow
         QueueQuickButton.Content = quickQueueImporting ? "正在加入队列…" : waitingForResources ? "等待资源后启动" : "按资源依次启动";
         QueueQuickButton.Style = (Style)FindResource(waitingForResources ? "PrimaryButton" : typeof(Button));
         QueueQuickButton.ToolTip = QueueQuickButton.IsEnabled ? "将勾选项保存为任务；默认只执行本批次，按并发 1 等待资源。" : taskBook is null ? "任务文件无法读取，请打开「恢复与诊断」。" : LaunchHint.Text;
+        if(config.Draft.Slots.Any(slot=>slot.Enabled&&slot.RemoteHostId.HasValue))
+        {
+            QueueQuickButton.ToolTip="队列只支持本机任务。含 VPS 的批次请使用「启动」。";
+            ToolTipService.SetShowOnDisabled(QueueQuickButton,true);
+        }
     }
 
     private async void QueueQuickClick(object sender, RoutedEventArgs e)

@@ -84,6 +84,7 @@ public sealed class Configuration
     public Draft? LastEdited { get; set; }
     public bool ManuallyEdited { get; set; } = true;
     public Dictionary<string, Draft> Templates { get; set; } = [];
+    public bool EmbeddedTerminal { get; set; } = true;
     public string TerminalPath { get; set; } = "";
     public string WorktreeDirectory { get; set; } = "";
     public bool MinimizeAfterLaunch { get; set; }
@@ -172,7 +173,7 @@ public sealed class Ledger : IJsonOnDeserialized
 }
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? JobMemory = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? PoolMemory = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? HandshakeAt = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] long? HandshakeWaitMs = null);
 public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null, OperatorRelease? Release = null, OperatorReattach? Reattach = null);
-public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null, bool? ReconcileOffered = null, PoolRecord[]? Pools = null, BudgetItem[]? Budgets = null, string? AdmissionHardBlockedReason = null, bool AdmissionPressure = false);
+public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null, bool? ReconcileOffered = null, PoolRecord[]? Pools = null, BudgetItem[]? Budgets = null, string? AdmissionHardBlockedReason = null, bool AdmissionPressure = false, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] bool ReattachProbePending = false);
 
 public sealed record ArchivedAttempt(int SchemaVersion,Guid AttemptId,string Digest,ControlEntry Entry);
 

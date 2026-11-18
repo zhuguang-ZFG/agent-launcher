@@ -68,9 +68,12 @@ public partial class MainWindow
             await DispatchNextAsync();
             check("UX06 deferred head preserves identity and allows later independent work to be checked", taskStore.Load().Queue.Single(entry => entry.Id == head.Id).Deferred && QueueList.Children.OfType<StackPanel>().Any(row => ReviewFind<TextBlock>(row).Any(text => text.Text.Contains("暂缓") && text.Text.Contains("UX 前项"))));
             var priorTerminalPath = config.TerminalPath;
+            var priorEmbedded = config.EmbeddedTerminal;
             var preparations = Directory.Exists(Store.FilePath("preparations")) ? Directory.GetFiles(Store.FilePath("preparations")).Order().ToArray() : [];
             try
             {
+                // 缺 Terminal 的保留语义只对外置 Windows Terminal 成立；嵌入式默认开启时派发走应用内宿主，不受该路径影响。
+                config.EmbeddedTerminal = false;
                 config.TerminalPath = Path.Combine(Store.Root, "missing-terminal.exe");
                 queueScopeTaskIds = [first.Id];
                 await UpdateTasksAsync(editor => { var item = editor.Queue.Single(entry => entry.Id == head.Id); item.Deferred = false; item.ProgramFingerprint = AgentProbe.Fingerprint(command); }, "Terminal preflight fixture");
@@ -82,7 +85,7 @@ public partial class MainWindow
             }
             finally
             {
-                config.TerminalPath = priorTerminalPath; queueScopeTaskIds = null;
+                config.TerminalPath = priorTerminalPath; config.EmbeddedTerminal = priorEmbedded; queueScopeTaskIds = null;
                 await UpdateTasksAsync(editor => { var item = editor.Queue.Single(entry => entry.Id == head.Id); item.Deferred = true; item.ProgramFingerprint = new string('A', 64); }, "Terminal preflight cleanup");
             }
             var closePrompt = "";

@@ -25,7 +25,7 @@ public sealed record RemoteExecutionSpec(
         // 远程是 Linux 环境：盘符/UNC 路径只可能来自误用的本地 profile，拒绝而不是静默传给远端。
         if (Arguments.Any(a => System.Text.RegularExpressions.Regex.IsMatch(a, @"(^|[^A-Za-z0-9])[A-Za-z]:[\\/]") || a.StartsWith("\\\\")))
             throw new InvalidDataException("远程参数包含 Windows 本地路径，远程主机无法访问；请改用远程目录或移除该参数。");
-        if (!Agents.All.Any(a => a.Id == AgentType && a.Id != "custom") && AgentType != "qodercli")
+        if (RemoteAgentMaintenance.AgentCommand(AgentType) is null)
             throw new InvalidDataException("远程 Agent 类型不支持。");
         if (MemoryLimitBytes is not null) throw new InvalidDataException("尚未实现远程内存限制，请在远程主机管理资源。");
         if (WorkspaceSync is {} sync && (sync.RemotePath != RemoteWorkingDirectory || !Path.IsPathFullyQualified(sync.LocalPath) || !Enum.IsDefined(sync.Mode)))

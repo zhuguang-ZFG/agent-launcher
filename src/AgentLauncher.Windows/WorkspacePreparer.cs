@@ -151,7 +151,7 @@ public sealed class WorkspacePreparer
                 var remoteHost=configuration?.RemoteHosts.FirstOrDefault(h=>h.Id==remoteHostId);
                 if(remoteHost==null)throw new IOException($"远程主机未配置（ID：{remoteHostId}），请先在设置中添加。");
                 if(string.IsNullOrWhiteSpace(slot.RemoteDirectory))throw new IOException($"远程槽位「{slot.DisplayName}」未指定远程工作目录。");
-                if(!remoteHost.AvailableAgents.Contains(slot.AgentId))throw new IOException($"远程主机「{remoteHost.Name}」不支持 Agent「{slot.AgentId}」（可用：{string.Join(", ",remoteHost.AvailableAgents)}）。");
+                if(!remoteHost.Supports(slot.AgentId))throw new IOException($"远程主机「{remoteHost.Name}」不支持 Agent「{slot.AgentId}」（可用：{string.Join(", ",remoteHost.AvailableAgents)}）。");
                 
                 // 远程槽位：不解析本地命令（远程主机上可能没有同名 CLI），只取参数
                 // 占位 CommandSpec：Executable=AgentType，Adapter=remote（远程执行分支识别）
@@ -207,6 +207,11 @@ public sealed class WorkspacePreparer
                 if(target.Equals(source,StringComparison.OrdinalIgnoreCase)||target.StartsWith(source+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase))throw new IOException("独立工作目录必须放在源仓库之外，请在设置中选择其他位置。");
             }
         }
+        var remoteByPosition=plans.Where(p=>p.RemoteExecution!=null).ToDictionary(p=>p.Position,p=>p.RemoteExecution!);
+        var remoteDirectories=remoteByPosition.Values.Select(r=>(Host:r.Host.ToUpperInvariant(),r.SshPort,
+            Path:r.RemoteWorkingDirectory.TrimEnd('/'),Home:r.RemoteWorkingDirectory.StartsWith("~/",StringComparison.Ordinal)?r.AgentUser:""));
+        if(draft.DirectoryMode=="isolated"&&remoteDirectories.Distinct().Count()!=remoteByPosition.Count)
+            throw new IOException("独立工作目录模式下，同一远程主机上的每项必须指定不同的远程目录。");
         var canonical=draft.Copy();canonical.Revision=0;
         // Only a forced preparation changes identity here; the default false input keeps its historical digest bytes.
         var digest=Convert.ToHexString(SHA256.HashData(forceIsolated
@@ -291,7 +296,13 @@ public sealed class WorkspacePreparer
         var launchBatch=Guid.NewGuid();
         // Launch authorization IDs are always fresh; a shared pool belongs to exactly one launch batch.
         var launchPool=ResourcePolicy.PoolModeOf(resourceSettings)==ResourcePolicy.PoolShared?Guid.NewGuid():(Guid?)null;
-        return plans.Select(p=>p.Kind=="git"?p with{Id=Guid.NewGuid(),BatchId=launchBatch}:p with{Id=Guid.NewGuid(),BatchId=launchBatch,PoolId=launchPool}).ToList();
+        // Only worktrees are reusable. Bind the current host and the actual prepared checkout for every launch.
+        return plans.Select(p=>
+        {
+            var remote=remoteByPosition.GetValueOrDefault(p.Position);
+            if(remote?.WorkspaceSync is {} sync)remote=remote with{WorkspaceSync=sync with{LocalPath=p.Cwd}};
+            return p with{Id=Guid.NewGuid(),BatchId=launchBatch,RemoteExecution=remote,PoolId=remote is null&&p.Kind!="git"?launchPool:null};
+        }).ToList();
     }
     private static void EnsureBatchTargetsDistinct(IReadOnlyList<LaunchItem> plans,Guid batch,string worktreeRoot,string mode,IReadOnlyList<WorkspaceIdentity>? activeWorkspaces,bool forceIsolated=false)
     {

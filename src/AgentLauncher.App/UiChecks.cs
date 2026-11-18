@@ -328,7 +328,7 @@ public partial class MainWindow
             Check("rail sessions follow monitor refresh",FindLogical<TextBlock>(RailSessions).Any(t=>t.Text.Contains("rail-session-probe")));
             var focusButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="聚焦终端 rail-session-probe");
             Check("active session offers terminal window recall",focusButton!=null);
-            if(focusButton!=null){ProgressText.Text="";focusButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check("missing terminal window reports instead of failing",ProgressText.Text.Contains("未找到该批次"));}
+            if(focusButton!=null){ProgressText.Text="";focusButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));for(var i=0;i<50&&ProgressText.Text.Length==0;i++)await Task.Delay(100);Check("missing terminal window reports instead of failing",ProgressText.Text.Contains("未找到该批次"));}
             // R28 operator-confirmed release: Disconnected remote entries expose judgment + reason + second confirm;
             // non-Gone / missing reason / unconfirmed paths must never reach the release request (hermetic, no monitor IPC).
             var releaseAttempt=Guid.NewGuid();
@@ -545,9 +545,9 @@ public partial class MainWindow
             Store.Save(Store.SyncSessionPath(attempt),new SyncSessionRecord(1,sessionName,repo,"/home/agent/work",DateTimeOffset.UtcNow));
             var listOutput=$"Name: {sessionName}\nAlpha:\n\tURL: {repo}\nBeta:\n\tURL: ssh://agent@{host.Address}:22/home/agent/work\nStatus: Watching for changes\n";
             var live=new SyncHealth(SyncHealthState.NotSynced,"","未找到匹配的 Mutagen 同步会话。");
-            var recovered=ResolveTerminalSync(live,slot,host,repo,listOutput);
+            var recovered=ResolveTerminalSync(live,slot,host,listOutput);
             check("UX12 B3 persisted session name recovers live health after restart",recovered.State==SyncHealthState.Ready&&recovered.SessionName==sessionName);
-            var terminal=ResolveTerminalSync(live,slot,host,repo,null);
+            var terminal=ResolveTerminalSync(live,slot,host,null);
             check("UX12 B3 terminated session falls back to sync-final",terminal.State==SyncHealthState.Synced);
             // B1：文件列表 + 只读 diff 对话框（未跟踪提示、已跟踪 diff、400 行截断）。
             var dialogSeen=false;

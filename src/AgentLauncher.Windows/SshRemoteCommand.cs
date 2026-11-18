@@ -11,10 +11,10 @@ public sealed record SshCommandResult(int ExitCode,string StdOut,string StdErr,b
 public static class SshRemoteCommand
 {
     // 单层 shell quoting（与 SshRunnerBackend 完全一致）：只转义单引号，不嵌套双引号。
-    public static string QuoteArg(string arg)=>$"'{arg.Replace("'","'\\''")}'";
+    public static string QuoteArg(string arg)=>RemoteWorkspaceMappingHelper.QuoteShellArgument(arg);
 
     // su - <agentUser> -c "<命令>"：双引号包裹并转义内部双引号/$/反引号（与 runner 的远程命令包装一致）。
-    public static string WrapSu(string agentUser,string remoteCmd)=>$"su - {agentUser} -c \"{remoteCmd.Replace("\"","\\\"").Replace("$","\\$").Replace("`","\\`")}\"";
+    public static string WrapSu(string agentUser,string remoteCmd)=>$"su - {agentUser} -c \"{remoteCmd.Replace("\\","\\\\").Replace("\"","\\\"").Replace("$","\\$").Replace("`","\\`")}\"";
 
     // 构造非交互 ssh 参数（ArgumentList，避免引号嵌套）：-p/-i 按需，BatchMode + ConnectTimeout 兜底。
     // SshKeyPath 为空时依赖 SSH config IdentityFile / ssh-agent / 默认密钥（BatchMode 下 ssh 自动尝试）。
@@ -122,7 +122,7 @@ public static class SshRemoteCommand
         if(!RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(remoteDirectory)||remoteDirectory.Any(char.IsControl))throw new InvalidDataException("远程工作目录无效：必须是绝对路径或 ~/ 开头，且不含控制字符。");
         // fail-closed：密钥加载失败直接报错（不挂起、不提示密码）。
         if(await PrepareKeyAsync(host,cancellation) is {} warning)throw new IOException(warning);
-        var remoteCmd=$"cd {QuoteArg(remoteDirectory)} && {command}";
+        var remoteCmd=$"cd {RemoteWorkspaceMappingHelper.ShellDirectory(remoteDirectory)} && {command}";
         // SSH 用户即 agent 用户时无需 su；否则与 runner 相同以 su - 切换到 agent 身份。
         var wrapped=string.Equals(host.SshUser,host.AgentUser,StringComparison.Ordinal)?remoteCmd:WrapSu(host.AgentUser,remoteCmd);
         return await RunAsync(CreateStartInfo(host.Address,host.SshPort,host.SshUser,host.SshKeyPath,wrapped),timeout,cancellation);

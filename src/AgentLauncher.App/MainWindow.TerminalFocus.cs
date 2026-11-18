@@ -13,6 +13,8 @@ public partial class MainWindow
     private async void FocusTerminalWindow(Guid batchId,Guid? attemptId=null)=>await GuardAsync(async()=>
     {
         var plans=(status?.Entries??[]).Where(entry=>entry.Plan.BatchId==batchId).Select(entry=>entry.Plan).ToArray();
+        var selected=plans.FirstOrDefault(p=>p.Id==attemptId)??plans.FirstOrDefault();
+        if(selected!=null&&await TryShowEmbeddedAsync(selected))return;
         var titles=plans.Select(TerminalAppearance.PaneTitle).Distinct().ToArray();
         var handle=titles.Length==0?IntPtr.Zero:TerminalWindowFinder.Find(titles);
         if(handle==IntPtr.Zero){ProgressText.Text="未找到该批次的唯一终端窗口；窗口可能已关闭、标题已更改，或属于旧版启动记录。请从任务栏选择终端。";return;}

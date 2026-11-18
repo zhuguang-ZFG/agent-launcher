@@ -16,6 +16,7 @@ class Program
         var joined = string.Join(" ", args);
         if (joined.Contains("agent-launcher-reattach-probe"))
         {
+            if(joined.Contains("slow-probe"))System.Threading.Thread.Sleep(9000);
             Console.WriteLine(joined.Contains("reattach-gone") ? "GONE" : "ALIVE");
             return 0;
         }
@@ -64,6 +65,7 @@ class Program
             if (arg.Contains("version-ok")) { Console.WriteLine("1.2.3"); return 0; }
         }
 
+        if(joined.Contains("verify-stdin"))return Console.ReadLine()=="input test" ? 0 : 42;
         Console.WriteLine("FAKE-SSH: " + string.Join(" ", args));
         
         // 长驻进程（hold=<seconds>）

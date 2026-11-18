@@ -853,6 +853,21 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             try{await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);Assert(false,"unsupported preparation record accepted");}catch(IOException e){Assert(e.Message.Contains("版本不支持"),e.Message);}
             Assert(File.ReadAllBytes(prepPath).SequenceEqual(unsupported),"unsupported preparation record was rewritten");
         });
+        await Test("F09/R23 remote sync endpoints follow their isolated worktrees",async()=>{
+            var repo=Path.Combine(Store.Root,"tiny-repo");
+            var host=new RemoteHost(Guid.NewGuid(),"test","first.invalid",22,"root","agent",["pi"],null);
+            var config=new Configuration{RemoteHosts=[host]};
+            var draft=new Draft{Project=repo,Slots=[new(){Enabled=true,RemoteHostId=host.Id,RemoteDirectory="/work/one"},new(){Enabled=true,RemoteHostId=host.Id,RemoteDirectory="/work/two"}]};
+            var preparer=new WorkspacePreparer();
+            var plans=await preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(false),default,configuration:config);
+            Assert(plans.Count==2&&plans[0].Cwd!=plans[1].Cwd&&plans.All(p=>p.RemoteExecution?.WorkspaceSync?.LocalPath==p.Cwd&&p.Cwd!=PhysicalDirectory.Resolve(repo).Path),"remote sync escaped the prepared checkout");
+            config.RemoteHosts[0]=host with{Address="second.invalid"};
+            var replay=await preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(false),default,configuration:config);
+            Assert(replay.Select(p=>p.Cwd).SequenceEqual(plans.Select(p=>p.Cwd))&&replay.All(p=>p.RemoteExecution is {Host:"second.invalid"}&&p.RemoteExecution.WorkspaceSync?.LocalPath==p.Cwd),"replay used stale host or endpoint");
+            draft.Slots[1].RemoteDirectory="/work/one";
+            try{await preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(false),default,configuration:config);throw new Exception("isolated slots accepted a shared remote endpoint");}
+            catch(IOException e){Assert(e.Message.Contains("远程目录"),e.Message);}
+        });
         var validationDraft=new Draft{Project=cwd,DirectoryMode="shared"};
         for(var i=0;i<validationDraft.Slots.Count;i++){var slot=validationDraft.Slots[i];slot.Enabled=i is 1 or 3;slot.Profiles[slot.AgentId]=new(){Executable=Environment.ProcessPath!,Arguments=["--hold","100"]};}
         var previousRecords=Directory.GetFiles(Store.FilePath("preparations"),"*.json").ToHashSet();

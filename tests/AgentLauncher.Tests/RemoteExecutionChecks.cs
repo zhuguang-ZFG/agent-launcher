@@ -107,7 +107,7 @@ internal static class RemoteExecutionChecks
             var remoteCmd = args[^1];  // 最后一个参数是远程命令
             assert(remoteCmd.Contains("su - agent -c"), "应包含 su - agent -c");
             assert(remoteCmd.Contains("cd '/home/agent/work dir'"), "应包含工作目录（内部单引号 quoting）");
-            assert(remoteCmd.Contains("pi '--arg with spaces' 'another'\\''arg'"), "应包含 agent 命令（转义单引号）");
+            assert(remoteCmd.Contains("pi '--arg with spaces' 'another'\\\\''arg'"), "嵌套 su 命令应保留参数内单引号的转义");
             assert(remoteCmd.StartsWith("su - agent -c \"") && remoteCmd.EndsWith("\""), "远程命令应用双引号包裹（内部已有单引号）");
             assert(remoteCmd.Contains("export NODE_OPTIONS=--max-old-space-size=1024;"), "远程命令应注入 Node 堆上限，防止小 VPS 被 agent 吃满内存");
             // stdout/stderr 必须继承控制台：重定向而无人读取会丢输出，远端写满管道缓冲会挂死 agent。
@@ -116,6 +116,19 @@ internal static class RemoteExecutionChecks
             assert(backend.StartInfo.RedirectStandardInput, "SSH stdin 应为独立管道，避免 -tt 抢占控制台 stdin");
 
             backend.Dispose();
+        });
+
+        test("R23 remote catalog and home-relative directories", () =>
+        {
+            const string path="~/work/project with spaces";
+            foreach(var id in Agents.All.Where(a=>a.Id!="custom").Select(a=>a.Id).Append("qodercli"))
+            {
+                var spec=new RemoteExecutionSpec("test.example",2222,"agent","agent",id,path,[],null,null);
+                spec.Validate();
+                using var runner=SshRunnerBackend.Create(spec);
+                assert(runner.StartInfo.ArgumentList[^1].Contains("cd ~/'work/project with spaces' && "+Agents.Get(RemoteAgentMaintenance.CatalogId(id)).Command),id+" CLI 或主目录错误");
+            }
+            assert(RemoteReattach.AttachShell(Guid.NewGuid(),path).Contains("cd ~/'work/project with spaces'"),"挂接目录不同");
         });
 
         test("R4 SshRunnerBackend Create does not start process", () =>
@@ -269,6 +282,10 @@ internal static class RemoteExecutionChecks
                 assert(plan.ResourceMode is null, "远程计划不应有 ResourceMode（本地资源限制）");
                 assert(plan.PoolId is null, "远程计划不应有 PoolId（共享池）");
                 assert(plan.Budget == 0, "远程计划 Budget 应为 0（不受本地 Job 限制）");
+                configuration.RemoteHosts[0]=configuration.RemoteHosts[0] with{Address="edited.example",SshPort=2222,WorkspaceSyncMode=WorkspaceSyncMode.None};
+                var edited=preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(false),default,configuration:configuration).GetAwaiter().GetResult().Single();
+                assert(edited.RemoteExecution is {Host:"edited.example",SshPort:2222,WorkspaceSync:null},"准备缓存复用了旧主机或同步配置");
+                assert(MutagenSyncSession.MutagenEndpoint(edited.RemoteExecution!,"/work")=="agent@edited.example:2222:/work","Mutagen 端口丢失");
             }
             finally
             {

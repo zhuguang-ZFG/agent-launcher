@@ -13,7 +13,7 @@ public partial class App : Application
         base.OnStartup(e);singleton=new Mutex(false,@"Local\"+Store.Pipe+"-gui");bool own;
         try{own=singleton.WaitOne(0);}catch(AbandonedMutexException){own=true;}
         if(!own){try{using var show=EventWaitHandle.OpenExisting(@"Local\"+Store.Pipe+"-show");show.Set();}catch(WaitHandleCannotBeOpenedException){}foreach(var p in Process.GetProcessesByName("AgentLauncher.App")){using(p){if(p.Id!=Environment.ProcessId&&p.MainWindowHandle!=IntPtr.Zero){ShowWindow(p.MainWindowHandle,9);SetForegroundWindow(p.MainWindowHandle);}}}singleton.Dispose();singleton=null;Shutdown();return;}
-        DispatcherUnhandledException+=(_,args)=>{MessageBox.Show("发生未预期错误，已停止新提交。现有终端不会由配置窗口结束。\n"+args.Exception.Message,"启动器错误");args.Handled=true;Shutdown(1);};
+        DispatcherUnhandledException+=(_,args)=>{try{Store.Save(System.IO.Path.Combine(Store.Root,"ui-dispatcher-exception.json"),new{Error=args.Exception.ToString(),At=DateTimeOffset.UtcNow});}catch(Exception saved)when(saved is not OutOfMemoryException){}MessageBox.Show("发生未预期错误，已停止新提交。现有终端不会由配置窗口结束。\n"+args.Exception.Message,"启动器错误");args.Handled=true;Shutdown(1);};
         new MainWindow(e.Args).Show();
     }
     protected override void OnExit(ExitEventArgs e){if(singleton!=null){singleton.ReleaseMutex();singleton.Dispose();}base.OnExit(e);}

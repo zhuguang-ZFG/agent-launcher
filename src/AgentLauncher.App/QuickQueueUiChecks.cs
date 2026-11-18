@@ -39,6 +39,16 @@ public partial class MainWindow
         try
         {
             await LoadTasksAsync();
+            var localSlot=config.Draft.Slots[0];
+            var host=new RemoteHost(Guid.NewGuid(),"测试 VPS","fake.example",22,"root","agent",["qodercli"],null);
+            config.RemoteHosts.Add(host);
+            var remoteSlot=new Slot{Enabled=true,AgentId="qoder",RemoteHostId=host.Id,RemoteDirectory="~/work/test",Profiles=new(){["qoder"]=new(){Executable=Path.Combine(project,"missing.exe")}}};
+            config.Draft.Slots[0]=remoteSlot;
+            Render();
+            await CheckFreshCommandsAsync();
+            check("R23 cloud slot validates without a local executable and blocks local queue dispatch",validationError.Length==0&&!QueueQuickButton.IsEnabled&&QueueQuickButton.ToolTip?.ToString()?.Contains("VPS")==true);
+            config.Draft.Slots[0]=localSlot;
+            config.RemoteHosts.Remove(host);
             Render();
             await CheckFreshCommandsAsync();
             await RefreshAsync();

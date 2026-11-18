@@ -169,7 +169,7 @@ public partial class MainWindow
                 var local=string.IsNullOrWhiteSpace(slot.Directory)?config.Draft.Project:slot.Directory;
                 var health=ok?WorkspaceInsights.EvaluateSync(output,local,host.Address,slot.RemoteDirectory??""):new SyncHealth(SyncHealthState.NotSynced,"",error+"；视为未同步。");
                 // A1/B3：无活会话时先按持久化会话名匹配（重启后恢复），仍无匹配且条目终态则回退 sync-final；文件读取离开 UI 线程。
-                if(health.State==SyncHealthState.NotSynced)health=await Task.Run(()=>ResolveTerminalSync(health,slot,host,local,ok?output:null));
+                if(health.State==SyncHealthState.NotSynced)health=await Task.Run(()=>ResolveTerminalSync(health,slot,host,ok?output:null));
                 ApplySyncBadge(slot.Id,badge,health);
             }
         }
@@ -181,13 +181,13 @@ public partial class MainWindow
     }
     // A1/B3 回退链（只读）：持久化会话名匹配 mutagen list → 条目终态时回退 sync-final → 维持原「未同步」判定。
     // Disconnected 非终态不传 final，仍按活会话评估；mutagen list 失败（listOutput=null）时跳过名字匹配。
-    private SyncHealth ResolveTerminalSync(SyncHealth live,Slot slot,RemoteHost host,string local,string? listOutput)
+    private SyncHealth ResolveTerminalSync(SyncHealth live,Slot slot,RemoteHost host,string? listOutput)
     {
         var entry=LatestRemoteEntryForSlot(slot.Id);
         if(entry is null)return live;
         if(listOutput is not null&&WorkspaceInsights.ReadSyncEvidence<SyncSessionRecord>(Store.SyncSessionPath(entry.Plan.Id)) is {SchemaVersion:1} session)
         {
-            var named=WorkspaceInsights.EvaluateSync(listOutput,local,host.Address,slot.RemoteDirectory??"",session.Name);
+            var named=WorkspaceInsights.EvaluateSync(listOutput,session.LocalPath,host.Address,slot.RemoteDirectory??"",session.Name);
             if(named.State!=SyncHealthState.NotSynced)return named;
         }
         var final=Store.IsTerminal(entry)?WorkspaceInsights.ReadSyncEvidence<SyncFinalRecord>(Store.SyncFinalPath(entry.Plan.Id)):null;

@@ -4,6 +4,8 @@ $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtime=[IO.Path]::GetFullPath($RuntimeDirectory)
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
+& dotnet run --project (Join-Path $root 'tests/AgentLauncher.TerminalModel.Tests/AgentLauncher.TerminalModel.Tests.csproj') -c Release
+if($LASTEXITCODE -ne 0){throw 'Embedded terminal model tests failed'}
 foreach($project in @('tests/AgentLauncher.Soak','tests/AgentLauncher.Tests','src/AgentLauncher.Worker','src/AgentLauncher.App')){
   $name=Split-Path $project -Leaf
   & dotnet publish (Join-Path $root "$project/$name.csproj") -c Release -p:DefineConstants=INTEGRATION_TESTS -o $runtime --nologo -m:1
@@ -47,6 +49,12 @@ try {
       if($now -ge $hardDeadline -or ($now-$lastProgressAt).TotalSeconds -ge 30){try{$p.Kill()}catch{};if(-not $p.WaitForExit(5000)){throw "UI check could not stop after timeout; last progress: $lastProgress"};throw "UI check stalled or exceeded 90-second hard timeout; last progress: $lastProgress"}
     }
     if($p.ExitCode -ne 0 -or -not(Test-Path (Join-Path $report 'ui-checks.json'))){throw 'UI checks failed'}
+    $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-embedded-'+[guid]::NewGuid().ToString('N'))
+    $env:AGENT_LAUNCHER_FAKE_SAMPLE='1'
+    $embeddedReport=Join-Path $root 'artifacts/embedded-ui.json'
+    $p=Start-Process (Join-Path $runtime 'AgentLauncher.App.exe') -WindowStyle Hidden -ArgumentList '--embedded-check',('"'+$embeddedReport+'"') -PassThru
+    if(-not $p.WaitForExit(60000)){$p.Kill();throw 'Embedded terminal UI check timed out'}
+    if($p.ExitCode -ne 0 -or -not (Get-Content $embeddedReport -Raw | ConvertFrom-Json).Passed){throw 'Embedded terminal UI check failed'}
   }
   & node --test (Join-Path $root 'tests/prototype.test.cjs')
   if($LASTEXITCODE -ne 0){throw 'Prototype model tests failed'}

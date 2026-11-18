@@ -2,9 +2,9 @@
 
 Copyright 2026 Agent Launcher contributors。项目按 [Apache License 2.0](LICENSE) 开源，署名见 [NOTICE](NOTICE)。
 
-Windows 原生配置窗口 + Windows Terminal 分屏。默认只启用一个 Agent；同项目多项使用独立 Git worktree，或明确选用现有目录/共享目录。
+默认在启动器内运行 Agent。点击「启动」后，每项打开一个终端标签，可以输入任务、查看实时输出，并用标签切换会话。「返回配置」可继续添加 Agent，「关闭视图」后可从运行记录重新打开仍在执行的会话。「设置 → Agent 窗口」可切换为外置 Windows Terminal 分屏。默认只启用一个 Agent；同项目多项使用独立 Git worktree，或明确选用现有目录/共享目录。
 
-本机入口为仓库根目录的 `Start-AgentLauncher.cmd`，指向固定目录 `artifacts/preview`，与现有桌面快捷方式使用同一套程序。入口会核对配套文件和运行时；请保留整个包。其他电脑需要 .NET 8 Desktop Runtime x64、Windows Terminal、所选 CLI；自动 worktree 需要 Git。此包仍为技术预览，不是稳定发布。规格修订号为 v0.6.1。已记录实现见 `docs/IMPLEMENTATION.md` §83–§84；三台同权的产品决定见 §88，操作员确认的重新挂接见 §89。发布门禁仍开放。
+本机入口为仓库根目录的 `Start-AgentLauncher.cmd`，指向固定目录 `artifacts/preview`，与现有桌面快捷方式使用同一套程序。入口会核对配套文件和运行时；请保留整个包。其他电脑需要 .NET 8 Desktop Runtime x64、所选 CLI（外置分屏另需 Windows Terminal）；自动 worktree 需要 Git。此包仍为技术预览，不是稳定发布。规格修订号为 v0.6.1。已记录实现见 `docs/IMPLEMENTATION.md` §83–§84；三台同权的产品决定见 §88，操作员确认的重新挂接见 §89。发布门禁仍开放。
 桌面 **多 Agent 启动器** 快捷方式可通过 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/use-validated-preview.ps1` 更新；脚本先验证包，再备份并替换入口，不覆盖正在运行的包。`-CheckOnly` 只验证。资源不足可选择按资源依次启动并等待。
 
 1. 拖入项目文件夹，或点“选择文件夹”。

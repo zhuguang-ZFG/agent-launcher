@@ -96,7 +96,7 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
             "--default-file-mode", "0664",  // 文件权限：owner/group 可读写，other 可读
             "--default-directory-mode", "0775",  // 目录权限：owner/group 可读写执行，other 可读执行
             spec.LocalPath,
-            $"{remote.AgentUser}@{remote.Host}:{spec.RemotePath}"  // 用 AgentUser（agent 可写）
+            MutagenEndpoint(remote,spec.RemotePath)
         };
         
         await RunMutagenCommandAsync(createArgs, cancellation);
@@ -105,6 +105,9 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         return new MutagenSyncSession(sessionName, spec.RemotePath, daemonProcess);
     }
     
+    internal static string MutagenEndpoint(RemoteExecutionSpec remote,string path)=>
+        $"{remote.AgentUser}@{remote.Host}:{remote.SshPort.ToString(System.Globalization.CultureInfo.InvariantCulture)}:{path}";
+
     public string? SessionName => _sessionName;
 
     public async Task WaitReadyAsync(CancellationToken cancellation)
@@ -240,6 +243,8 @@ internal sealed class SshfsMountSession : IWorkspaceSyncSession
         
         startInfo.ArgumentList.Add($"{remote.SshUser}@{remote.Host}:{spec.RemotePath}");
         startInfo.ArgumentList.Add(mountPoint);
+        startInfo.ArgumentList.Add("-p");
+        startInfo.ArgumentList.Add(remote.SshPort.ToString(System.Globalization.CultureInfo.InvariantCulture));
         startInfo.ArgumentList.Add("-o");
         startInfo.ArgumentList.Add("reconnect,ServerAliveInterval=15,ServerAliveCountMax=3");
         
