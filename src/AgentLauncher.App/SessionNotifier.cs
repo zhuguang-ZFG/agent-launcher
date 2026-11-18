@@ -129,20 +129,27 @@ internal sealed class SessionNotifier
         try
         {
             if(owner is MainWindow main)main.RestoreBackground();else owner.Activate();
-            if (owner.FindName("SessionExpander") is Expander expander) expander.IsExpanded = true;
-            if (owner.FindName("Sessions") is Panel panel)
+            var needle = SafeNameFromTitle(request.Title);
+            bool FocusIn(Panel panel)
             {
-                var needle = SafeNameFromTitle(request.Title);
                 foreach (var item in panel.Children)
                 {
                     if (item is not FrameworkElement child) continue;
                     if (needle.Length > 0 && Descendants(child).OfType<TextBlock>().Any(t => t.Text.Contains(needle, StringComparison.Ordinal)))
                     {
                         child.BringIntoView();
-                        break;
+                        return true;
                     }
                 }
+                return false;
             }
+            if (owner.FindName("ActiveSessions") is Panel active && FocusIn(active))
+            {
+                if (owner.FindName("ActiveNow") is FrameworkElement now) now.BringIntoView();
+                return;
+            }
+            if (owner.FindName("SessionExpander") is Expander expander) expander.IsExpanded = true;
+            if (owner.FindName("Sessions") is Panel panel) FocusIn(panel);
         }
         catch (InvalidOperationException) { /* window closing during click */ }
     }

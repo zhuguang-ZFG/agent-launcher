@@ -169,9 +169,11 @@ public static class WorkspaceInsights
     public static SyncHealth EvaluateSyncBadge(SyncHealth live,SyncFinalRecord? final)
     {
         if(live.State!=SyncHealthState.NotSynced||final is null)return live;
-        return final.State==SyncFinalRecord.Synced
-            ?new(SyncHealthState.Synced,"",LaunchSurface.TerminalFlushDetail(final.At))
-            :new(SyncHealthState.SyncProblem,"",LaunchSurface.TerminalProblemDetail(final.At));
+        var honest=final.State==SyncFinalRecord.Synced?LaunchSurface.TerminalFlushDetail(final.At):LaunchSurface.TerminalProblemDetail(final.At);
+        var recorded=final.Detail??"";
+        if(recorded.Contains("已收敛",StringComparison.Ordinal))recorded="";
+        var detail=recorded.Trim().Length==0?honest:honest+" "+recorded.Trim();
+        return final.State==SyncFinalRecord.Synced?new(SyncHealthState.Synced,"",detail):new(SyncHealthState.SyncProblem,"",detail);
     }
 
     /// <summary>读取同步证据（sync-session.json / sync-final.json）；缺失、损坏或不可读一律返回 null，不抛出。

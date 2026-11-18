@@ -62,7 +62,7 @@ internal static class LaunchSurfaceChecks
             Assert(!synced.Detail.Contains("已收敛"), synced.Detail);
             var problem = WorkspaceInsights.EvaluateSyncBadge(new SyncHealth(SyncHealthState.NotSynced, "", ""), new SyncFinalRecord(1, SyncFinalRecord.Problem, "flush 失败", at));
             Assert(problem.Label == "同步有问题", problem.Label);
-            Assert(problem.Detail.Contains("sync-final") && !problem.Detail.Contains("已收敛"), problem.Detail);
+            Assert(problem.Detail.Contains("sync-final") && problem.Detail.Contains("flush 失败") && !problem.Detail.Contains("已收敛"), problem.Detail);
         });
         Test("UX15 shared-directory and change-review sentences stay specific", () =>
         {

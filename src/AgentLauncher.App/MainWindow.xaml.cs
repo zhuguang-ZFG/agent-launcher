@@ -213,7 +213,7 @@ public partial class MainWindow : Window
             ProjectPath.Text=config.Draft.Project;var noProject=string.IsNullOrWhiteSpace(config.Draft.Project);ProjectTitle.Text=MiddleEllipsis(noProject?"还没有选择项目":System.IO.Path.GetFileName(config.Draft.Project.TrimEnd('\\','/')) is {Length:>0} title?title:config.Draft.Project);ProjectTitle.ToolTip=noProject?null:config.Draft.Project;
             ProjectSwitchText.Text=noProject?"选择项目…":ProjectName(config.Draft.Project);ProjectSwitchButton.ToolTip=noProject?"选择项目或最近项目":config.Draft.Project+"\n点击切换最近项目";
             var ownDirectories=config.Draft.Slots.Count(s=>s.Enabled&&!string.IsNullOrWhiteSpace(s.Directory));
-            ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用下方各自的工作目录；修改此处不会改变它们。":noProject?"从上方选择项目，或把文件夹拖进窗口。":"未单独指定目录的 Agent 使用此项目";
+            ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用各自的工作目录。":noProject?"从上方选择项目，或把文件夹拖进窗口。":"未单独指定目录的 Agent 使用此项目";
             ProjectGuide.Visibility=Visibility.Visible;
             RenderRecentProjects();
             Recent.Visibility=Visibility.Collapsed;ProjectPath.Visibility=Visibility.Collapsed;ChooseProjectButton.Visibility=Visibility.Collapsed;
@@ -497,10 +497,16 @@ public partial class MainWindow : Window
         catch(Exception e)when(e is not OutOfMemoryException){commandsChecking=false;validationError="命令/目录检查中断："+e.Message;}
         finally{commandsRunning=false;UpdateLaunch();}
     }
+    private string? PlaceLabel(Slot slot)
+    {
+        if(slot.RemoteHostId is not Guid id)return null;
+        var name=config.RemoteHosts.FirstOrDefault(h=>h.Id==id)?.Name;
+        return string.IsNullOrWhiteSpace(name)?"云端·"+id.ToString("N")[..4]:name;
+    }
     private void UpdateLaunch()
     {
         var count=config.Draft.Slots.Count(s=>s.Enabled);
-        var places=config.Draft.Slots.Where(s=>s.Enabled).Select(s=>s.RemoteHostId is Guid id?config.RemoteHosts.FirstOrDefault(h=>h.Id==id)?.Name??"云端":null).ToArray();
+        var places=config.Draft.Slots.Where(s=>s.Enabled).Select(PlaceLabel).ToArray();
         var admission=DecideAdmission(config.Draft,status?.Memory,status?.Entries,budgets:status?.Budgets);
         var admissionBlockedReason=status?.AdmissionHardBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
         var admissionPressureBlocked=status?.AdmissionPressure==true&&LaunchesConservatively;
@@ -509,7 +515,8 @@ public partial class MainWindow : Window
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
         var concurrencyBlocked=ConcurrencyBlocked(count);
         LaunchButton.Content=LaunchSurface.LaunchButtonText(count,places,busy,previewOnly);
-        var targetTip=LaunchSurface.TargetTooltip(places);if(targetTip.Length>0)LaunchButton.ToolTip=targetTip;
+        var targetTip=LaunchSurface.TargetTooltip(places);
+        LaunchButton.ToolTip=targetTip.Length>0?targetTip:"Ctrl+Enter · 启动已勾选项";
         LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&(admission.Launchable||IsPreviewStale)&&!admissionBlocked&&!admissionPressureBlocked&&!concurrencyBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
         var hint=LaunchHintState(admission);LaunchHint.Text=hint.Text;LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,hint.Key);
         ReconcileButton.Visibility=status?.ReconcileOffered==true&&!busy?Visibility.Visible:Visibility.Collapsed;

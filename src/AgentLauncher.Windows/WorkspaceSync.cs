@@ -170,7 +170,7 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         {
             await RunMutagenCommandAsync(new[] { "sync", "terminate", _sessionName }, CancellationToken.None);
         }
-        catch { /* 忽略终止失败（会话已收敛，终止失败不影响数据） */ }
+        catch { /* 忽略终止失败。终止失败不改写已经写入的结束记录。 */ }
         
         return null;  // 成功
     }

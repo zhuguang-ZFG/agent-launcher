@@ -1468,6 +1468,6 @@ powershell -NoProfile -File scripts/test.ps1
 
 - 计划：`docs/superpowers/plans/2026-11-18-ui-launch-flow.md`。只改分组和文案。8 名额、16 槽位、reserve/begin、远程不进本机内存/CPU 准入都没有改。
 - 可见项目入口只留顶栏。运行位置和 Agent 分成两个下拉。非终态放到预览上方的「现在」。重新挂接和释放名额仍是原来的按钮名，旁边写明效果。`None` 写「这次不是同权」且不拒绝启动。Mutagen 文案只引用 `MutagenCreateMode.SyncMode`。没有新增自动重连、空闲关闭确认、通知、终端召回、Grok 配置，也没有实现 PR9 的已收敛状态机。没有重建桌面预览。
-- 本环境是 Linux，SDK 8.0.428。`dotnet build AgentLauncher.sln -c Release -m:1 -p:EnableWindowsTargeting=true` 为 0 警告、0 错误。带 `DefineConstants=INTEGRATION_TESTS` 的 App 编译同样是 0 警告、0 错误。`dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release -- --launch-surface-checks` 为 **7/7 通过、退出 0**。这 7 项不碰 `Store`。
+- 本环境是 Linux，SDK 8.0.428。`dotnet build AgentLauncher.sln -c Release -m:1 -p:EnableWindowsTargeting=true` 为 0 警告、0 错误。带 `DefineConstants=INTEGRATION_TESTS` 的 App 编译同样是 0 警告、0 错误。`dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release -- --launch-surface-checks` 为 **7/7 通过、退出 0**。这 7 项不碰 `Store`。审查后又改了三处：成功 flush 的退出说明不再写「已收敛」；主按钮在回到单一目标时恢复 `Ctrl+Enter` 提示；侧栏「全部…」和已有通知点击改到「现在」里的非终态行。这三处同样只做了编译，没有 Windows 界面运行。
 - 没有跑 `--ui-check`，也没有跑 `scripts/test.ps1`。这台机器没有 Windows 桌面，不能启动 WPF，也没有新的窗口截图。UX14/UX15、ACC-U04、ACC-U06、CR05、R28/R33 的界面断言留给 Windows CI。在那次结果出来之前，不把这些断言写成通过。
 

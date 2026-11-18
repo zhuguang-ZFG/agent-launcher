@@ -19,7 +19,7 @@ public static class LaunchSurface
     public const string ReleaseEffect = "只交还这一条名额。不会结束远端进程，也不会重新挂接。";
     public const string LocalReconcileNote = "这是本机预约核对，不是远程名额释放，也不会结束远端进程。";
     public const string SharedDirectoryRisk = "大家在同一个文件夹里修改，能看到彼此的改动，也可能互相覆盖。";
-    public const string ChangesAreLocalGit = "这是本机工作目录的 git 状态。能看到文件，只说明本机目录里有改动，不能证明京云、阿里云和本机已经同权。";
+    public const string ChangesAreLocalGit = "这是本机工作目录的 git 状态。能看到文件，只说明本机目录里有改动，不能证明其他机器上的目录已经一致。";
 
     public static string MutagenConflictText =>
         "本启动器新建的 Mutagen 会话使用 " + MutagenCreateMode.SyncMode + "。这不是已收敛：冲突时本机一侧会赢得修改，包括本机删除盖过另一端的修改。";
@@ -51,7 +51,7 @@ public static class LaunchSurface
     {
         WorkspaceSyncMode.None => NotPeer + " " + RemoteConnection + " 这次没有文件同步。",
         WorkspaceSyncMode.Mutagen => RemoteConnection + " " + MutagenConflictText,
-        WorkspaceSyncMode.SshfsMount => RemoteConnection + " SSHFS 是挂载读写，不是已收敛，也不是三台同权。",
+        WorkspaceSyncMode.SshfsMount => RemoteConnection + " SSHFS 是挂载读写，不是已收敛，也不是多台目录已经一致。",
         _ => RemoteConnection + " 同步方式无法确认，不把它标成已收敛。"
     };
 
