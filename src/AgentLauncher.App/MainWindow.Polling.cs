@@ -21,7 +21,7 @@ public partial class MainWindow
     private async Task ReconcileAsync()
     {
         if (string.IsNullOrWhiteSpace(status?.AdmissionBlockedReason) || status.ReconcileOffered != true) return;
-        const string prompt = "将逐条核对陈旧占用：仅当资源组对象已不存在、创建者不在运行、且回执已证明全部受管进程退出（Finished）或进程从未运行（FailedBeforeStart）时，才将该记录标记为已结束并释放其预约预算；仅父进程退出但派生进程无法枚举核对的记录保持阻塞。不会结束任何进程，也不会删除记录。是否继续？";
+        const string prompt = "将逐条核对陈旧占用：仅当资源组对象已不存在、创建者不在运行、且回执已证明全部受管进程退出（Finished）或进程从未运行（FailedBeforeStart）时，才将该记录标记为已结束并释放其预约预算；仅父进程退出但派生进程无法枚举核对的记录保持阻塞。不会结束任何进程，也不会删除记录。这是本机预约核对，不是远程名额释放。是否继续？";
 #if INTEGRATION_TESTS
         var confirmed = TestConfirm != null ? TestConfirm(prompt, "核对并释放占用", MessageBoxButton.YesNo) : MessageBox.Show(this, prompt, "核对并释放占用", MessageBoxButton.YesNo, MessageBoxImage.Question);
 #else

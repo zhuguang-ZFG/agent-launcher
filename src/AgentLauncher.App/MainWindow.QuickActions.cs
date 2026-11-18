@@ -110,7 +110,7 @@ public partial class MainWindow
     private void RenderRecentProjects()
     {
         var wasRendering = rendering; rendering = true;
-        try { Recent.ItemsSource = config.RecentProjects.ToArray(); Recent.SelectedIndex = -1; Recent.Visibility = config.RecentProjects.Count > 0 ? Visibility.Visible : Visibility.Collapsed; }
+        try { Recent.ItemsSource = config.RecentProjects.ToArray(); Recent.SelectedIndex = -1; Recent.Visibility = Visibility.Collapsed; }
         finally { rendering = wasRendering; }
     }
     private void NavigateToSlot(Guid id)
@@ -131,15 +131,19 @@ public partial class MainWindow
     }
     private void NavigateToSession(Guid id)
     {
-        RenderSessions(); JumpToRecord(SessionExpander, Sessions, id, "这条会话已移出当前列表，可在全部历史中查找。");
+        RenderSessions();
+        if (ActiveSessions.Children.OfType<FrameworkElement>().Any(item => Equals(item.Tag, id)))
+            JumpToRecord(ActiveNow, ActiveSessions, id, "这条会话已移出当前列表，可在全部历史中查找。");
+        else
+            JumpToRecord(SessionExpander, Sessions, id, "这条会话已移出当前列表，可在全部历史中查找。");
     }
     private void NavigateToQueueEntry(Guid id)
     {
         RenderTasks(); JumpToRecord(TaskExpander, QueueList, id, "这条等待项已离开队列，请查看运行记录或任务卡片。");
     }
-    private void JumpToRecord(Expander section, Panel list, Guid id, string missing)
+    private void JumpToRecord(FrameworkElement section, Panel list, Guid id, string missing)
     {
-        section.IsExpanded = true;
+        if (section is Expander expander) expander.IsExpanded = true;
         Dispatcher.BeginInvoke(new Action(() =>
         {
             var row = list.Children.OfType<FrameworkElement>().FirstOrDefault(item => Equals(item.Tag, id));

@@ -63,8 +63,8 @@ public partial class MainWindow
         if(!changes.Ok){ErrorText.Text="查看改动失败："+changes.Error;return;}
         const int maxRows=400;
         var note=host!=null
-            ?$"此项绑定 VPS「{host.Name}」。以下是本机工作目录的改动：Mutagen 双向同步把远端 agent 的修改落回这里，看到改动即证明远端修改了本机文件。只读核对，不修改任何内容。"
-            :"只读核对本机工作目录的改动（git status --porcelain=v1 -b），不修改任何内容。";
+            ?$"此项绑定 VPS「{host.Name}」。{LaunchSurface.ChangesAreLocalGit}只读核对，不修改任何内容。"
+            :LaunchSurface.ChangesAreLocalGit+"只读核对，不修改任何内容。";
         // B1 逐文件审阅：左侧文件列表，右侧只读等宽 diff。单文件 400 行（ReadDiffAsync）、本次查看累计 2000 行截断并提示。
         var window=new Window{Owner=this,Title="查看改动 · "+slot.DisplayName,Width=Math.Min(980,SystemParameters.WorkArea.Width-32),Height=Math.Min(700,SystemParameters.WorkArea.Height-32),WindowStartupLocation=WindowStartupLocation.CenterOwner,Style=(Style)Application.Current.Resources[typeof(Window)]};
         var root=new DockPanel{Margin=new(24)};
@@ -127,11 +127,13 @@ public partial class MainWindow
         var sync=new TextBlock{FontSize=11,VerticalAlignment=VerticalAlignment.Center,Margin=new(10,0,0,0),TextWrapping=TextWrapping.NoWrap,TextTrimming=TextTrimming.CharacterEllipsis};
         AutomationProperties.SetName(sync,$"同步状态 {slot.DisplayName}");
         syncBadges[slot.Id]=sync;
-        if(host.WorkspaceSyncMode==WorkspaceSyncMode.None)ApplySyncBadge(slot.Id,sync,new(SyncHealthState.NotSynced,"","该主机未启用工作区同步；远端 agent 的改动不会落回本机。"),cache:false);
-        else if(host.WorkspaceSyncMode==WorkspaceSyncMode.SshfsMount)ApplySyncBadge(slot.Id,sync,new(SyncHealthState.Syncing,"","该主机使用 SSHFS 挂载同步（无 Mutagen 会话可查询）；文件经挂载点直接读写。"),cache:false);
-        else ApplySyncBadge(slot.Id,sync,syncHealthCache.GetValueOrDefault(slot.Id)??new(SyncHealthState.NotSynced,"","尚未检查；点菜单「刷新同步状态」或等待自动刷新（约 15 秒一次）。"),cache:false);
-        var panel=new StackPanel{Orientation=Orientation.Horizontal};
-        panel.Children.Add(badge);panel.Children.Add(sync);
+        if(host.WorkspaceSyncMode==WorkspaceSyncMode.None)ApplySyncBadge(slot.Id,sync,new(SyncHealthState.NotSynced,"",LaunchSurface.SyncHonesty(WorkspaceSyncMode.None)),cache:false);
+        else if(host.WorkspaceSyncMode==WorkspaceSyncMode.SshfsMount)ApplySyncBadge(slot.Id,sync,new(SyncHealthState.Syncing,"",LaunchSurface.SyncHonesty(WorkspaceSyncMode.SshfsMount)),cache:false);
+        else ApplySyncBadge(slot.Id,sync,syncHealthCache.GetValueOrDefault(slot.Id)??new(SyncHealthState.NotSynced,"",LaunchSurface.SyncHonesty(WorkspaceSyncMode.Mutagen)),cache:false);
+        var honesty=new TextBlock{Text=LaunchSurface.SyncHonesty(host.WorkspaceSyncMode),FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new(0,4,0,0)};
+        AutomationProperties.SetName(honesty,"同步说明 "+slot.DisplayName);
+        var badges=new StackPanel{Orientation=Orientation.Horizontal};badges.Children.Add(badge);badges.Children.Add(sync);
+        var panel=new StackPanel();panel.Children.Add(badges);panel.Children.Add(honesty);
         return panel;
     }
     private void ApplySyncBadge(Guid slotId,TextBlock badge,SyncHealth health,bool cache=true)
@@ -146,7 +148,7 @@ public partial class MainWindow
         var slot=config.Draft.Slots.FirstOrDefault(s=>s.Id==slotId);
         var host=slot is null?null:RemoteHostForSlot(slot);
         if(slot==null||host==null){ErrorText.Text="此项未绑定远程主机（VPS），没有远程同步可刷新。";return;}
-        if(host.WorkspaceSyncMode!=WorkspaceSyncMode.Mutagen){ProgressText.Text=host.WorkspaceSyncMode==WorkspaceSyncMode.None?"该主机未启用工作区同步，远端改动不会落回本机。":"该主机使用 SSHFS 挂载同步，无 Mutagen 会话可查询。";return;}
+        if(host.WorkspaceSyncMode!=WorkspaceSyncMode.Mutagen){ProgressText.Text=LaunchSurface.SyncHonesty(host.WorkspaceSyncMode);return;}
         await ProbeSyncHealthAsync(force:true);
         ProgressText.Text="同步状态已刷新（mutagen sync list，只读）。";
     }

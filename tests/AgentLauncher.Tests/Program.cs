@@ -44,6 +44,7 @@ if(args is ["--sync-review-checks"])return await AgentLauncher.Tests.SyncReviewC
 if(args is ["--remote-maintenance-checks"])return await AgentLauncher.Tests.RemoteMaintenanceChecks.RunAsync();
 if(args is ["--workspace-sync"])return await WorkspaceSyncIntegration.RunAsync();
 if(args is ["--remote-host-editor-checks"]){var editorFailures=0;void EditorTest(string name,Action action){try{action();Console.WriteLine("PASS "+name);}catch(Exception e){editorFailures++;Console.WriteLine("FAIL "+name+": "+e.Message);}}AgentLauncher.Tests.RemoteHostEditorChecks.Run(EditorTest,(value,message)=>{if(!value)throw new Exception(message);});return editorFailures==0?0:1;}
+if(args is ["--launch-surface-checks"]) return AgentLauncher.Tests.LaunchSurfaceChecks.Run();
 if(args is ["--remote-startup-e2e"])return await RemoteE2EIntegration.RunAsync();
 if(args is ["--remote-live",var liveHost,var liveSshUser,var liveAgentUser,var liveDir,var liveKey,var liveArgs,var liveTimeout])return await RemoteLiveChecks.RunAsync(liveHost,liveSshUser,liveAgentUser,liveDir,liveKey,liveArgs,liveTimeout);
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));

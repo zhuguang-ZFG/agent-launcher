@@ -169,10 +169,9 @@ public static class WorkspaceInsights
     public static SyncHealth EvaluateSyncBadge(SyncHealth live,SyncFinalRecord? final)
     {
         if(live.State!=SyncHealthState.NotSynced||final is null)return live;
-        var at=final.At.ToString("u");
         return final.State==SyncFinalRecord.Synced
-            ?new(SyncHealthState.Synced,"",$"远程会话已结束；结束时 Mutagen flush 成功，远端改动已收敛落回本机（sync-final.json {at}）。"+final.Detail)
-            :new(SyncHealthState.SyncProblem,"",$"远程会话已结束，但结束时同步未确认收敛（sync-final.json {at}）。"+final.Detail);
+            ?new(SyncHealthState.Synced,"",LaunchSurface.TerminalFlushDetail(final.At))
+            :new(SyncHealthState.SyncProblem,"",LaunchSurface.TerminalProblemDetail(final.At));
     }
 
     /// <summary>读取同步证据（sync-session.json / sync-final.json）；缺失、损坏或不可读一律返回 null，不抛出。
@@ -188,7 +187,7 @@ public static class WorkspaceInsights
     {
         var watching=block.Contains("Status: Watching for changes");
         var problems=block.Contains("Transition problems:");
-        if(watching&&!problems)return new(SyncHealthState.Ready,name,"Mutagen 双向同步就绪（Watching for changes，无 Transition problems）；远端 agent 的改动会持续落回本机目录。");
+        if(watching&&!problems)return new(SyncHealthState.Ready,name,"Mutagen 会话处于 Watching，且没有 Transition problems。这不是已收敛，文件也不是实时一致。");
         if(problems)return new(SyncHealthState.Problems,name,"Mutagen 报告 Transition problems（常见原因：远程工作目录的父目录不属于 agent 用户，无写权）；改动可能无法落回本机，请检查远程目录归属。");
         return new(SyncHealthState.Syncing,name,"同步会话存在但尚未就绪（连接/扫描/冲突处理中）；请稍后刷新。");
     }

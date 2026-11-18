@@ -45,7 +45,7 @@ public partial class MainWindow
             var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("qoder.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "qoder");
             var entry = new ControlEntry { Plan = plan, State = "Started", Detail = "已启动进程；" + ToolRecovery.BlockedMarker + "整机余量不足" };
             status = new(true, "guard-ui", [entry], sample);RenderSessionsNow();
-            check("ACC-U05 a denied live tool offers a copy-only recovery action", ReviewFind<System.Windows.Controls.Button>(Sessions).Any(button => Equals(button.Content, "复制继续提示")));
+            check("ACC-U05 a denied live tool offers a copy-only recovery action", ReviewFind<System.Windows.Controls.Button>(ActiveSessions).Any(button => Equals(button.Content, "复制继续提示")));
             if (screenshotFolder is not null)
             {
                 LaunchOptionsExpander.IsExpanded = false;ConfigurationToolsExpander.IsExpanded = false;
@@ -64,9 +64,9 @@ public partial class MainWindow
                 using var output = System.IO.File.Create(System.IO.Path.Combine(screenshotFolder, "memory-recovery.png"));encoder.Save(output);
             }
             entry.Detail = "已启动进程；最近一次工具已通过内存检查";RenderSessionsNow();
-            check("ACC-U05 recovered tools remove the stale retry action", !ReviewFind<System.Windows.Controls.Button>(Sessions).Any(button => Equals(button.Content, "复制继续提示")));
+            check("ACC-U05 recovered tools remove the stale retry action", !ReviewFind<System.Windows.Controls.Button>(ActiveSessions).Any(button => Equals(button.Content, "复制继续提示")));
             entry.Detail = ToolRecovery.BlockedMarker + "余量不足";entry.State = "Settled";RenderSessionsNow();
-            check("ACC-U05 exited sessions never suggest retrying in a live terminal", !ReviewFind<System.Windows.Controls.Button>(Sessions).Any(button => Equals(button.Content, "复制继续提示")));
+            check("ACC-U05 exited sessions never suggest retrying in a live terminal", !ReviewFind<System.Windows.Controls.Button>(Sessions).Any(button => Equals(button.Content, "复制继续提示")) && !ReviewFind<System.Windows.Controls.Button>(ActiveSessions).Any(button => Equals(button.Content, "复制继续提示")));
             config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "custom", Enabled = true, Profiles = new() { ["custom"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe") } } }] } };
             status = new(true, "low-memory-ui", [], sample with { Available = ResourcePolicy.GiB, At = DateTimeOffset.UtcNow });
             previewOnly = false;

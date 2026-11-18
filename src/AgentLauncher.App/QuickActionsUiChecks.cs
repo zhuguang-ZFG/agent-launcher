@@ -46,7 +46,7 @@ public partial class MainWindow
             var sessionButton = RailSessions.Children.OfType<Button>().Single(b => AutomationProperties.GetName(b) == "查看会话 接口服务");
             sessionButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
-            check("UX10 rail session opens and focuses the exact record", SessionExpander.IsExpanded && Keyboard.FocusedElement is FrameworkElement { Tag: Guid focusedId } && focusedId == attemptId);
+            check("UX10 rail session opens and focuses the exact record", ActiveNow.Visibility == Visibility.Visible && Keyboard.FocusedElement is FrameworkElement { Tag: Guid focusedId } && focusedId == attemptId);
             var queueButton = RailQueue.Children.OfType<Button>().Single(b => AutomationProperties.GetName(b) == "查看等待项 界面检查");
             check("UX10 paused queue rail does not claim a resource shortage", queueButton.Content is TextBlock text && text.Text.Contains("已暂停") && !text.Text.Contains("等待资源"));
             queueButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));

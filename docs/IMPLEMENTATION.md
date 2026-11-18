@@ -1463,3 +1463,11 @@ powershell -NoProfile -File scripts/test.ps1
 - 同一台机器上的 `AgentLauncher.Tests` 在 `UX12` 之后因缺少 `kernel32.dll` 中止；`Store` 的静态构造调用 `WindowsIdentity.GetCurrent()`，在 Linux 上抛 `PlatformNotSupportedException`。因此 R3（不碰 `Store`）通过，R28 与 R33 一起失败，不能把 R33 记成单独的回归失败，也不能记成通过。`--remote-execution-integration` 在进入任何用例前就因同一个 `Store` 初始化退出。没有在 Linux 上跑 `--ui-check`。
 - Windows 门禁第一次结果（`83f3509`，[run 44248248662](https://github.com/zhuguang-ZFG/agent-launcher/actions/runs/44248248662)）：模型 **225/225**（含 R33），集成 0 失败，远程集成里的 R23–R26、R28、R33 与 E2E-R01–R07 通过。随后 UI 检查停在「disconnected remote session offers reattach beside release」（314）后超过 90 秒。原因是测试对「取消」直接 `RaiseEvent(Click)`，不走 `Button.OnClick`，`IsCancel` 不会关掉对话框。已改为点击会设置 `DialogResult` 的「提交挂接」；二次确认取消仍由 `SubmitRemoteReattachAsync` 覆盖。这次修复后的门禁结果尚未记录。不宣称 G4、浸泡或新的 VPS 活测。
 - 仍未实现：自动重连；拒绝同步模式 `None`；`MemoryLimitBytes` 与远程 cgroup。重新挂接的窗格沿用现有 SSH 的管道标准输入，由窗格进程把键盘写进管道，不新做一套终端。没有在真实 VPS 上验证 `/proc` 探针或 `trap '' HUP` 能留下可交互的原 Agent。
+
+## 90. 启动主路径分组（2026-11-18）
+
+- 计划：`docs/superpowers/plans/2026-11-18-ui-launch-flow.md`。只改分组和文案。8 名额、16 槽位、reserve/begin、远程不进本机内存/CPU 准入都没有改。
+- 可见项目入口只留顶栏。运行位置和 Agent 分成两个下拉。非终态放到预览上方的「现在」。重新挂接和释放名额仍是原来的按钮名，旁边写明效果。`None` 写「这次不是同权」且不拒绝启动。Mutagen 文案只引用 `MutagenCreateMode.SyncMode`。没有新增自动重连、空闲关闭确认、通知、终端召回、Grok 配置，也没有实现 PR9 的已收敛状态机。没有重建桌面预览。
+- 本环境是 Linux，SDK 8.0.428。`dotnet build AgentLauncher.sln -c Release -m:1 -p:EnableWindowsTargeting=true` 为 0 警告、0 错误。带 `DefineConstants=INTEGRATION_TESTS` 的 App 编译同样是 0 警告、0 错误。`dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release -- --launch-surface-checks` 为 **7/7 通过、退出 0**。这 7 项不碰 `Store`。
+- 没有跑 `--ui-check`，也没有跑 `scripts/test.ps1`。这台机器没有 Windows 桌面，不能启动 WPF，也没有新的窗口截图。UX14/UX15、ACC-U04、ACC-U06、CR05、R28/R33 的界面断言留给 Windows CI。在那次结果出来之前，不把这些断言写成通过。
+

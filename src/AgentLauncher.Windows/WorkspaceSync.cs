@@ -88,7 +88,7 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         {
             "sync", "create",
             "--name", sessionName,
-            "--sync-mode", "two-way-resolved",  // 双向同步，冲突时保留两个版本
+            "--sync-mode", MutagenCreateMode.SyncMode,  // 本机一侧赢得冲突；界面不得把这种会话说成已收敛
             "--ignore-vcs",  // 忽略 .git 目录（避免冲突）
             "--ignore", "node_modules/",  // 忽略 node_modules
             "--ignore", "bin/",
