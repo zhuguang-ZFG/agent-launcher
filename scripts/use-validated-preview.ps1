@@ -26,7 +26,9 @@ try {
     $shortcut.IconLocation = (Join-Path $package 'AgentLauncher.App.exe')+',0'
     $shortcut.Description = 'Multi-Agent Launcher - validated package'
     $shortcut.Save()
-    if (Test-Path -LiteralPath $shortcutPath) { [IO.File]::Replace($temporary,$shortcutPath,$null) }
+    # Explicit backup path: ReplaceFile with a $null backup name throws "illegal path format" in some environments.
+    $replaceBackup = Join-Path $backupRoot ('replace-'+[guid]::NewGuid().ToString('N')+'.lnk')
+    if (Test-Path -LiteralPath $shortcutPath) { [IO.File]::Replace($temporary,$shortcutPath,$replaceBackup); Remove-Item -LiteralPath $replaceBackup -ErrorAction SilentlyContinue }
     else { [IO.File]::Move($temporary,$shortcutPath) }
     $saved = $shell.CreateShortcut($shortcutPath)
     if ($saved.TargetPath -ne $shortcut.TargetPath -or $saved.Arguments -ne $shortcut.Arguments) { throw 'Desktop entry verification failed.' }
