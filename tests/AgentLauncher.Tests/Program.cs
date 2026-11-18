@@ -144,6 +144,7 @@ if(args.Length>4&&args[0]=="--nested-setup") {
     if(args.Length>5&&args[5]=="exit")return 0;
     Thread.Sleep(30000);return 0;
 }
+if(args is ["--dump-env",var envPath]){var keys=new[]{"GIT_TERMINAL_PROMPT","GIT_PAGER","GCM_INTERACTIVE","GIT_OPTIONAL_LOCKS","LC_ALL","GIT_CONFIG_COUNT"};var lines=keys.Select(key=>key+"="+(Environment.GetEnvironmentVariable(key)??"")).ToList();if(int.TryParse(Environment.GetEnvironmentVariable("GIT_CONFIG_COUNT"),out var configCount))for(var i=0;i<configCount&&i<64;i++)lines.Add((Environment.GetEnvironmentVariable("GIT_CONFIG_KEY_"+i)??"")+"="+(Environment.GetEnvironmentVariable("GIT_CONFIG_VALUE_"+i)??""));File.WriteAllText(envPath,string.Join('\n',lines));return 0;}
 if(args.Length>3&&args[0]=="--spawn-child") {
     var psi=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false};
     psi.ArgumentList.Add("--hold");psi.ArgumentList.Add(args[2]);
