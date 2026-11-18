@@ -372,10 +372,12 @@ public partial class MainWindow
             var reattachButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认重新挂接 remote-release-probe");
             Check("disconnected remote session offers reattach beside release",reattachButton!=null&&releaseButton!=null&&(reattachButton.Content as string)!=(releaseButton.Content as string));
             var reattachDialog=CreateRemoteReattachDialog(releaseEntry);
-            reattachDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>FindLogical<Button>(reattachDialog).Single(b=>b.Content as string=="取消").RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
+            // 取消钮只标了 IsCancel；测试里直接 RaiseEvent(Click) 不会走 Button.OnClick，对话框关不上，整段 UI 会卡到 90 秒。
+            // 与释放对话框相同，点会设置 DialogResult 的「提交挂接」。二次确认取消仍由下面的 SubmitRemoteReattachAsync 覆盖。
+            reattachDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>FindLogical<Button>(reattachDialog).Single(b=>b.Content as string=="提交挂接").RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
             var reattachApplied=reattachDialog.ShowDialog();
             var reattachNote=FindLogical<TextBlock>(reattachDialog).FirstOrDefault(t=>t.Text.Contains("release.example.com"));
-            Check("reattach dialog names host, directory, and refuses to pretend sync",reattachApplied!=true&&reattachNote!=null&&reattachNote.Text.Contains("/home/agent/work")&&reattachNote.Text.Contains("不会把它说成已同步")&&reattachNote.Text.Contains("不会自动重连"));
+            Check("reattach dialog names host, directory, and refuses to pretend sync",reattachApplied==true&&reattachNote!=null&&reattachNote.Text.Contains("/home/agent/work")&&reattachNote.Text.Contains("不会把它说成已同步")&&reattachNote.Text.Contains("不会自动重连"));
             var reattachConfirms=0;var reattachPrompt="";
             try
             {
