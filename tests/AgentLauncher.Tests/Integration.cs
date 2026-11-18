@@ -674,6 +674,19 @@ else:
         await Test("Git prepare process uses protected capture",async()=>{
             var git=Commands.FindExe("git.exe")!;var result=await ControlledCommand.RunAsync(new(git,["--version"],"exe"),cwd);Assert(result.Code==0&&result.Output.StartsWith("git version"),result.Error+result.Output);
         });
+        await Test("F09 git launch disables fsmonitor and interactive prompts",async()=>{
+            var output=Path.Combine(Store.Root,"git-env.txt");var result=await ControlledCommand.RunAsync(new(Environment.ProcessPath!,["--dump-env",output],"exe"),cwd);Assert(result.Code==0,result.Error);
+            var text=await File.ReadAllTextAsync(output);Assert(text.Contains("GIT_TERMINAL_PROMPT=0\n")&&text.Contains("GCM_INTERACTIVE=never\n")&&text.Contains("\ncore.fsmonitor=false"),text);
+        });
+        await Test("F09 git preparation reaps a leftover child instead of waiting",async()=>{
+            var pidFile=Path.Combine(Store.Root,"git-child-pid.txt");var started=Stopwatch.StartNew();
+            var work=ControlledCommand.RunAsync(new(Environment.ProcessPath!,["--spawn-child","200","60000",pidFile],"exe"),cwd);
+            var finished=await Task.WhenAny(work,Task.Delay(15000));Assert(finished==work,"git preparation still waited on the surviving child");
+            var result=await work;Assert(result.Code==0&&started.Elapsed<TimeSpan.FromSeconds(12),result.Error+" elapsed="+started.Elapsed);
+            var pid=int.Parse(await File.ReadAllTextAsync(pidFile),System.Globalization.CultureInfo.InvariantCulture);var alive=true;
+            for(var i=0;i<30&&alive;i++){try{using var child=Process.GetProcessById(pid);alive=!child.HasExited;}catch(ArgumentException){alive=false;}if(alive)await Task.Delay(100);}
+            Assert(!alive,"surviving git child was not reaped");
+        });
         await Test("Real Pi version via recognized adapter",async()=>{
             var found=Commands.FindExe("pi");evidence.Add(new{name="pi-found",path=found});
             CommandSpec command;try{command=Commands.Resolve("pi",new(){Arguments=["--version"]});}catch(Exception e){throw new Exception($"pi resolved path: {found??"<null>"}; {e.Message}");}

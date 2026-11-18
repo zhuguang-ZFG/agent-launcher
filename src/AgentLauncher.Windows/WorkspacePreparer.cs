@@ -19,9 +19,12 @@ public static class ControlledCommand
         {
             var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,RedirectStandardInput=true,StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8};
             start.ArgumentList.Add("run");start.ArgumentList.Add(item.Id.ToString());process=Process.Start(start)??throw new IOException("无法运行受控准备程序。");process.StandardInput.Close();
-            var output=outputLine==null?ReadBoundedAsync(process.StandardOutput):ReadLinesAsync(process.StandardOutput,outputLine);var error=ReadBoundedAsync(process.StandardError);
+            using var drain=new CancellationTokenSource();
+            var output=outputLine==null?ReadBoundedAsync(process.StandardOutput,drain.Token):ReadLinesAsync(process.StandardOutput,outputLine,drain.Token);var error=ReadBoundedAsync(process.StandardError,drain.Token);
             // Cancellation stops subsequent operations. An in-progress Git write is allowed to finish.
-            await process.WaitForExitAsync();var result=new CommandResult(process.ExitCode,await output,await error);
+            await process.WaitForExitAsync();
+            // A grandchild that inherited these pipes can withhold EOF after the runner exits. The bytes already written are the command result.
+            drain.CancelAfter(TimeSpan.FromSeconds(2));var result=new CommandResult(process.ExitCode,await output,await error);
             var after=await Ipc.SendAsync(new("status",Guid.NewGuid()));
             if(after.Entries?.Any(e=>e.Plan.Id==item.Id&&e.State=="Pending")==true)
             {
@@ -39,25 +42,30 @@ public static class ControlledCommand
         }
         finally{process?.Dispose();}
     }
-    private static async Task<string> ReadLinesAsync(StreamReader reader,Action<string> consume)
+    private static async Task<string> ReadLinesAsync(StreamReader reader,Action<string> consume,CancellationToken ct)
     {
         var line=new StringBuilder();var buffer=new char[4096];int count;Exception? failure=null;
-        while((count=await reader.ReadAsync(buffer))>0)
+        try
         {
-            for(var i=0;i<count;i++)
+            while((count=await reader.ReadAsync(buffer.AsMemory(),ct))>0)
             {
-                if(failure!=null)continue;
-                if(buffer[i]=='\n'){try{consume(line.ToString().TrimEnd('\r'));}catch(Exception e)when(e is not OutOfMemoryException){failure=e;}line.Clear();}
-                else if(line.Length>=8192)failure=new IOException("准备命令输出行超出边界。");else line.Append(buffer[i]);
+                for(var i=0;i<count;i++)
+                {
+                    if(failure!=null)continue;
+                    if(buffer[i]=='\n'){try{consume(line.ToString().TrimEnd('\r'));}catch(Exception e)when(e is not OutOfMemoryException){failure=e;}line.Clear();}
+                    else if(line.Length>=8192)failure=new IOException("准备命令输出行超出边界。");else line.Append(buffer[i]);
+                }
             }
         }
+        catch(Exception e)when(e is OperationCanceledException or ObjectDisposedException || (ct.IsCancellationRequested && e is IOException)){}
         if(failure!=null)throw new IOException("流式准备结果无法解析。",failure);
-        if(line.Length>0)consume(line.ToString());return "";
+        if(!ct.IsCancellationRequested&&line.Length>0)consume(line.ToString());return "";
     }
-    private static async Task<string> ReadBoundedAsync(StreamReader reader)
+    private static async Task<string> ReadBoundedAsync(StreamReader reader,CancellationToken ct)
     {
         var text=new StringBuilder();var buffer=new char[4096];int count;var overflow=false;
-        while((count=await reader.ReadAsync(buffer))>0){if(text.Length+count<=1024*1024)text.Append(buffer,0,count);else overflow=true;}
+        try{while((count=await reader.ReadAsync(buffer.AsMemory(),ct))>0){if(text.Length+count<=1024*1024)text.Append(buffer,0,count);else overflow=true;}}
+        catch(Exception e)when(e is OperationCanceledException or ObjectDisposedException || (ct.IsCancellationRequested && e is IOException)){}
         if(overflow)throw new IOException("命令输出超过 1 MiB，已停止采集；实际操作结果需要核对。");return text.ToString();
     }
 }

@@ -42,6 +42,18 @@ internal static class Program
         catch(Exception e)when(e is InvalidOperationException or IOException){Console.Error.WriteLine("无法读取关闭确认；请在启动器运行记录中核对错误。");}
 #endif
     }
+    // Git for Windows may detach fsmonitor or a credential helper into this Job. Agent panes must wait for real tools; a preparation command must not.
+    private static Dictionary<string,string> GitLaunchEnvironment()
+    {
+        var env=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["GIT_TERMINAL_PROMPT"]="0",["GIT_PAGER"]="cat",["GCM_INTERACTIVE"]="never",["GIT_OPTIONAL_LOCKS"]="0",["GIT_LITERAL_PATHSPECS"]="1",["LC_ALL"]="C"
+        };
+        var count=0;if(int.TryParse(Environment.GetEnvironmentVariable("GIT_CONFIG_COUNT"),out var existing)&&existing is >0 and <64)count=existing;
+        void Add(string key,string value){env["GIT_CONFIG_KEY_"+count]=key;env["GIT_CONFIG_VALUE_"+count]=value;count++;}
+        Add("core.fsmonitor","false");Add("core.pager","cat");Add("core.quotepath","false");Add("advice.detachedHead","false");
+        env["GIT_CONFIG_COUNT"]=count.ToString(System.Globalization.CultureInfo.InvariantCulture);return env;
+    }
     // 同步证据尽力写入（A1 sync-final / B3 sync-session）：失败只警告不阻断启动/退出——回执已携带同步结论，证据仅供徽章回退。
     private static void TryWriteSyncEvidence<T>(string path,T record)
     {
@@ -247,7 +259,8 @@ internal static class Program
             else
             {
                 if(root is null||job is null)throw new InvalidOperationException("本地执行需要 root/job（逻辑错误）");
-                child=pool==null?new ProtectedProcess(plan.Command,plan.Cwd,root,job,redirected:!interactive,environment:guardEnvironment):new ProtectedProcess(plan.Command,plan.Cwd,[root,pool,job],redirected:!interactive,environment:guardEnvironment);
+                var launchEnvironment=guardEnvironment;if(plan.Kind=="git"){var gitEnvironment=GitLaunchEnvironment();if(guardEnvironment!=null)foreach(var pair in guardEnvironment)gitEnvironment[pair.Key]=pair.Value;launchEnvironment=gitEnvironment;}
+                child=pool==null?new ProtectedProcess(plan.Command,plan.Cwd,root,job,redirected:!interactive,createNoWindow:plan.Kind=="git",environment:launchEnvironment):new ProtectedProcess(plan.Command,plan.Cwd,[root,pool,job],redirected:!interactive,createNoWindow:plan.Kind=="git",environment:launchEnvironment);
                 Write("CreatedSuspended",child.Process.Id,child.CreationTime,null,"已创建，尚未运行");
             }
             
@@ -319,8 +332,24 @@ internal static class Program
             if(memoryRecovered)detail+="当前已回落：提交低于上限 85%（历史触及不撤销）。";
             Write("Exited",process.Id,(child?.CreationTime??sshChild!.CreationTime),exit,"进程已退出。"+detail);
             if(interactive&&exit!=0)Console.WriteLine("\nAgent 异常退出。"+detail+"\n工作目录已保留；如仍有工具运行，将等待它们结束。");
-            if(job is not null)while(job.Members().Length>0){Thread.Sleep(250);if(child is not null)ObserveMemory();}
-            if(child is not null)ObserveMemory(forcePool:true);exitMemory=child is not null?MemoryEvidence():null;detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail)+(memoryRecovered?"当前已回落：提交低于上限 85%（历史触及不撤销）。":"");
+            var reapedGit=false;
+            if(job is not null)
+            {
+                var grace=Stopwatch.StartNew();
+                while(job.Members().Length>0)
+                {
+                    // Preparation only. Agent panes keep waiting: a live tool is not a finished task, and this is not kill-on-close.
+                    if(plan?.Kind=="git"&&grace.Elapsed>=TimeSpan.FromSeconds(2))
+                    {
+                        Native.Check(Native.TerminateJobObject(job.Handle,1));reapedGit=true;
+                        var drained=Stopwatch.StartNew();while(job.Members().Length>0&&drained.Elapsed<TimeSpan.FromSeconds(2))Thread.Sleep(50);
+                        break;
+                    }
+                    Thread.Sleep(250);if(child is not null)ObserveMemory();
+                }
+                if(reapedGit&&job.Members().Length>0)throw new IOException("Git 准备结束后仍有受管进程，已停止等待。");
+            }
+            if(child is not null)ObserveMemory(forcePool:true);exitMemory=child is not null?MemoryEvidence():null;detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail)+(memoryRecovered?"当前已回落：提交低于上限 85%（历史触及不撤销）。":"")+(reapedGit?"Git 准备留下的后台进程已结束，不再等待。":"");
             if(sshChild is not null)detail=$"SSH 远程会话（{remoteHost}，不受本地资源限制）："+detail;
             Write("Finished",process.Id,(child?.CreationTime??sshChild!.CreationTime),exit,"全部受管进程已退出。"+detail);
 #if !INTEGRATION_TESTS

@@ -1435,3 +1435,11 @@ powershell -NoProfile -File scripts/test.ps1
 - 产品决定：同时运行的 Agent 窗格上限保持 8。每一个非终态 agent 都占一个名额，不论本机还是远程。尚未操作员确认释放的远程 `Disconnected` 继续占一个名额。把工作放到 VPS 不腾出本地窗格名额。
 - 这与现有代码一致，本次不改代码。Worker 的 reserve/begin 与界面 `ActiveAgentCount` / `UpdateLaunch` 已经按非终态 agent 计入 `MaxConcurrentAgents = 8`。内存与 CPU 准入仍然排除远程批次；远程条目不创建本地 Job。
 - 权威文档已按该决定改写 SPEC 3.4、CONTRACTS C14、ACCEPTANCE §17、远程执行规格、缺口收口计划和 README。没有新的测试，不改写 §83–§84 的证据。
+
+## 87. gate 作业 20 分钟取消的日志对照（2026-11-18）
+
+- 取消不是测试失败。run [44234358382](https://github.com/zhuguang-ZFG/agent-launcher/actions/runs/44234358382) 的 `test` 作业从 04:00:59Z 到 04:21:05Z 被 `timeout-minutes: 20` 取消，日志为 `The operation was canceled.`。完整门禁停在 `F09 isolated worktrees from fixed commit` 通过之后、R11 准备记录拒绝刚开始时；Omp、生产包和真实 Terminal 步骤未运行。该 head 相对 `6daa7de` 只有文档差异。
+- 同一套件在紧邻的成功作业里，`F09 isolated worktrees` 不是 13 分钟。run [44230001451](https://github.com/zhuguang-ZFG/agent-launcher/actions/runs/44230001451)（`6daa7de`，作业 18 分 49 秒，成功）：`Status reliable across idle ticks` 03:30:39Z，`F09 isolated worktrees` 03:31:31Z，间隔 **52 秒**；其后集成、远程、原型、浏览器和生产窗格检查都继续完成。run [44206884994](https://github.com/zhuguang-ZFG/agent-launcher/actions/runs/44206884994) 与 [44131978798](https://github.com/zhuguang-ZFG/agent-launcher/actions/runs/44131978798) 的同一间隔分别是 **37 秒** 和 **37 秒**，作业总长 17 分 0 秒和 19 分 15 秒，结论都是 success。
+- 被取消的作业在 F09 之前的阶段与 run 44230001451 同量级（模型结果约 1 分 38 秒对 1 分 10 秒，修复检查、准入、到 idle ticks 的间隔都在两分钟内）。从 `Status reliable` 04:07:53Z 到 `F09 isolated worktrees` 04:20:59Z 是 **13 分 6 秒**，多出来的约 12 分钟只出现在这一条。随后的文档提交 run [44237317548](https://github.com/zhuguang-ZFG/agent-launcher/actions/runs/44237317548) 没有被合并取消，也没有再卡住：同一间隔是 04:34:17Z 到 04:34:59Z（**42 秒**），作业 04:26:21Z–04:44:28Z，**18 分 7 秒，success**。所以 13 分钟是这一次准备路径的停顿，不是文档 diff，也不是 F09 的稳定耗时。
+- 代码上这条准备路径没有超时：`ControlledCommand` 把 Git 放进 Worker Job，主进程退出后一直等全部成员，调用方再无界等 stdout/stderr EOF。这和 §84 已记录的 R30 是同一类（孙进程握住管道就不给 EOF）。Git for Windows 还会把 `fsmonitor--daemon` 留在进程所属 Job 里。日志没有抓到当时的进程列表，不能把某一次 13 分钟指定成某一个 daemon；能确定的是准备命令在等一个本该结束的残留，而 Agent 窗格继续等待活着的工具。
+- 本环境不能执行 Windows 门禁，因此这里不记录新的通过计数。修复限制在 Git 准备：非交互环境（`core.fsmonitor=false`、`GCM_INTERACTIVE=never` 等）、主进程退出后最多再等 2 秒就结束残留成员、管道在进程退出后再给 2 秒 EOF。Agent 的无界排空和 `timeout-minutes: 20` 都没有放宽；上述成功作业说明健康门禁能在 20 分钟内走完后续步骤。
