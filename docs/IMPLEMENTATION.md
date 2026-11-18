@@ -2,7 +2,7 @@
 
 日期：2026-11-09。结论：**已交付可运行技术预览；未达到完整稳定发布门禁。** 本页区分实现、已测子场景、未测要求。测试由实现者执行；§0 第三轮经三个独立评审代理审查并修复确认项，仍无人类独立可用性测试。
 
-最新交付：2026-11-17 的操作便利性改进、完整门禁和生产预览更新见 §79；空闲工作集回收见 §78。旧章节是各自时点的记录，不代表当前实现。
+最新已记录实现：2026-11-18 的远程免密维护、R28/R29、R30/R31、Node 堆参数与全槽位云选择器见 §83–§84（`main` `6daa7de`）。§85 只说明权威文档已按这些记录对齐，没有新的门禁。旧章节是各自时点的记录，不代表当前实现。2026-11-17 的操作便利性与空闲工作集回收仍见 §79、§78。
 
 ## 0. v0.7 界面重设计实施（2026-11-09 续）
 
@@ -1422,3 +1422,16 @@ powershell -NoProfile -File scripts/test.ps1
 - 活测（新预览包、桌面快捷方式启动）：B 轮「续接上次远程会话」提交追加任务，远端 pi 修改后 Mutagen 落回本机——`proof-preview.txt` 两行 nonce（NONCE_PREVIEW_77fd4924d552 + NONCE_RESUME_1462a53b4ced）、`git status` 为 M、sync-final=synced、退出码 0；「查看改动」对话框只读列出该 M 文件（`artifacts/live-changes-dialog.png`）；升级选择器列出「最新（默认命令）/ 指定版本…」并提示无版本历史时回滚不可用，取消无副作用；「检查远程版本」返回版本检查成功、退出码 0、pi 1.5.2；详情对话框含「远端资源（只读，自动刷新）」。截图：`artifacts/live-main-final.png`（槽位 04「Pi · ☁ 京东云 VPS」+「同步：已同步」）、`artifacts/live-cloud-dropdown.png`（未绑定槽位 01 下拉含「Pi · ☁ 京东云 VPS」）。
 - 测试结果：原生 **224/224**、修复套件 36/0、隔离根 `--ui-check` **397/397（含 UX14）**、完整门禁 `scripts/test.ps1` **退出 0**（`artifacts/gate-exit.txt`、`artifacts/gate-run.log`、`artifacts/ui/ui-checks.json`）。
 - 限制与观察：活测期间配置窗口两次无崩溃痕迹退出（Application 日志无 WER/.NET 事件、无 ui-exception.json、无错误对话框），已挂进程退出监视（`artifacts/app-watch.log`）待复现定位，未确认为代码缺陷；UIA 驱动脚本需注意 owned 窗口挂在主窗口子树、Win32 MessageBox 内容以 Pane 暴露（脚本已修正，非应用缺陷）。堆上限 1024 MiB 面向 2–4 GiB 级 VPS，更大内存主机可按需调整（当前为固定值，未做自适应）。
+
+## 85. 权威文档与已记录实现对齐（2026-11-18，Asia/Shanghai）
+
+- 只改文档，不改产品行为，不重跑门禁。对照 `main` `6daa7de` 与 §83–§84，更新 SPEC、CONTRACTS C14、ACCEPTANCE §17、远程执行规格、缺口收口计划和 README 的范围表述。
+- 已按上述记录写成已实现或已有证据：R28 操作员确认释放、R29 opt-in 活测（双 VPS 与发货预览包复验；不进 CI，不是浸泡）、免密远程维护、方案 C、查看改动、同步徽章与 `sync-session.json`、远端只读资源、R30 探针挂死、R31 ssh-agent 1058、Node 专用固定 `NODE_OPTIONS=--max-old-space-size=1024`、UX14 全槽位云选择器。
+- 仍按未实现或未承诺保留：`MemoryLimitBytes` / 远程 cgroup、SSH 断开后的重连或重新挂接、G4、§11 浸泡、独立人类可用性、远端 CI、配置窗口完全退出后的会话通知补播、同标题终端召回可能选错窗口、丢失全部句柄的旧池、工作集回收对 commit 的证明。
+- §84 已记录的完整门禁仍是该节原文：原生 224/224、修复套件 36/0、隔离 `--ui-check` 397/397、`scripts/test.ps1` 退出 0。该节没有另写完整门禁的 UI 条数。本节不新增通过或失败计数，也不补写这个数字。
+
+## 86. 8 窗格名额包含远程条目（2026-11-18，文档决定）
+
+- 产品决定：同时运行的 Agent 窗格上限保持 8。每一个非终态 agent 都占一个名额，不论本机还是远程。尚未操作员确认释放的远程 `Disconnected` 继续占一个名额。把工作放到 VPS 不腾出本地窗格名额。
+- 这与现有代码一致，本次不改代码。Worker 的 reserve/begin 与界面 `ActiveAgentCount` / `UpdateLaunch` 已经按非终态 agent 计入 `MaxConcurrentAgents = 8`。内存与 CPU 准入仍然排除远程批次；远程条目不创建本地 Job。
+- 权威文档已按该决定改写 SPEC 3.4、CONTRACTS C14、ACCEPTANCE §17、远程执行规格、缺口收口计划和 README。没有新的测试，不改写 §83–§84 的证据。
