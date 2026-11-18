@@ -1427,5 +1427,11 @@ powershell -NoProfile -File scripts/test.ps1
 
 - 只改文档，不改产品行为，不重跑门禁。对照 `main` `6daa7de` 与 §83–§84，更新 SPEC、CONTRACTS C14、ACCEPTANCE §17、远程执行规格、缺口收口计划和 README 的范围表述。
 - 已按上述记录写成已实现或已有证据：R28 操作员确认释放、R29 opt-in 活测（双 VPS 与发货预览包复验；不进 CI，不是浸泡）、免密远程维护、方案 C、查看改动、同步徽章与 `sync-session.json`、远端只读资源、R30 探针挂死、R31 ssh-agent 1058、Node 专用固定 `NODE_OPTIONS=--max-old-space-size=1024`、UX14 全槽位云选择器。
-- 仍按未实现或未承诺保留：`MemoryLimitBytes` / 远程 cgroup、SSH 断开后的重连或重新挂接、G4、§11 浸泡、独立人类可用性、远端 CI、配置窗口完全退出后的会话通知补播、同标题终端召回可能选错窗口、丢失全部句柄的旧池、工作集回收对 commit 的证明。8 窗格并发计数与 C14 书面目标不一致，文档记为待产品决定，未改代码。
+- 仍按未实现或未承诺保留：`MemoryLimitBytes` / 远程 cgroup、SSH 断开后的重连或重新挂接、G4、§11 浸泡、独立人类可用性、远端 CI、配置窗口完全退出后的会话通知补播、同标题终端召回可能选错窗口、丢失全部句柄的旧池、工作集回收对 commit 的证明。
 - §84 已记录的完整门禁仍是该节原文：原生 224/224、修复套件 36/0、隔离 `--ui-check` 397/397、`scripts/test.ps1` 退出 0。该节没有另写完整门禁的 UI 条数。本节不新增通过或失败计数，也不补写这个数字。
+
+## 86. 8 窗格名额包含远程条目（2026-11-18，文档决定）
+
+- 产品决定：同时运行的 Agent 窗格上限保持 8。每一个非终态 agent 都占一个名额，不论本机还是远程。尚未操作员确认释放的远程 `Disconnected` 继续占一个名额。把工作放到 VPS 不腾出本地窗格名额。
+- 这与现有代码一致，本次不改代码。Worker 的 reserve/begin 与界面 `ActiveAgentCount` / `UpdateLaunch` 已经按非终态 agent 计入 `MaxConcurrentAgents = 8`。内存与 CPU 准入仍然排除远程批次；远程条目不创建本地 Job。
+- 权威文档已按该决定改写 SPEC 3.4、CONTRACTS C14、ACCEPTANCE §17、远程执行规格、缺口收口计划和 README。没有新的测试，不改写 §83–§84 的证据。
