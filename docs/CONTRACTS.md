@@ -195,7 +195,7 @@ H >= Rc + Uc + Np
 
 **准入模式（2026-11-15）：** 实用（默认）与自定义模式把物理/提交余量、整机 CPU 与软预算的读数不足降级为提示：`Evaluate` 返回 `Allow` 且 `Advisory=true`，文案说明缺口并声明「实用模式不拦截，进程内存硬上限仍然生效」。保守模式保留全部硬拒（物理保留 R、提交保留 Rc、CPU ≥ 80%、共享池规划、Job 上限加总超软预算）与原有可执行文案。两种模式都拒绝且不产生授权：采样无效或过期、策略校验失败（含保留线非法）、各项 Job 上限加总饱和溢出。`begin`/`resume` 按控制记录里冻结的模式判断（`PolicyFromEntry`），不因用户随后切换模式热放宽已预约批次；提示也不写入账本作为可复用凭据。参考：Ray 的按资源限制并发运行任务、Kubernetes requests 准入与 limits 内核执行分离、earlyoom 约 10% 空闲内存阈值；只借鉴模式，不引入依赖。
 
-**同时运行 Agent 窗格上限（2026-11-15）：** 固定并发池 `MaxConcurrentAgents = 8`。`reserve` 与 `reserve-task` 在写入资源池、账本条目或任务领取之前，统计「非终态且 Kind 为 agent（旧记录缺省同类）」条目，加上本次请求中的 agent 项；合计超过 8 即拒绝并提示「同时运行的 Agent 窗格最多 8 个；请先结束或撤销部分 Agent 后再启动。」。本次请求已覆盖的账本条目（原 Id 的查询式重试）不双计；Git 准备项不计入名额，其全局最多 1 个准备的串行限制不变。上限在保守与实用/自定义模式都生效，与资源读数提示无关，也不消耗/复用任何确认；保存容量 `MaxSlots = 16`、单批 panes 1～16、`Draft.Validate` 与配置持久化契约保持不变，超限只阻止新增而非改动已保存配置。
+**同时运行 Agent 窗格上限（2026-11-15）：** 固定并发池 `MaxConcurrentAgents = 8`。`reserve` 与 `reserve-task` 在写入资源池、账本条目或任务领取之前，统计「非终态且 Kind 为 agent（旧记录缺省同类）」条目，加上本次请求中的 agent 项；合计超过 8 即拒绝并提示「同时运行的 Agent 窗格最多 8 个；请先结束或撤销部分 Agent 后再启动。」。本次请求已覆盖的账本条目（原 Id 的查询式重试）不双计；Git 准备项不计入名额，其全局最多 1 个准备的串行限制不变。上限在保守与实用/自定义模式都生效，与资源读数提示无关，也不消耗/复用任何确认；保存容量 `MaxSlots = 16`、单批 panes 1～16、`Draft.Validate` 与配置持久化契约保持不变，超限只阻止新增而非改动已保存配置。远程条目是否占用这 8 个名额，见 C14：书面目标与当前计数不一致，待产品决定。
 
 共享池的提交增长按池内成员规划量之和减去整个池的实测提交量计算（不足为零），在已有项和新请求之间只计一次；不能累计叶 Job 的私有提交代替池读数。未知池读数按成员规划全额计，不给抵扣，空 Job 不使用仍由退出进程句柄保留的残余记账；请求自行携带的用量不获信任。Job 读数前后取系统可用量较小值，保持采样有效期，不把依次读取的计数器称为原子预留。`status.Budgets` 是短期预览数据，所有分页必须一致；未变化响应仍更新该数据，旧 Worker 缺少字段时按未知用量保守处理。若用量字段挤占原本可传输的任务记录或分页总预算，完整省略用量字段并按未知处理，不能裁掉任务记录或只传部分抵扣项。最终授权重新查询，不把界面预览当作授权。
 
@@ -544,7 +544,7 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
 - Runner 创建 Agent 之前由独立 `job-custody` 进程确认持有 root/pool/item 句柄；托管只有幂等保留操作，没有执行授权。监控/runner 崩溃后可按名称重新打开原 Job。守护只在账本终态且实际成员为空时放开 item；pool 还须无活动预约且实际为空。账本不可读保留句柄，不杀进程、不清账本。全部占用释放后守护退出。已有全部句柄丢失的旧池仍无法证明为空，不自动清空；多个保护进程同时丢失也不承诺恢复。
 - 清理被文件阻止时显示 NUL 分隔 Git 清单，区分已跟踪修改、未跟踪与忽略内容，转义换行等特殊路径，支持刷新、复制和打开目录。忽略的 .env/本地数据不能默认视为可删除。实际清理仍双重核对占用、分支、索引与内容，并使用无 force 的 worktree remove。
 
-## C14. 远程执行域、生命周期与同步（2026-11-17）
+## C14. 远程执行域、生命周期与同步（2026-11-17；2026-11-18 按 `6daa7de` 对齐实现状态）
 
 ### 1. 范围 / 触发
 
@@ -557,16 +557,17 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
 - 计划：`LaunchItem.RemoteExecution` 为 `RemoteExecutionSpec`。准备/预约前调用 `Validate()`。
 - 运行：Worker 使用 `SshRunnerBackend.Create` 只构造 `ProcessStartInfo`，`Start` / `StartWithSyncAsync` 才启动本地 `ssh`。
 - 核对：监视器用本地 SSH 的 PID 与创建时间判断存活；退出码 255 视为连接断开。
-- 释放（待实现，R28）：仅当条目为 `Disconnected` 时，接受操作员确认记录并将条目标为终态、释放账本。无法判断远程进程是否仍在时必须拒绝。
+- 释放（R28，已实现）：仅当条目为远程且状态为 `Disconnected` 时接受操作员记录。判断为 `Gone`、原因非空且不超过 2048 字、并带二次确认时，写入 `attempts/<id>/operator-release.json`，把条目标为 `Settled` 并释放账本。判断为仍在（`Running`）或无法判断（`Unknown`）、缺原因、未确认、本地 SSH 仍存活、或尝试锁未释放时拒绝，账本不变。本操作不重连、不重新挂接，也不结束远程主机上的进程。系统重启后的既有 boot 证明仍走原核对分支。
 
 ### 3. 数据与状态合同
 
 - 名称和地址在主机列表中各自唯一（忽略大小写）。槽位只通过 `Id` 引用主机；删除主机前必须核对应槽位引用，存在引用则拒绝删除。
 - 认证只使用 `ssh-agent` 或私钥路径，启动参数包含 `BatchMode=yes`。配置、账本和普通日志不得保存密码或私钥内容。
 - 远程目录必须是绝对路径或以 `~/` 开头。远程参数不得包含 Windows 盘符或 UNC 路径，否则准备/预约拒绝，提示「远程参数包含 Windows 本地路径」。
-- 当前允许的远程 Agent 类型为 `pi`、`kimi`、`qodercli`、`omp`、`codex`。`custom` 和未知类型拒绝。`MemoryLimitBytes` 必须拒绝，说明尚未实现远程内存限制。
-- 远程条目不创建本地 Job 或 custody，不按本地内存/CPU 压力拦截，不计入本地 8 窗格并发预算。同一监视器上的本地计划仍受原准入约束。账本、授权代次和程序身份等共享安全闸门对两域同样生效。本地 `Budget=0` 的拒绝不得被远程豁免扩散。
-- 状态映射：SSH 存活且 PID/创建时间可核对 → `Started`；SSH 退出码不是 255 → `Settled`，可释放；退出码 255 → `Disconnected`，预算不释放；Started 之前的创建中断 → `Disconnected`，预算不释放。`Disconnected` 在操作员确认释放或系统重启后的既有 boot 证明成立前，保持非终止。
+- 当前允许的远程 Agent 类型为 `pi`、`kimi`、`qodercli`、`omp`、`codex`。`custom` 和未知类型拒绝。`MemoryLimitBytes` 必须拒绝，说明尚未实现远程内存限制（远程 cgroup 不在本合同）。远程启动命令另注入固定 `NODE_OPTIONS=--max-old-space-size=1024`，只约束 Node 老生代堆；非 Node 进程忽略该变量。该注入不实现 `MemoryLimitBytes`。
+- 远程条目不创建本地 Job 或 custody，不按本地内存/CPU 压力拦截。同一监视器上的本地计划仍受原准入约束。账本、授权代次和程序身份等共享安全闸门对两域同样生效。本地 `Budget=0` 的拒绝不得被远程豁免扩散。
+- 书面目标：远程条目不计入本地 8 窗格并发预算。当前实现（`6daa7de`）尚未跟上该句。Worker 在 reserve 与 begin、界面 `ActiveAgentCount`（`UpdateLaunch` 用它决定能否启动）把非终态 agent（含远程与 `Disconnected`）计入 `MaxConcurrentAgents = 8`。内存/CPU 准入已经排除远程。这是待产品决定的不一致，不是已结算政策。决定只有两条路：改计数使之符合本句，或若含远程 Windows Terminal 窗格在内一共最多 8 个是有意行为，则改本句与 SPEC 3.4。决定落地前，调用方不能把其中一句单独当成运行时保证。
+- 状态映射：SSH 存活且 PID/创建时间可核对 → `Started`；SSH 退出码不是 255 → `Settled`，可释放；退出码 255 → `Disconnected`，预算不释放；Started 之前的创建中断 → `Disconnected`，预算不释放。`Disconnected` 在操作员确认释放或系统重启后的既有 boot 证明成立前，保持非终止。SSH 断开后的重连或重新挂接不在本合同，当前没有该入口。
 - 结束本地 SSH 客户端，不能单独把条目改为 `Settled`。
 - 若启用工作区同步，同步远程路径必须等于启动目录。`Mutagen` 结束时先 flush，失败或超时必须保留会话并写入回执，不得直接 terminate。删除远程多余文件必须显式 opt-in。
 
@@ -593,8 +594,9 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
 
 ### 6. 必要测试
 
-- 已有：`RemoteHostEditorChecks`、`RemoteExecutionChecks`（含 R27）、`RemoteExecutionIntegration`（R23～R25）、分域 R26、工作区同步集成，以及 opt-in 的 `RemoteLiveChecks`（不进 CI）。
-- 待补：R28 必须有不打开真实 VPS 的回归，断言未确认不释放、无法判断不释放、确认后写回执并终态化。R29 为真实 VPS 活测，证据归档但不作为 CI 门禁。含远程 UI 的改动必须跑完整 `scripts/test.ps1`，不得只用 `-SkipUi -SkipBrowser` 关闭远程合同。
+- 已有记录（次数与日志以 IMPLEMENTATION 原文为准，本合同不重跑、不改写计数）：`RemoteHostEditorChecks`、`RemoteExecutionChecks`（含 R27）、`RemoteExecutionIntegration`（R23～R25 与 R28 的 fake-ssh 回归）、分域 R26、工作区同步集成，以及 opt-in 的 `RemoteLiveChecks`（不进 CI）。R28 不打开真实 VPS 的回归记在 §83：未确认不释放、无法判断不释放、确认后写回执并终态化。R29 的双 VPS 活测与发货预览包复验记在 §83–§84，证据只引用路径，不作为 CI 门禁，也不是浸泡。R30 探针挂死与 R31 桌面启动 ssh-agent 1058 的回归记在 §84。
+- §84 记录的最近一次完整门禁是 `scripts/test.ps1` 退出 0；该节单独写出的隔离 `--ui-check` 为 397/397。含远程 UI 的后续改动仍须跑完整 `scripts/test.ps1`，不得只用 `-SkipUi -SkipBrowser` 关闭远程合同。
+- 仍未实现：`MemoryLimitBytes` 与远程 cgroup；SSH 断开后的重连或重新挂接。8 窗格计数与上一节书面目标的不一致待产品决定。
 
 ### 7. 错误与正确做法
 
