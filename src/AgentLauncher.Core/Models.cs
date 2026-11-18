@@ -171,7 +171,7 @@ public sealed class Ledger : IJsonOnDeserialized
     internal void ConfirmTaskClaimsMigrated() => TaskClaimsAbsentFromJson = false;
 }
 public sealed record Receipt(string Phase, int Pid, long ProcessTime, int? ExitCode, string Detail, DateTimeOffset At, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? JobMemory = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] JobMemoryEvidence? PoolMemory = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? HandshakeAt = null, [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] long? HandshakeWaitMs = null);
-public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null, OperatorRelease? Release = null);
+public sealed record Request(string Operation, Guid RequestId, LaunchItem[]? Items = null, Guid? Attempt = null, string? Epoch = null, string? Digest = null, string? StatusEpoch = null, string? StatusSignature = null, long? DraftRevision = null, string? PolicyHash = null, string? PlanDigest = null, IReadOnlyList<Guid>? EnabledSlotIds = null, ResourcePolicySnapshot? Policy = null, Guid? TaskEntryId = null, OperatorRelease? Release = null, OperatorReattach? Reattach = null);
 public sealed record Response(bool Ok, string Message, ControlEntry[]? Entries = null, MemorySnapshot? Memory = null, string? Epoch = null, string? AdmissionBlockedReason = null, bool More = false, bool Unchanged = false, string? Decision = null, string? StatusSignature = null, int? RootCpuRate = null, bool? ReconcileOffered = null, PoolRecord[]? Pools = null, BudgetItem[]? Budgets = null, string? AdmissionHardBlockedReason = null, bool AdmissionPressure = false);
 
 public sealed record ArchivedAttempt(int SchemaVersion,Guid AttemptId,string Digest,ControlEntry Entry);
@@ -181,6 +181,10 @@ public sealed record ArchivedAttempt(int SchemaVersion,Guid AttemptId,string Dig
 public sealed record OperatorRelease(string Judgment,string Reason,bool Confirmed);
 // 释放成功时写入 attempts/<id>/operator-release.json 的身份绑定证据，先于账本终态化发布。
 public sealed record OperatorReleaseRecord(int SchemaVersion,Guid AttemptId,string Host,string RemoteDirectory,string Judgment,string Reason,bool Confirmed,DateTimeOffset At,string Digest);
+// R33 操作员确认重新挂接。与 OperatorRelease 分开：确认释放不得变成挂接，挂接也不得把尝试终态化。
+// Confirmed 为 false 时监视器拒绝且不探活。成功证据在 attempts/<id>/operator-reattach.json，账本保持非终态。
+public sealed record OperatorReattach(bool Confirmed);
+public sealed record OperatorReattachRecord(int SchemaVersion,Guid AttemptId,string Host,string RemoteDirectory,string SyncMode,string? SyncSession,string Probe,bool Confirmed,DateTimeOffset At,string Digest);
 
 // A1/B3 工作区同步证据（attempts/<id>/）：sync-session.json 在 Mutagen 会话创建后持久化会话名（名字含随机 GUID，
 // 无法从配置反推；App 重启后据此按名匹配 mutagen sync list）。sync-final.json 在远程会话终态时（flush 成功/失败后）

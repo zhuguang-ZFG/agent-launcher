@@ -41,7 +41,7 @@ public partial class MainWindow
         if (judgment != "Gone") { ProgressText.Text = "判断为仍在运行或无法判断：不释放，条目保持「连接断开」，预算保留。请继续在远程主机核对。"; return; }
         if (reason.Length == 0) { ProgressText.Text = "缺少释放原因：不释放。请填写核对结论与释放原因后重新提交。"; return; }
         if (reason.Length > 2048) { ProgressText.Text = "释放原因超过 2048 字上限：不释放。请精简后重新提交。"; return; }
-        var prompt = $"二次确认：已核对远程主机 {remote?.Host} 的 {remote?.RemoteWorkingDirectory}，判断远程进程已不在。\n释放原因：{reason}\n\n确认后该条目将转为终态并释放占用，核对记录写入 operator-release.json；此操作不会结束远程主机上的任何进程。是否确认释放？";
+        var prompt = $"二次确认：已核对远程主机 {remote?.Host} 的 {remote?.RemoteWorkingDirectory}，判断远程进程已不在。\n释放原因：{reason}\n\n确认后该条目将转为终态并释放占用，核对记录写入 operator-release.json；此操作不会结束远程主机上的任何进程，也不会重新挂接。是否确认释放？";
 #if INTEGRATION_TESTS
         var confirmed = TestConfirm != null ? TestConfirm(prompt, "确认释放远程条目", MessageBoxButton.YesNo) : MessageBox.Show(this, prompt, "确认释放远程条目", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
 #else

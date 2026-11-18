@@ -386,5 +386,56 @@ internal static class RemoteExecutionChecks
             var back = JsonSerializer.Deserialize<OperatorReleaseRecord>(JsonSerializer.Serialize(record, Store.Json), Store.Json);
             assert(back == record, "operator-release.json 记录往返不一致");
         });
+
+        test("R33 reattach is confirmed, distinct from release, and does not free a pane slot", () =>
+        {
+            var attempt = Guid.NewGuid();
+            var reattach = new OperatorReattach(true);
+            var request = new Request("reattach-remote", Guid.NewGuid(), Attempt: attempt, Reattach: reattach);
+            using var stream = new MemoryStream();
+            Ipc.WriteAsync(stream, request, default).GetAwaiter().GetResult();
+            stream.Position = 0;
+            var read = Ipc.ReadAsync<Request>(stream, default).GetAwaiter().GetResult();
+            assert(read.Operation == "reattach-remote" && read.Release is null && read.Reattach == reattach, "reattach 请求被写成了释放或丢失确认位");
+
+            var unconfirmed = new Request("reattach-remote", Guid.NewGuid(), Attempt: attempt, Reattach: new OperatorReattach(false));
+            assert(unconfirmed.Reattach is { Confirmed: false } && unconfirmed.Operation != "release-remote", "未确认挂接与释放协议串了");
+
+            var legacy = JsonNode.Parse(JsonSerializer.Serialize(new Request("reattach-remote", Guid.NewGuid(), Attempt: attempt), Store.Json))!.AsObject();
+            legacy.Remove("Reattach");
+            var legacyRead = JsonSerializer.Deserialize<Request>(legacy.ToJsonString(), Store.Json)!;
+            assert(legacyRead.Reattach is null, "缺少 Reattach 字段被反序列化成了已确认");
+
+            var record = new OperatorReattachRecord(1, attempt, "vps.example.com", "/home/agent/work", "None", null, "ALIVE", true, DateTimeOffset.UtcNow, "digest");
+            var back = JsonSerializer.Deserialize<OperatorReattachRecord>(JsonSerializer.Serialize(record, Store.Json), Store.Json);
+            assert(back == record, "operator-reattach.json 记录往返不一致");
+
+            assert(RemoteReattach.ClassifyProbe(0, false, "noise\nALIVE\n") == "alive", "ALIVE 探针应判为仍在");
+            assert(RemoteReattach.ClassifyProbe(0, false, "GONE") == "gone", "GONE 探针应判为已不在");
+            assert(RemoteReattach.ClassifyProbe(0, false, "ALIVE\nGONE") == "unknown", "含糊探针不得当成仍在");
+            assert(RemoteReattach.ClassifyProbe(255, false, "ALIVE") == "error", "SSH 失败不得当成仍在");
+            assert(RemoteReattach.ClassifyProbe(-1, true, "") == "timeout", "探针超时不得当成仍在");
+            assert(!RemoteReattach.RestoresSync(WorkspaceSyncMode.None) && !RemoteReattach.RestoresSync(null), "不同步不得在重新挂接时恢复同步");
+            assert(RemoteReattach.RestoresSync(WorkspaceSyncMode.Mutagen) && RemoteReattach.RestoresSync(WorkspaceSyncMode.SshfsMount), "原来启用的双向同步应在重新挂接时恢复");
+
+            var probe = RemoteReattach.ProbeShell(attempt);
+            var attach = RemoteReattach.AttachShell(attempt, "/home/agent/work");
+            assert(probe.Contains(RemoteReattach.ProbeMarker) && probe.Contains(RemoteReattach.AttemptToken(attempt)) && !probe.Contains("disconnect"), "探针命令应带尝试标记且不触发断连夹具");
+            assert(attach.Contains(RemoteReattach.AttachMarker) && attach.Contains("cd '/home/agent/work'") && attach.Contains(RemoteReattach.AttemptToken(attempt)), "挂接命令应回到同一远程目录");
+            assert(!attach.Contains(" pi ") && !attach.Contains("&& pi"), "重新挂接不得再启动 agent");
+
+            var entry = new ControlEntry
+            {
+                Plan = new LaunchItem(attempt, Guid.NewGuid(), 1, "reattach", "/tmp", new("/tmp", "key"), false, new("pi", [], "remote"), 0),
+                State = "Reattaching", Detail = "挂接中", Created = DateTimeOffset.UtcNow
+            };
+            assert(!ControlEntryStates.IsTerminal(entry), "正在重新挂接仍占窗格名额");
+            entry.State = "Disconnected";
+            assert(!ControlEntryStates.IsTerminal(entry), "断开未释放时仍占窗格名额");
+            entry.State = "Started";
+            assert(!ControlEntryStates.IsTerminal(entry), "重新挂上之后仍占原来的一个名额");
+            assert(ResourcePolicy.MaxConcurrentAgents == 8, "重新挂接不得改 8 窗格上限");
+            assert(TaskUsability.StateLabel("Reattaching") == "正在重新挂接（占用保留）", "重新挂接状态文案不对");
+        });
     }
 }

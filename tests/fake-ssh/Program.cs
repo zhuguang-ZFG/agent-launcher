@@ -12,6 +12,28 @@ class Program
 {
     static int Main(string[] args)
     {
+        // 重新挂接夹具：探针立即回答 ALIVE/GONE；挂接保持数秒后退出 0。不连接真实主机。
+        var joined = string.Join(" ", args);
+        if (joined.Contains("agent-launcher-reattach-probe"))
+        {
+            Console.WriteLine(joined.Contains("reattach-gone") ? "GONE" : "ALIVE");
+            return 0;
+        }
+        if (joined.Contains("agent-launcher-reattach-attach"))
+        {
+            var attachHold = 8;
+            foreach (var arg in args)
+            {
+                var marker = arg.IndexOf("hold=", StringComparison.Ordinal);
+                if (marker >= 0 && int.TryParse(arg.Substring(marker + 5).Split(';', ' ', '\'')[0], out var seconds))
+                    attachHold = seconds;
+            }
+            Console.WriteLine("FAKE-SSH attach holding " + attachHold);
+            System.Threading.Thread.Sleep(attachHold * 1000);
+            Console.WriteLine("FAKE-SSH attach ended");
+            return 0;
+        }
+
         // 维护通道夹具：任一参数（如主机地址）含标记时输出固定内容并立即退出（不打印 FAKE-SSH 前缀，
         // 保证 --version 首行/资源输出可被真实解析器消费）。标记互不为子串，既有 disconnect/hold 行为不变。
         foreach (var arg in args)

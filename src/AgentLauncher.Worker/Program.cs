@@ -19,15 +19,16 @@ internal static class Program
             if(args.Length>=7&&args[0]=="pool-items")return PoolItems(args);
             if(args.Length>=6&&args[0]=="pool-host")return PoolHost(args);
             if(args.Length==2 && args[0] is "pane" or "run" && Guid.TryParse(args[1],out var id))return RunPane(id,args[0]=="pane");
-            Console.Error.WriteLine("用法: monitor | pane <attempt-guid> | pool-host <池> <项> <就绪> <释放> <新建池>");return 2;
+            if(args is ["pane",var reattachText,"reattach"] && Guid.TryParse(reattachText,out var reattachId))return RunReattach(reattachId);
+            Console.Error.WriteLine("用法: monitor | pane <attempt-guid> | pane <attempt-guid> reattach | pool-host <池> <项> <就绪> <释放> <新建池>");return 2;
         }
         catch(Exception e)when(e is not OutOfMemoryException)
         {
             if(args is ["monitor"])
                 try{Store.Save(Store.FilePath("monitor-error.json"),new{At=DateTimeOffset.UtcNow,Type=e.GetType().FullName,e.HResult,Error=e.ToString()});}catch(Exception writeError)when(writeError is not OutOfMemoryException){}
-            if(args.Length==2&&args[0] is "pane" or "run"&&Guid.TryParse(args[1],out var failedAttempt))
+            if((args.Length==2&&args[0] is "pane" or "run"||args is ["pane",_,"reattach"])&&Guid.TryParse(args[1],out var failedAttempt))
                 try{Store.Save(Store.FilePath(Path.Combine("attempts",failedAttempt.ToString("N"),"runner-error.json")),new{At=DateTimeOffset.UtcNow,Pid=Environment.ProcessId,Type=e.GetType().FullName,e.HResult,Error=e.ToString()});}catch(Exception writeError)when(writeError is not OutOfMemoryException){}
-            Console.Error.WriteLine("启动器: "+e.Message);HoldPane(args is ["pane",_],1,false);return 1;
+            Console.Error.WriteLine("启动器: "+e.Message);HoldPane(args is ["pane",_] or ["pane",_,"reattach"],1,false);return 1;
         }
     }
     private static void HoldPane(bool interactive,int exit,bool limited)
@@ -251,7 +252,7 @@ internal static class Program
                     }
                 }
                 
-                sshChild=SshRunnerBackend.Create(remoteSpec);
+                sshChild=SshRunnerBackend.Create(remoteSpec,plan.Id);
                 // 保持同步会话引用（Dispose 时清理）
                 if(syncSession is not null)sshChild.SyncSession=syncSession;
                 Write("CreatedSuspended",0,0,null,$"已创建 SSH 远程会话配置（{remoteSpec.Host}，不受本地资源限制），尚未运行");
@@ -441,6 +442,64 @@ internal static class Program
             if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAIL_AT")==phase)Environment.Exit(97);
 #endif
         }
+    }
+    // 同一条账本上的重新挂接窗格。不走 begin/resume，不创建本地 Job，不把尝试写成终态。
+    // 本地 SSH 结束后回到 Disconnected：远程进程是否还在仍要操作员用 R28 判断，这里不自动释放。
+    private static int RunReattach(Guid id)
+    {
+        Store.Save(Store.FilePath(Path.Combine("attempts",id.ToString("N"),"runner-entered.json")),new{At=DateTimeOffset.UtcNow,Pid=Environment.ProcessId,Reattach=true});
+        using var mutex=new Mutex(false,Store.AttemptLock(id));bool owned;
+        try{owned=mutex.WaitOne(0);}catch(AbandonedMutexException){owned=true;}
+        if(!owned)throw new IOException("该启动请求正在处理。");
+        SshRunnerBackend? ssh=null;IWorkspaceSyncSession? sync=null;var started=false;
+        try
+        {
+            var claim=Path.Combine(Store.Root,"attempts",id.ToString("N"),"claim");Directory.CreateDirectory(Path.GetDirectoryName(claim)!);
+            using(var file=new FileStream(claim,FileMode.CreateNew,FileAccess.Write,FileShare.Read)){file.WriteByte(1);file.Flush(true);}
+            var grant=Ipc.SendAsync(new("reattach-begin",Guid.NewGuid(),Attempt:id)).GetAwaiter().GetResult();
+            if(!grant.Ok||grant.Entries is not {Length:1})throw new IOException(grant.Message);
+            var plan=grant.Entries[0].Plan;var remote=plan.RemoteExecution??throw new IOException("该条目不是远程执行，不能重新挂接。");
+            if(RemoteReattach.RestoresSync(remote.WorkspaceSync?.Mode)&&remote.WorkspaceSync is {} syncSpec)
+            {
+                SyncFinalRecord? final=null;SyncSessionRecord? saved=null;
+                try{if(File.Exists(Store.SyncFinalPath(id)))final=Store.Read<SyncFinalRecord>(Store.SyncFinalPath(id));}catch(Exception ex)when(ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){}
+                try{if(File.Exists(Store.SyncSessionPath(id)))saved=Store.Read<SyncSessionRecord>(Store.SyncSessionPath(id));}catch(Exception ex)when(ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){}
+                if(saved is not null&&final is not {State:SyncFinalRecord.Synced})syncSpec=syncSpec with{MutagenSessionName=saved.Name};
+                else if(final is {State:SyncFinalRecord.Synced})syncSpec=syncSpec with{MutagenSessionName=null};
+                using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                sync=WorkspaceSync.StartAsync(syncSpec,remote,timeout.Token).GetAwaiter().GetResult();
+                if(sync.SessionName is {} syncSessionName)TryWriteSyncEvidence(Store.SyncSessionPath(id),new SyncSessionRecord(1,syncSessionName,syncSpec.LocalPath,syncSpec.RemotePath,DateTimeOffset.UtcNow));
+                sync.WaitReadyAsync(timeout.Token).GetAwaiter().GetResult();
+                try{if(File.Exists(Store.SyncFinalPath(id)))File.Delete(Store.SyncFinalPath(id));}catch(Exception ex)when(ex is IOException or UnauthorizedAccessException){}
+            }
+            ssh=SshRunnerBackend.CreateAttachment(remote,id);
+            ssh.Start(keepStandardInput:true);
+            var syncNote=RemoteReattach.RestoresSync(remote.WorkspaceSync?.Mode)?"并重新建立双向同步":"未启用同步，不视为已同步";
+            WriteReceipt(id,"Started",ssh.Process.Id,ssh.CreationTime,null,$"已重新挂接本地 SSH（{remote.Host} 的 {remote.RemoteWorkingDirectory}，{syncNote}）。未新启动 Agent，未释放占用。");
+            started=true;
+        }
+        catch(Exception error)when(error is not OutOfMemoryException)
+        {
+            var pid=0;long time=0;
+            if(started&&ssh is not null){pid=ssh.Process.Id;time=ssh.CreationTime;}
+            WriteReceipt(id,"Disconnected",pid,time,null,"重新挂接失败："+error.Message+" 占用保留，未释放，也未把条目标为已结束。");
+            if(ssh is not null){ssh.SyncSession=null;ssh.Dispose();ssh=null;}
+            throw;
+        }
+        finally{if(owned)mutex.ReleaseMutex();}
+        try
+        {
+            while(!ssh!.WaitForExit(250)){}
+            var exit=ssh.ExitCode;
+            var detail=exit==255
+                ?$"重新挂接的本地 SSH 再次断开（{ssh.Spec.Host}，退出码 255）。远程进程可能仍在，占用保留。"
+                :$"重新挂接的本地 SSH 已结束（退出码 {exit}）。这不证明远程进程已退出，也不释放占用。若进程已不在，请使用「核对并确认释放」。";
+            WriteReceipt(id,"Disconnected",ssh.Process.Id,ssh.CreationTime,exit,detail);
+            Console.WriteLine("\n"+detail);
+            return exit==0?0:exit;
+        }
+        finally{if(ssh is not null){ssh.SyncSession=null;ssh.Dispose();}}
+        static void WriteReceipt(Guid attempt,string phase,int pid,long time,int? code,string detail)=>Store.Save(Store.ReceiptPath(attempt),new Receipt(phase,pid,time,code,detail,DateTimeOffset.UtcNow));
     }
 }
 internal sealed class Monitor : IDisposable
@@ -699,6 +758,18 @@ internal sealed class Monitor : IDisposable
                             }
                         }
                         catch(ArgumentException){/* 进程不存在 */}
+                    }
+                    // 重新挂接已授权、新窗格尚未写回执时，旧的 Disconnected 回执不能把状态打回去。
+                    // 新回执晚于 operator-reattach.json 且说明本地 SSH 又结束了，才回到 Disconnected；不终态化、不释放。
+                    if(e.State=="Reattaching")
+                    {
+                        var reattachRecord=TryReadReattach(e.Plan.Id);
+                        var attachmentEnded=reattachRecord!=null&&receipt!=null&&receipt.At>reattachRecord.At&&(receipt.Phase=="Disconnected"||(receipt.Phase=="Started"&&receipt.Pid>0&&!ProcessAlive(receipt.Pid,receipt.ProcessTime)));
+                        if(attachmentEnded)
+                        {
+                            e.State="Disconnected";e.Detail=receipt!.Phase=="Disconnected"?receipt.Detail:"重新挂接的本地 SSH 已结束，远程进程未证明退出；占用保留。";changed=true;continue;
+                        }
+                        continue;
                     }
                     // SSH 进程已退出或无法核验，进入 Disconnected 状态
                     if(receipt?.Phase is "Started")
@@ -1002,6 +1073,8 @@ internal sealed class Monitor : IDisposable
             return new(true,"允许本次恢复线程",[entry],sample,epoch);
         }
         if(request.Operation=="release-remote")return ReleaseRemote(entry,request.Release);
+        if(request.Operation=="reattach-remote")return ReattachRemote(entry,request.Reattach);
+        if(request.Operation=="reattach-begin")return ReattachBegin(entry);
         throw new IOException("未知协议操作。");
     }
     private Response Status()=>BuildStatus(null);
@@ -1103,7 +1176,7 @@ internal sealed class Monitor : IDisposable
     private Response ReleaseRemote(ControlEntry entry,OperatorRelease? release)
     {
         if(ledgerBroken)return new(false,ledgerBrokenDetail,[entry],sample,epoch);
-        if(entry.Plan.RemoteExecution is not {} remote||entry.State!="Disconnected")return new(false,"只有连接断开（Disconnected）的远程条目才能操作员确认释放；当前条目状态不变。",[entry],sample,epoch);
+        if(entry.Plan.RemoteExecution is not {} remote||entry.State is not ("Disconnected" or "Reattaching"))return new(false,"只有连接断开或正在重新挂接、且本地 SSH 已结束的远程条目才能操作员确认释放；当前条目状态不变。",[entry],sample,epoch);
         if(release is null)return new(false,"缺少操作员核对记录（判断与释放原因），未释放。",[entry],sample,epoch);
         if(release.Judgment!="Gone")return new(false,"判断为仍在或无法判断时拒绝释放：结束本地 SSH 不能证明远程进程已退出。账本不变，请继续在远程主机核对。",[entry],sample,epoch);
         var reason=release.Reason?.Trim()??"";
@@ -1125,6 +1198,68 @@ internal sealed class Monitor : IDisposable
             return new(true,"操作员确认释放完成：条目已终态，占用与预算已释放；核对记录见 operator-release.json。",[entry],sample,epoch);
         }
         finally{gate.ReleaseMutex();}
+    }
+    // R33 操作员确认重新挂接。不自动重连。成功只把同一条账本改为 Reattaching，不释放预算、不写 operator-release、不新增条目。
+    // 远程进程已不在、回执尚不能证明启动过、或操作员未确认时拒绝，账本保持原样。窗格由调用方另行启动。
+    private Response ReattachRemote(ControlEntry entry,OperatorReattach? reattach)
+    {
+        if(ledgerBroken)return new(false,ledgerBrokenDetail,[entry],sample,epoch);
+        if(entry.Plan.RemoteExecution is not {} remote||entry.State is not ("Disconnected" or "Reattaching"))return new(false,"只有连接断开或正在重新挂接的远程条目才能重新挂接；当前条目状态不变。不会自动重连。",[entry],sample,epoch);
+        if(reattach is not {Confirmed:true})return new(false,"操作员尚未确认重新挂接；不会自动重连，账本不变。",[entry],sample,epoch);
+        var receipt=ReadReceipt(entry.Plan.Id);
+        if(receipt is null||receipt.Phase is not ("Disconnected" or "Started"))return new(false,"远程工作尚未进入已启动，不能重新挂接；账本不变。若远程进程已不在，请使用「核对并确认释放」。",[entry],sample,epoch);
+        if(receipt.Phase=="Started"&&receipt.Pid>0&&ProcessAlive(receipt.Pid,receipt.ProcessTime))return new(false,"本地 SSH 仍在运行，不必重新挂接；账本不变。",[entry],sample,epoch);
+        using var gate=new Mutex(false,Store.AttemptLock(entry.Plan.Id));bool own;
+        try{own=gate.WaitOne(0);}catch(AbandonedMutexException){own=true;}
+        if(!own)return new(false,"创建者仍在运行，不能重新挂接；请稍后重试。账本不变。",[entry],sample,epoch);
+        string? claim;string? retired;
+        try
+        {
+            string probe;
+            try{probe=ProbeRemote(remote,entry.Plan.Id);}
+            catch(Exception ex)when(ex is not OutOfMemoryException){return new(false,"无法登录远程主机核对进程，重新挂接已拒绝；账本不变。"+ex.Message,[entry],sample,epoch);}
+            if(probe is "timeout" or "error")return new(false,"无法登录远程主机核对进程，重新挂接已拒绝；账本不变。",[entry],sample,epoch);
+            if(probe=="gone")return new(false,"远程进程已不在，重新挂接已拒绝；账本不变。请使用「核对并确认释放」。本操作不会自动释放。",[entry],sample,epoch);
+            if(probe!="alive")return new(false,"远程进程核对结果无法判断，重新挂接已拒绝；账本不变。不会自动重连，也不会自动释放。",[entry],sample,epoch);
+            string? session=null;
+            try{if(File.Exists(Store.SyncSessionPath(entry.Plan.Id)))session=Store.Read<SyncSessionRecord>(Store.SyncSessionPath(entry.Plan.Id))?.Name;}catch(Exception ex)when(ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){}
+            var syncMode=remote.WorkspaceSync?.Mode.ToString()??"None";
+            Store.Save(Store.OperatorReattachPath(entry.Plan.Id),new OperatorReattachRecord(1,entry.Plan.Id,remote.Host,remote.RemoteWorkingDirectory,syncMode,session,"ALIVE",true,DateTimeOffset.UtcNow,entry.Digest));
+            var previousState=entry.State;var previousDetail=entry.Detail;
+            entry.State="Reattaching";entry.Detail=$"操作员已确认重新挂接：{remote.Host} 的 {remote.RemoteWorkingDirectory}；远程进程仍在。等待本地 SSH 窗格挂上。此操作不释放占用。";
+            try{Save();}catch{entry.State=previousState;entry.Detail=previousDetail;throw;}
+        }
+        catch(Exception ex)when(ex is not OutOfMemoryException){return new(false,"重新挂接未能写入，账本保持原样："+ex.Message,[entry],sample,epoch);}
+        finally{gate.ReleaseMutex();}
+        try
+        {
+            claim=Path.Combine(Store.Root,"attempts",entry.Plan.Id.ToString("N"),"claim");retired=claim+".before-reattach";
+            if(File.Exists(claim)){if(File.Exists(retired))File.Delete(retired);File.Move(claim,retired);}
+        }
+        catch(Exception ex)when(ex is IOException or UnauthorizedAccessException)
+        {
+            return new(true,"已授权重新挂接，但旧窗格领取记录未能移开（"+ex.Message+"）。条目保持「正在重新挂接」，占用未释放。请再次确认挂接。",[entry],sample,epoch);
+        }
+        return new(true,"已授权重新挂接：远程进程仍在，占用未释放。请打开本地 SSH 窗格；此操作不会把条目标为已结束。",[entry],sample,epoch);
+    }
+    private Response ReattachBegin(ControlEntry entry)
+    {
+        if(entry.Plan.RemoteExecution is null||entry.State!="Reattaching")return new(false,"重新挂接授权已失效；条目状态不变。",[entry],sample,epoch);
+        return new(true,"允许本次重新挂接",[entry],sample,epoch);
+    }
+    private string ProbeRemote(RemoteExecutionSpec remote,Guid attemptId)
+    {
+        if(!string.IsNullOrEmpty(remote.SshKeyPath))
+            try{SshAgent.EnsureKeyInAgent(remote.SshKeyPath);}catch(Exception ex)when(ex is IOException or System.ComponentModel.Win32Exception){throw new IOException("SSH 密钥加载进 ssh-agent 失败："+ex.Message,ex);}
+        var shell=RemoteReattach.ProbeShell(attemptId);
+        var wrapped=string.Equals(remote.SshUser,remote.AgentUser,StringComparison.Ordinal)?shell:SshRemoteCommand.WrapSu(remote.AgentUser,shell);
+        var result=SshRemoteCommand.RunAsync(SshRemoteCommand.CreateStartInfo(remote.Host,remote.SshPort,remote.SshUser,remote.SshKeyPath,wrapped),TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
+        return RemoteReattach.ClassifyProbe(result.ExitCode,result.TimedOut,result.StdOut);
+    }
+    private OperatorReattachRecord? TryReadReattach(Guid id)
+    {
+        try{return File.Exists(Store.OperatorReattachPath(id))?Store.Read<OperatorReattachRecord>(Store.OperatorReattachPath(id)):null;}
+        catch(Exception ex)when(ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException){return null;}
     }
     // PID reuse is not survival: the recorded start time (FILETIME UTC) must match exactly. When the start time cannot be read, treat the process as alive and refuse release. Only used to refine the refusal reason; a dead parent never proves the tree exited.
     private static bool ProcessAlive(int pid,long processTimeUtc)
