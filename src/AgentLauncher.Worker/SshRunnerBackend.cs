@@ -24,7 +24,7 @@ public sealed class SshRunnerBackend : IDisposable
     // 创建 SSH 远程会话配置（不启动进程，只构造 ProcessStartInfo）
     // 与 Worker 的 resume gate 对齐：Create 只构造，Start 才真正启动
     // stdio 一律继承 worker/窗格控制台：重定向而无人读取会丢输出，远端写满管道缓冲还会挂死 agent。
-    public static SshRunnerBackend Create(RemoteExecutionSpec spec)
+    public static SshRunnerBackend Create(RemoteExecutionSpec spec, Guid? attemptId = null)
     {
         // 构建远程命令：su - agent -c 'cd <workdir> && <agent> <args>'
         var agentCmd = spec.AgentType switch
@@ -39,8 +39,21 @@ public sealed class SshRunnerBackend : IDisposable
 
         // V8 默认堆上限随物理内存增长（4 GiB 机器约 2 GiB），小 VPS 会被 agent 吃满触发 OOM。
         // 注入 Node 堆上限（非 Node 进程忽略 NODE_OPTIONS）；1024 MiB 适配 2–4 GiB 级 VPS。
-        var remoteCmd = $"export NODE_OPTIONS=--max-old-space-size=1024; cd {EscapeShellArg(spec.RemoteWorkingDirectory)} && {agentCmd}";
+        // trap '' HUP 让远程前台在本地 SSH 断开后仍可留存（SIG_IGN 会随 exec 继承）。断开仍不能当作进程已退出的证明。
+        var attemptPrefix = attemptId is Guid attempt ? $"export {RemoteReattach.AttemptToken(attempt)}; " : "";
+        var remoteCmd = $"{attemptPrefix}trap '' HUP; export NODE_OPTIONS=--max-old-space-size=1024; cd {EscapeShellArg(spec.RemoteWorkingDirectory)} && {agentCmd}";
+        return new SshRunnerBackend { Spec = spec, StartInfo = CreateStartInfo(spec, remoteCmd) };
+    }
 
+    // 重新挂接：同一主机、同一远程目录的新本地 SSH。远程命令只检查本次尝试是否仍在，然后进入该目录，不重新启动 Agent。
+    public static SshRunnerBackend CreateAttachment(RemoteExecutionSpec spec, Guid attemptId)
+    {
+        var remoteCmd = RemoteReattach.AttachShell(attemptId, spec.RemoteWorkingDirectory);
+        return new SshRunnerBackend { Spec = spec, StartInfo = CreateStartInfo(spec, remoteCmd) };
+    }
+
+    private static ProcessStartInfo CreateStartInfo(RemoteExecutionSpec spec, string remoteCmd)
+    {
         // 用 ArgumentList 而不是字符串拼接，避免引号嵌套问题
         var psi = new ProcessStartInfo
         {
@@ -70,17 +83,12 @@ public sealed class SshRunnerBackend : IDisposable
         psi.ArgumentList.Add($"{spec.SshUser}@{spec.Host}");
         // 远程命令：su - agent -c "<remote-command>"（双引号，因为内部已有单引号 quoting；共享 SshRemoteCommand 的包装逻辑）
         psi.ArgumentList.Add(SshRemoteCommand.WrapSu(spec.AgentUser, remoteCmd));
-
-        return new SshRunnerBackend
-        {
-            Spec = spec,
-            StartInfo = psi
-        };
+        return psi;
     }
 
     // 启动远程 agent（resume 成功后调用）
     // 与 ProtectedProcess.Resume 对齐：Create 只构造，Start 才真正启动
-    public void Start()
+    public void Start(bool keepStandardInput = false)
     {
         if (_started) throw new InvalidOperationException("Already started");
         // 免密保障：配置了自定义密钥时先加载进 ssh-agent（与工作区同步共用 SshAgent 助手），
@@ -93,9 +101,13 @@ public sealed class SshRunnerBackend : IDisposable
             { Console.Error.WriteLine($"警告：SSH 密钥加载进 ssh-agent 失败（{ex.Message}）；将仅用 -i 直接尝试免密连接。"); }
         }
         _process = Process.Start(StartInfo) ?? throw new InvalidOperationException("Failed to start SSH");
-        // 远程 agent 不需要本地 stdin；立即关闭管道给 ssh 一个确定的 EOF，
-        // 避免它等待一个永远不会来的输入（与手工 `ssh ... <&-` 的已验证行为一致）。
-        try { _process.StandardInput.Close(); } catch { }
+        if (!keepStandardInput)
+        {
+            // 远程 agent 不需要本地 stdin；立即关闭管道给 ssh 一个确定的 EOF，
+            // 避免它等待一个永远不会来的输入（与手工 `ssh ... <&-` 的已验证行为一致）。
+            try { _process.StandardInput.Close(); } catch { }
+        }
+        else PumpConsoleInput(_process);
         _started = true;
         // 从 Process.StartTime 计算 CreationTime（与 ProtectedProcess.CreationTime 相同的 long 格式）
         _creationTime = _process.StartTime.ToFileTimeUtc();
@@ -204,6 +216,25 @@ public sealed class SshRunnerBackend : IDisposable
                 Console.Error.WriteLine($"工作区同步清理异常：{ex.Message}");
             }
         }
+    }
+
+    // 重新挂接的 shell 需要键盘。stdout 仍继承窗格；stdin 保持管道，由本进程把控制台字节写进去，避免 -tt 直接抢占控制台。
+    private static void PumpConsoleInput(Process process)
+    {
+        var writer = process.StandardInput;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                using var reader = Console.OpenStandardInput();
+                var buffer = new byte[256];
+                int read;
+                while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
+                    writer.BaseStream.Write(buffer, 0, read);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { }
+            try { writer.Close(); } catch { }
+        });
     }
 
     // 单层 shell quoting：只转义单引号，不嵌套双引号（共享助手，维护命令用同一实现）

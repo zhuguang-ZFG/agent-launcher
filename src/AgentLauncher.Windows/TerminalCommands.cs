@@ -45,6 +45,19 @@ public static partial class Commands
         return checked(length+slashes);
     }
 
+    // 重新挂接只打开一个窗格，命令是已有尝试的 pane reattach，不新预约、不新分屏。
+    public static void SubmitReattachPane(string terminal,LaunchItem item)
+    {
+        if(item.RemoteExecution is null)throw new IOException("只有远程条目可以重新挂接。");
+        var arguments=new List<string>{"-w","agent-"+item.BatchId.ToString("N"),"new-tab"};
+        TerminalAppearance.AddPaneArguments(arguments,item,TerminalAppearance.UseSystemColors);
+        arguments.Add(Store.WorkerPath.Replace(";","\\;"));
+        arguments.Add("pane");
+        arguments.Add(item.Id.ToString("D"));
+        arguments.Add("reattach");
+        using var process=Process.Start(CreateTerminalStartInfo(terminal,arguments))??throw new IOException("无法提交重新挂接窗格给 Windows Terminal。");
+    }
+
     public static void SubmitTerminal(string terminal,IReadOnlyList<LaunchItem> items,string layout,CancellationToken cancellationToken=default,string? profile=null)
     {
         var arguments=ComposeTerminalArguments(items,layout,TerminalAppearance.UseSystemColors,profile);

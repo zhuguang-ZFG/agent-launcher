@@ -611,13 +611,17 @@ public partial class MainWindow : Window
             }
             AddChangeActions(row,e);
             if(e.State=="Pending"){var revoke=new Button{Content="撤销未启动项",HorizontalAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(revoke,$"撤销未启动项 {e.Plan.Name}");revoke.Click+=async(_,_)=>await GuardAsync(async()=>{var result=await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:e.Plan.Id));ProgressText.Text=result.Message;await RefreshAsync();});row.Children.Add(revoke);}
-            if(e.State=="Disconnected")
+            if(e.State is "Disconnected" or "Reattaching")
             {
-                // SSH 连接断开：远程进程可能仍存活，显示警告标签，防止盲目重启
-                var warning=new TextBlock{Text="⚠ SSH 连接已断开，远程进程可能仍在运行。请手动核对远程主机状态后再决定操作。",Foreground=(Brush)FindResource("WarningInk"),TextWrapping=TextWrapping.Wrap,Margin=new(0,4,0,0)};
+                // 断开与重新挂接都保持非终态。释放和重新挂接是两个入口：释放不挂接，挂接不释放。不会自动重连。
+                var warning=new TextBlock{Text=e.State=="Reattaching"?"正在重新挂接，占用仍保留。若窗格没有出现，可再次确认挂接；若远程进程已不在，请核对并确认释放。不会自动重连。":"⚠ SSH 连接已断开，远程进程可能仍在运行。可核对后重新挂接，或在确认进程已不在后释放。不会自动重连。",Foreground=(Brush)FindResource("WarningInk"),TextWrapping=TextWrapping.Wrap,Margin=new(0,4,0,0)};
                 row.Children.Add(warning);
-                // R28：说明对话框改为「判断 + 释放原因 + 二次确认」入口；只有确认远程进程已不在才释放账本。
-                var release=new Button{Content="核对并确认释放",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,4,0,0),ToolTip="先登录远程主机核对 agent 进程；只有判断「已不在」并填写原因、经二次确认后才释放占用"};
+                var reattach=new Button{Content="核对并确认重新挂接",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,4,0,0),ToolTip="确认后才挂接。远程进程仍在则恢复本地 SSH；原来启用了同步的会重新建立。不会释放占用，也不会自动重连。"};
+                AutomationProperties.SetName(reattach,$"核对并确认重新挂接 {e.Plan.Name}");
+                reattach.Click+=async(_,_)=>await GuardAsync(()=>ConfirmRemoteReattachAsync(e));
+                row.Children.Add(reattach);
+                // R28：只有确认远程进程已不在才释放账本。这个按钮不发起重新挂接。
+                var release=new Button{Content="核对并确认释放",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,4,0,0),ToolTip="先登录远程主机核对 agent 进程；只有判断「已不在」并填写原因、经二次确认后才释放占用。不会重新挂接。"};
                 AutomationProperties.SetName(release,$"核对并确认释放 {e.Plan.Name}");
                 release.Click+=async(_,_)=>await GuardAsync(()=>ConfirmRemoteReleaseAsync(e));
                 row.Children.Add(release);

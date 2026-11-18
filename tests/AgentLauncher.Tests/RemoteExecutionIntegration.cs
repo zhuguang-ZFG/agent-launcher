@@ -2,7 +2,7 @@ using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
 // 远程执行集成测试：用真实 reserve/begin + fake SSH 长驻进程验证 Monitor reconciliation
-internal static class RemoteExecutionIntegration
+internal static partial class RemoteExecutionIntegration
 {
     public static async Task<int> RunAsync()
     {
@@ -394,6 +394,8 @@ internal static class RemoteExecutionIntegration
                 Assert(workerProcess.WaitForExit(5000), "Worker process did not exit after SSH 255");
             });
             
+            await ReattachAsync(Assert, Test, workerProcesses, fakeSshDir, originalPath!);
+
             await Test("R26 remote domain bypasses local pressure admission but not local-domain refusal", async () =>
             {
                 // 分域回归：保守模式 + 压力锁定时，纯远程 reserve/begin 不受本地资源决策阻挡；

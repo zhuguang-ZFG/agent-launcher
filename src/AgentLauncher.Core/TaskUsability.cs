@@ -10,7 +10,7 @@ public static class TaskUsability
         "Running" => "运行中", "Review" => "等待验收", "Completed" => "已完成", "Failed" => "失败", "Cancelled" => "已取消",
         "Pending" => "等待终端领取", "Creating" => "正在创建进程", "Started" => "已启动", "Exited" => "主进程已退出，等待核对", "NeedsReconciliation" => "需要核对占用",
         "Settled" => "全部进程已退出", "Revoked" => "未启动，预约已撤销", "FailedBeforeStart" => "启动前失败",
-        "Disconnected" => "连接断开（远程进程可能仍运行）", _ => state
+        "Disconnected" => "连接断开（远程进程可能仍运行）", "Reattaching" => "正在重新挂接（占用保留）", _ => state
     };
 
     public static QueueEntry[] OrderedQueue(TaskBook book) => book.Queue.OrderByDescending(entry => entry.Priority).ThenBy(entry => entry.Sequence).ToArray();

@@ -366,8 +366,25 @@ public partial class MainWindow
                 ProgressText.Text="";await SubmitRemoteReleaseAsync(releaseEntry,"Gone","已核对，进程已退出");
                 Check("Gone judgment requires second confirm and No keeps the entry",releaseConfirms==1&&ProgressText.Text.Contains("已取消二次确认")&&releaseEntry.State=="Disconnected");
                 Check("second confirm names host and never ends remote processes",releasePrompt.Contains("release.example.com")&&releasePrompt.Contains("不会结束远程主机"));
+                Check("release confirm does not start reattach",releasePrompt.Contains("也不会重新挂接"));
             }
             finally{TestConfirm=priorConfirm;ProgressText.Text="";}
+            var reattachButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认重新挂接 remote-release-probe");
+            Check("disconnected remote session offers reattach beside release",reattachButton!=null&&releaseButton!=null&&(reattachButton.Content as string)!=(releaseButton.Content as string));
+            var reattachDialog=CreateRemoteReattachDialog(releaseEntry);
+            reattachDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>FindLogical<Button>(reattachDialog).Single(b=>b.Content as string=="取消").RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
+            var reattachApplied=reattachDialog.ShowDialog();
+            var reattachNote=FindLogical<TextBlock>(reattachDialog).FirstOrDefault(t=>t.Text.Contains("release.example.com"));
+            Check("reattach dialog names host, directory, and refuses to pretend sync",reattachApplied!=true&&reattachNote!=null&&reattachNote.Text.Contains("/home/agent/work")&&reattachNote.Text.Contains("不会把它说成已同步")&&reattachNote.Text.Contains("不会自动重连"));
+            var reattachConfirms=0;var reattachPrompt="";
+            try
+            {
+                TestConfirm=(text,_,_)=>{reattachConfirms++;reattachPrompt=text;return MessageBoxResult.No;};
+                ProgressText.Text="";ErrorText.Text="";await SubmitRemoteReattachAsync(releaseEntry);
+                Check("reattach requires second confirm and No does not change the entry",reattachConfirms==1&&ProgressText.Text.Contains("已取消二次确认")&&releaseEntry.State=="Disconnected"&&ErrorText.Text.Length==0);
+                Check("reattach confirm is distinct from release",reattachPrompt.Contains("release.example.com")&&reattachPrompt.Contains("不释放占用")&&reattachPrompt.Contains("不会自动重连")&&!reattachPrompt.Contains("operator-release.json"));
+            }
+            finally{TestConfirm=priorConfirm;ProgressText.Text="";ErrorText.Text="";}
             // P2 session-card wiring: settled agent entries expose read-only change summary; review routing follows the linked run's terminal transition without any monitor-entry change.
             var settledAttempt=Guid.NewGuid();var settledTask=Guid.NewGuid();
             status=new(true,"settled probe",[new(){Plan=new LaunchItem(settledAttempt,Guid.NewGuid(),1,"settled-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Settled"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));

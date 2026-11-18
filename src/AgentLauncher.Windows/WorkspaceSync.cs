@@ -14,6 +14,11 @@ public static class WorkspaceSync
         RemoteExecutionSpec remote,
         CancellationToken cancellation = default)
     {
+#if INTEGRATION_TESTS
+        // 重新挂接回归不安装 Mutagen/SSHFS。只记录「会启动同步」，不把 None 当成已同步。
+        if (Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SYNC") == "1" && spec.Mode != WorkspaceSyncMode.None)
+            return new FakeSyncSession(spec);
+#endif
         return spec.Mode switch
         {
             WorkspaceSyncMode.Mutagen => await MutagenSyncSession.StartAsync(spec, remote, cancellation),
@@ -336,6 +341,24 @@ internal sealed class SshfsMountSession : IWorkspaceSyncSession
         throw new IOException("没有可用的驱动器号（Z: 到 D: 都已占用）");
     }
 }
+
+#if INTEGRATION_TESTS
+internal sealed class FakeSyncSession : IWorkspaceSyncSession
+{
+    private readonly string? _name;
+    private readonly string _remotePath;
+    public FakeSyncSession(WorkspaceSyncSpec spec)
+    {
+        _name = spec.Mode == WorkspaceSyncMode.Mutagen ? spec.MutagenSessionName ?? $"{WorkspaceSync.SessionNamePrefix}fake{Guid.NewGuid():N}" : null;
+        _remotePath = spec.RemotePath;
+    }
+    public string? SessionName => _name;
+    public Task WaitReadyAsync(CancellationToken cancellation) => Task.CompletedTask;
+    public string GetRemoteWorkingDirectory() => _remotePath;
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public Task<string?> TryDisposeAsync() => Task.FromResult<string?>(null);
+}
+#endif
 
 // 无操作同步会话（不同步）
 internal sealed class NoOpSyncSession : IWorkspaceSyncSession

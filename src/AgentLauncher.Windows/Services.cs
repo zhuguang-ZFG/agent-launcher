@@ -25,6 +25,7 @@ public static class Store
     public static string PoolName(Guid id)=>@"Local\AgentLauncher-"+Scope+"-pool-"+id.ToString("N");
     public static string ReceiptPath(Guid id)=>Path.Combine(Root,"attempts",id.ToString("N"),"receipt.json");
     public static string OperatorReleasePath(Guid id)=>Path.Combine(Root,"attempts",id.ToString("N"),"operator-release.json");
+    public static string OperatorReattachPath(Guid id)=>Path.Combine(Root,"attempts",id.ToString("N"),"operator-reattach.json");
     public static string SyncSessionPath(Guid id)=>Path.Combine(Root,"attempts",id.ToString("N"),"sync-session.json");
     public static string SyncFinalPath(Guid id)=>Path.Combine(Root,"attempts",id.ToString("N"),"sync-final.json");
     public static string WorkerPath=>Path.Combine(AppContext.BaseDirectory,"AgentLauncher.Worker.exe");
