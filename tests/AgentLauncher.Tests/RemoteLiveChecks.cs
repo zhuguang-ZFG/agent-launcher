@@ -155,10 +155,20 @@ internal static class RemoteLiveChecks
     }
 
     // R45 活测夹具（确定性提示词，R29 先例参数形状 ["-p","-a","--no-session",prompt]）。
-    // 心跳：pi 的 bash 工具前台等待 360 秒 → pi 存活 → 本地 ssh 保持 → 条目 Started；heartbeat.txt 每 5 秒增长是远端活性证明。
-    private const string HeartbeatPrompt = "Use your bash tool to run exactly this command with a tool timeout of 420 seconds, and do nothing else before or after: bash -c 'end=$((SECONDS+360)); while [ $SECONDS -lt $end ]; do date +%s >> heartbeat.txt; sleep 5; done'";
+    // 2026-11-19 实机试跑证伪嵌套引号与 $（pi 工具层会丢单引号、展开 $((…))）：一律两步法——write 工具写无 $ 脚本文件，bash 工具前台执行。
+    // 心跳：72×5 秒=360 秒前台等待 → pi 存活 → 本地 ssh 保持 → 条目 Started；heartbeat.txt 每 5 秒增长是远端活性证明。
+    private const string HeartbeatPrompt = @"First use your write tool to create a file named loop.sh in the current directory with exactly this content (two lines):
+for i in {1..72}; do date +%s >> heartbeat.txt; sleep 5; done
+echo DONE >> heartbeat.txt
+Then use your bash tool to run exactly this command with a tool timeout of 420 seconds: bash loop.sh
+Do nothing else before or after.";
     // 超限：700 MiB > 512 MiB scope → 内核在 scope 内 OOM 杀 python3；判据以 memory.events 的 oom_kill 计数为准，不依赖 dmesg 权限。
-    private const string OomPrompt = "Use your bash tool to run exactly this command with a tool timeout of 120 seconds, and do nothing else: python3 -c 'b=bytearray(700*1024*1024); print(\"ALLOC_DONE\"); import time; time.sleep(20)'";
+    private const string OomPrompt = @"First use your write tool to create a file named alloc.py in the current directory with exactly this content (three lines):
+b=bytearray(700*1024*1024)
+print('ALLOC_DONE',flush=True)
+import time; time.sleep(20)
+Then use your bash tool to run exactly this command with a tool timeout of 120 seconds: python3 alloc.py
+Do nothing else before or after.";
 
     // 纯参数护栏：原生 harness 直接测试，不建隔离根、不触网。边界复用产品编辑器同一条校验（RemoteHost.ValidateMemoryLimitMib）。
     public static void GuardLive(string scenario, string memoryLimitMibText)
@@ -457,7 +467,7 @@ internal static class RemoteLiveChecks
                     if (oomKill >= 1) break;
                     await Task.Delay(500);
                 }
-                var (_, pgrep, _) = await SshAsync(address, 22, sshUser, key, "pgrep -f 'bytearr[a]y' || true", 20);
+                var (_, pgrep, _) = await SshAsync(address, 22, sshUser, key, "pgrep -f 'alloc[.]py' || true", 20);
                 pgrepOutput = pgrep;
             }
         }
