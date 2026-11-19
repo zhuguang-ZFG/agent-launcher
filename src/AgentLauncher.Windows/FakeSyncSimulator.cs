@@ -31,7 +31,6 @@ internal static class FakeSyncSimulator
     private static readonly object Gate = new();
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
     private static readonly Dictionary<string, LinkState> States = [];
-    private static Thread? pump;
 
     private sealed class LinkState
     {
@@ -69,19 +68,6 @@ internal static class FakeSyncSimulator
                 ?? new FakeSyncLink { SessionName = sessionName, AlphaPath = alphaPath, BetaPath = betaPath };
             States[sessionName] = new LinkState { Link = link };
             Log("create", sessionName);
-            if (pump is null || !pump.IsAlive)
-            {
-                pump = new Thread(() =>
-                {
-                    while (true)
-                    {
-                        lock (Gate) { if (States.Count == 0) { pump = null; return; } }
-                        Tick();
-                        Thread.Sleep(200);
-                    }
-                }) { IsBackground = true, Name = "FakeSyncSimulator" };
-                pump.Start();
-            }
         }
         return sessionName;
     }
@@ -245,10 +231,14 @@ internal static class FakeSyncSimulator
         {
             Log("flush", sessionName);
             if (!States.TryGetValue(sessionName, out var state)) return null;
-            if (Scenario().FlushFails)
+            var scenario = Scenario();
+            state.Link = scenario.Links.FirstOrDefault(l => l.SessionName == sessionName) ?? state.Link;
+            if (scenario.FlushFails)
                 return $"工作区同步收敛失败（fake flush 失败开关）：会话 {sessionName} 已保留，请手动检查。";
+            if (!state.Link.Online || state.Link.Paused || state.Link.Halted is not null)
+                return $"工作区同步链路离线或暂停：会话 {sessionName} 已保留，请手动检查。";
             Reconcile(state, 0);
-            Reconcile(state, 0); // 枢纽链两段：再跑一轮让对侧链路拿到刚收敛的内容。
+            Reconcile(state, 0);
             Log("terminate", sessionName);
             States.Remove(sessionName);
             return null;
@@ -266,6 +256,7 @@ internal static class FakeSyncSimulator
                 if (!States.TryGetValue(sessionName, out var state)) throw new IOException($"fake 同步会话不存在：{sessionName}");
                 var link = Scenario().Links.FirstOrDefault(l => l.SessionName == sessionName) ?? state.Link;
                 if (!link.Online) throw new TimeoutException($"fake 同步链路离线，无法就绪：{sessionName}");
+                if (link.Paused || link.Halted is not null) throw new IOException($"fake 同步链路暂停，无法就绪；会话已保留：{sessionName}");
             }
             Tick();
             if (!HasPending(sessionName)) return;

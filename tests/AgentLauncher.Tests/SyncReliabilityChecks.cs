@@ -1,15 +1,18 @@
+using System.Diagnostics;
+using System.Text;
 using AgentLauncher.Core;
+using AgentLauncher.Windows;
 
 namespace AgentLauncher.Tests;
 
-// 同步可靠性 R34–R43 纯函数回归（规格 2026-11-18 §4/§5/§6/§8）。
-// 全部用 canned mutagen sync list --long 文本（形状取自 mutagen 0.18.1 实测），不依赖真实 mutagen/VPS。
+// 同步可靠性 R34–R43 纯函数与探针边界回归（规格 2026-11-18 §4/§5/§6/§8）。
+// 全部用 canned mutagen sync list --long 文本与本地进程夹具，不依赖真实 mutagen/VPS。
 internal static class SyncReliabilityChecks
 {
     // 与真实输出同形：短横线分隔、段内缩进、Last error 在 Status 之前、Transition problems 在 Beta 段内。
     internal static string Session(
         string name, string mode, string status,
-        string betaConnected = "Yes", string conflicts = "", string lastError = "", string betaExtra = "") =>
+        string? betaConnected = "Yes", string conflicts = "", string lastError = "", string betaExtra = "", string? alphaConnected = "Yes") =>
         "-------------------------------------------------------------------------------\n" +
         $"Name: {name}\n" +
         $"Identifier: sync_fake{name}\n" +
@@ -17,10 +20,10 @@ internal static class SyncReliabilityChecks
         $"\tSynchronization mode: {mode}\n" +
         "Alpha:\n" +
         "\tURL: D:\\fixture\\hub\n" +
-        "\tConnected: Yes\n" +
+        (alphaConnected is null ? "" : $"\tConnected: {alphaConnected}\n") +
         "Beta:\n" +
         "\tURL: ssh://agent@jy.example.com:22/home/agent/work\n" +
-        $"\tConnected: {betaConnected}\n" +
+        (betaConnected is null ? "" : $"\tConnected: {betaConnected}\n") +
         betaExtra +
         conflicts +
         (lastError.Length > 0 ? $"Last error: {lastError}\n" : "") +
@@ -36,6 +39,89 @@ internal static class SyncReliabilityChecks
             text += $"\t(beta)  {p} (<non-existent> -> File (112df4c014e10ee40f1ffef20e4e0bf31cf53ded))\n";
         }
         return text;
+    }
+
+    // 测试 exe 复制为 mutagen.exe 后仅输出夹具；不会查找或启动真实 Mutagen。
+    internal static async Task<int> WriteListFixtureAsync(string? name)
+    {
+        if (!AppContext.BaseDirectory.Contains("AgentLauncher-tests-probe-boundary-", StringComparison.Ordinal))
+            throw new IOException("Probe fixture requires an isolated test directory.");
+        var session = Session("agent-launcher-probe", "Two Way Safe", "Watching for changes");
+        if (name == "oversized")
+        {
+            var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+            foreach (var arg in new[] { "sync", "list", "--long", "overflow-child:" + Environment.ProcessId }) start.ArgumentList.Add(arg);
+            using var child = Process.Start(start)!;
+            File.WriteAllText(Path.Combine(AppContext.BaseDirectory, $"child-{child.Id}.pid"), child.Id.ToString());
+            if (await child.StandardError.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)) != "ready") return 3;
+            return 0;
+        }
+        if (name?.StartsWith("overflow-child:", StringComparison.Ordinal) == true)
+        {
+            using var parent = Process.GetProcessById(int.Parse(name[15..]));
+            Console.Error.WriteLine("ready");
+            await parent.WaitForExitAsync();
+            // 父进程先成功退出，再由继承 stdout 的子进程越界：稳定覆盖 Code=0 + Truncated。
+            try { Console.Write(session + new string(' ', 512 * 1024)); }
+            catch (IOException) { } // 捕获方关闭越界管道。
+            return 0;
+        }
+        var output = name switch
+        {
+            null or "no-sessions" => "No sessions found\n",
+            "no-sessions-separated" => "-------------------------------------------------------------------------------\r\nNo sessions found\r\n-------------------------------------------------------------------------------\r\n",
+            "complete" or "exit-error" => session,
+            "multiple" => session + Session("agent-launcher-second", "Two Way Safe", "[Paused]", alphaConnected: null, betaConnected: null),
+            "no-separators" => session.Replace("-------------------------------------------------------------------------------\n", ""),
+            "offline" => Session("agent-launcher-probe", "Two Way Safe", "Connecting to beta", betaConnected: "No"),
+            "empty" => "",
+            "whitespace" => " \t\r\n",
+            "garbage" => "unrecognizable successful output\n",
+            "name-only" => "Name: agent-launcher-probe\n",
+            "missing-alpha" => session.Replace("\tURL: D:\\fixture\\hub\n", ""),
+            "missing-beta" => session.Replace("\tURL: ssh://agent@jy.example.com:22/home/agent/work\n", ""),
+            "missing-status" => session.Replace("Status: Watching for changes\n", ""),
+            "mixed" => session + "unrecognizable trailing block\n",
+            "false-no-sessions" => "warning: No sessions found (incomplete)\n",
+            _ => throw new IOException("Unknown probe fixture: " + name),
+        };
+        Console.Write(output);
+        if (name != "exit-error") return 0;
+        Console.Error.WriteLine("fixture list failed");
+        return 7;
+    }
+
+    private static void WithListFixture(Action action)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "AgentLauncher-tests-probe-boundary-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var cwd = Environment.CurrentDirectory;
+        var path = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            // apphost 仍加载原 Tests.dll；复制同目录依赖，无需生产注入点。
+            File.Copy(Path.Combine(AppContext.BaseDirectory, "AgentLauncher.Tests.exe"), Path.Combine(root, "mutagen.exe"));
+            foreach (var file in Directory.EnumerateFiles(AppContext.BaseDirectory).Where(f => f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".deps.json", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".runtimeconfig.json", StringComparison.OrdinalIgnoreCase)))
+                File.Copy(file, Path.Combine(root, Path.GetFileName(file)));
+            Environment.CurrentDirectory = root;
+            Environment.SetEnvironmentVariable("PATH", root);
+            action();
+        }
+        finally
+        {
+            Environment.CurrentDirectory = cwd;
+            Environment.SetEnvironmentVariable("PATH", path);
+            foreach (var file in Directory.EnumerateFiles(root, "child-*.pid"))
+            {
+                try
+                {
+                    using var child = Process.GetProcessById(int.Parse(File.ReadAllText(file)));
+                    if (!child.WaitForExit(5000)) { child.Kill(true); child.WaitForExit(); }
+                }
+                catch (ArgumentException) { } // 已退出。
+            }
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     public static void Run(Action<string, Action> test, Action<bool, string> assert)
@@ -79,6 +165,76 @@ internal static class SyncReliabilityChecks
             assert(SyncReliability.OverallLabel(new[] { SyncLinkState.Converged, expired.State }) == "未知", "过期链路没有把整体拉成未知");
         });
 
+        foreach (var endpoint in new[] { "Alpha", "Beta" })
+            foreach (var connected in new string?[] { null, "", "Maybe", "yes", "No (retrying)" })
+                test($"R39 {endpoint} Connected {connected ?? "missing"} stays unknown", () =>
+                {
+                    foreach (var status in new[] { "Watching for changes", "Connecting to beta", "Scanning files" })
+                    {
+                        var parsed = SyncReliability.ParseSession(Session("agent-launcher-review", "Two Way Safe", status,
+                            alphaConnected: endpoint == "Alpha" ? connected : "Yes",
+                            betaConnected: endpoint == "Beta" ? connected : "Yes", lastError: "connection refused"))!;
+                        var observation = SyncReliability.EvaluateLink(parsed, fresh, now);
+                        assert(observation.State == SyncLinkState.Unknown, "缺失/无效 Connected 不是未知：" + observation.Detail);
+                        assert(!parsed.ConnectionFailure, "没有明确 beta No 却确认了离线");
+                    }
+                });
+
+        test("R39 both missing Connected fields stay unknown", () =>
+        {
+            var parsed = SyncReliability.ParseSession(Session("agent-launcher-review", "Two Way Safe", "Watching for changes",
+                alphaConnected: null, betaConnected: null))!;
+            assert(SyncReliability.EvaluateLink(parsed, fresh, now).State == SyncLinkState.Unknown, "两端连接证据缺失却已收敛");
+        });
+
+        test("R34 explicit alpha No prevents convergence and syncing", () =>
+        {
+            foreach (var status in new[] { "Watching for changes", "Connecting to alpha", "Scanning files" })
+            {
+                var parsed = SyncReliability.ParseSession(Session("agent-launcher-review", "Two Way Safe", status,
+                    alphaConnected: "No", lastError: "unable to connect to alpha"))!;
+                var observation = SyncReliability.EvaluateLink(parsed, fresh, now);
+                assert(observation.State == SyncLinkState.NotConverged && observation.Detail.Contains("alpha"), "alpha No 未被识别为未收敛：" + observation.Detail);
+            }
+        });
+
+        test("R34 incomplete connection evidence preserves pause conflict and offline priority", () =>
+        {
+            foreach (var (status, conflicts, betaConnected, expected) in new[]
+            {
+                ("[Paused]", "", "Maybe", SyncLinkState.SafetyPaused),
+                ("Halted due to root deletion", ConflictLines("a.txt"), "No", SyncLinkState.SafetyPaused),
+                ("Connecting to beta", ConflictLines("a.txt"), "No", SyncLinkState.Conflict),
+                ("Connecting to beta", "Conflicts: unreadable\n", "No", SyncLinkState.Unknown),
+                ("Connecting to beta", "", "No", SyncLinkState.Offline),
+            })
+            {
+                var parsed = SyncReliability.ParseSession(Session("agent-launcher-review", "Two Way Safe", status,
+                    alphaConnected: null, betaConnected: betaConnected, conflicts: conflicts,
+                    betaExtra: "\tScan problems:\n\t\twork: permission denied\n"))!;
+                assert(SyncReliability.EvaluateLink(parsed, fresh, now).State == expected, "连接证据或扫描问题覆盖了更高优先级状态：" + expected);
+            }
+        });
+
+        foreach (var endpoint in new[] { "Alpha", "Beta" })
+            test($"R34 {endpoint} scan problems prevent Watching convergence", () =>
+            {
+                foreach (var status in new[] { "Watching for changes", "Reconciling changes" })
+                {
+                    const string problems = "\tScan problems:\n\t\twork: permission denied\n";
+                    var output = Session("agent-launcher-review", "Two Way Safe", status, betaExtra: endpoint == "Beta" ? problems : "");
+                    if (endpoint == "Alpha") output = output.Replace("Beta:\n", problems + "Beta:\n");
+                    var observation = SyncReliability.EvaluateLink(SyncReliability.ParseSession(output)!, fresh, now);
+                    assert(observation.State == SyncLinkState.NotConverged && observation.Detail.Contains("Scan problems"), "扫描问题未阻止收敛：" + observation.Detail);
+                }
+            });
+
+        test("R34 retained synchronization errors prevent Watching convergence", () =>
+        {
+            var parsed=SyncReliability.ParseSession(Session("agent-launcher-review","Two Way Safe","Watching for changes",lastError:"unable to save archive"))!;
+            assert(SyncReliability.EvaluateLink(parsed,fresh,now).State==SyncLinkState.NotConverged,"Last error 被忽略并声称已收敛");
+        });
+
         test("R34/R39 overall priority follows spec section 4 order", () =>
         {
             string Overall(params SyncLinkState[] s) => SyncReliability.OverallLabel(s);
@@ -90,6 +246,53 @@ internal static class SyncReliabilityChecks
             assert(Overall(SyncLinkState.Syncing, SyncLinkState.Converged) == "同步中", "优先级 6 错误");
             assert(Overall(SyncLinkState.Converged, SyncLinkState.Converged) == "全部已收敛", "优先级 7 错误");
         });
+
+        test("R39 list probe rejects a truncated successful capture with a converged prefix", () => WithListFixture(() =>
+        {
+            var raw = ReviewProcess.CaptureAsync("mutagen", Environment.CurrentDirectory, ["sync", "list", "--long", "oversized"], default, 10, 512 * 1024).GetAwaiter().GetResult();
+            assert(raw.Code == 0 && raw.Truncated && !raw.TimedOut, $"夹具未覆盖成功截断：Code={raw.Code}, Truncated={raw.Truncated}, TimedOut={raw.TimedOut}");
+            var prefix = WorkspaceInsights.FindSyncSession(Encoding.UTF8.GetString(raw.Output), @"D:\fixture\hub", "jy.example.com", "/home/agent/work", "agent", 22);
+            assert(prefix is not null && SyncReliability.EvaluateLink(prefix.Value.Session, fresh, now).State == SyncLinkState.Converged, "夹具前缀没有复现可能的错误收敛");
+            var result = WorkspaceInsights.ListMutagenSessionsAsync(default, "oversized").GetAwaiter().GetResult();
+            assert(!result.Ok, "截断但成功退出的 list 被当成成功观测");
+            assert(result.Output.Length == 0 && result.Error.Contains("截断"), "截断探针泄漏前缀或缺少可读原因");
+        }));
+
+        foreach (var fixture in new[] { "empty", "whitespace", "garbage", "name-only", "missing-alpha", "missing-beta", "missing-status", "mixed", "false-no-sessions" })
+            test("R39 list probe rejects successful " + fixture, () => WithListFixture(() =>
+            {
+                var result = WorkspaceInsights.ListMutagenSessionsAsync(default, fixture).GetAwaiter().GetResult();
+                assert(!result.Ok, "空/无法识别的 list 被当成成功观测：" + fixture);
+                assert(result.Output.Length == 0 && result.Error.Length > 0, "不可信输出泄漏或未给出错误原因");
+            }));
+
+        foreach (var fixture in new string?[] { null, "no-sessions", "no-sessions-separated", "complete", "multiple", "no-separators", "offline" })
+            test("R39 list probe accepts complete " + (fixture ?? "unnamed empty list"), () => WithListFixture(() =>
+            {
+                var result = WorkspaceInsights.ListMutagenSessionsAsync(default, fixture).GetAwaiter().GetResult();
+                assert(result.Ok && result.Error.Length == 0, "合法 list 输出被拒绝：" + result.Error);
+                assert(result.Output.Contains(fixture is null || fixture.StartsWith("no-sessions", StringComparison.Ordinal) ? "No sessions found" : "Name: agent-launcher-probe"), "合法输出丢失");
+                if (fixture == "complete")
+                {
+                    var matched = WorkspaceInsights.FindSyncSession(result.Output, @"D:\fixture\hub", "jy.example.com", "/home/agent/work", "agent", 22);
+                    assert(matched is not null && SyncReliability.EvaluateLink(matched.Value.Session, fresh, now).State == SyncLinkState.Converged, "完整健康会话不再收敛");
+                }
+            }));
+
+        test("R39 list probe still rejects nonzero exit with complete output", () => WithListFixture(() =>
+        {
+            var result = WorkspaceInsights.ListMutagenSessionsAsync(default, "exit-error").GetAwaiter().GetResult();
+            assert(!result.Ok && result.Error.Contains("fixture list failed"), "退出失败被完整输出覆盖");
+        }));
+
+        test("R39 list probe preserves cancellation", () => WithListFixture(() =>
+        {
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            try { WorkspaceInsights.ListMutagenSessionsAsync(cancellation.Token, "complete").GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { return; }
+            assert(false, "探针吞掉了取消");
+        }));
 
         test("R39 probe failure and staleness are unknown and keep last observation", () =>
         {
@@ -211,7 +414,7 @@ internal static class SyncReliabilityChecks
             // Transition problems → 未收敛；模式未显示 → 不能确认 two-way-safe → 未收敛（fail-closed）。
             var problems = SyncReliability.ParseSession(Session("agent-launcher-jy0001", "Two Way Safe", "Watching for changes", betaExtra: "\tTransition problems:\n\t\twork: permission denied\n"))!;
             assert(problems.TransitionProblems && SyncReliability.EvaluateLink(problems, fresh, now).State == SyncLinkState.NotConverged, "Transition problems 不是未收敛");
-            var noMode = SyncReliability.ParseSession("Name: agent-launcher-jy0001\nStatus: Watching for changes\n")!;
+            var noMode = SyncReliability.ParseSession(Session("agent-launcher-jy0001", "", "Watching for changes").Replace("\tSynchronization mode: \n", ""))!;
             assert(noMode.SyncMode == "" && SyncReliability.EvaluateLink(noMode, fresh, now).State == SyncLinkState.NotConverged, "未显示模式被当成 two-way-safe");
             // 无法确认为同步中的非 Watching（如 Disconnected 且无连接失败证据）→ 未收敛。
             var disconnected = SyncReliability.ParseSession(Session("agent-launcher-jy0001", "Two Way Safe", "Disconnected"))!;
@@ -256,6 +459,51 @@ internal static class SyncReliabilityChecks
             assert(SyncReliability.SanitizeErrorText("") == "", "空文本脱敏崩溃");
         });
 
+        test("R34 bracketed IPv6 SSH errors redact address and zone", () =>
+        {
+            foreach (var address in new[] { "2001:db8::7", "fe80::7%12", "fe80::7%Ethernet-2" })
+            {
+                var clean = SyncReliability.SanitizeErrorText($"agent-launcher-review mutagen 0.18.1: ssh: connect to host [{address}] port 22: Connection refused");
+                assert(!clean.Contains(address) && !clean.Contains("%"), "IPv6 SSH 地址或区域标识未脱敏：" + clean);
+                assert(clean.Contains("agent-launcher-review") && clean.Contains("0.18.1") && clean.Contains("Connection refused"), "会话名、版本号或错误原因丢失");
+            }
+        });
+
+        test("R34 bare IPv6 connection errors redact full address and zone", () =>
+        {
+            foreach (var address in new[] { "2001:db8::7", "2001:0DB8:0000:0000:0000:0000:0000:0007", "::1", "2001:db8::", "::", "::ffff:203.0.113.7", "fe80::7%12", "fe80::7%eth0.2" })
+                foreach (var suffix in new[] { "", ":", "." })
+                {
+                    var clean = SyncReliability.SanitizeErrorText($"agent-launcher-review mutagen 0.18.1: unable to connect to {address}{suffix} network is unreachable");
+                    assert(!clean.Contains(address) && !clean.Contains("%") && !clean.Contains("203.0.113.7"), "裸 IPv6 地址或区域标识未脱敏：" + clean);
+                    assert(clean.Contains("agent-launcher-review") && clean.Contains("0.18.1") && clean.Contains("network is unreachable"), "会话名、版本号或错误原因丢失");
+                }
+        });
+
+        test("R34 IPv6 SSH endpoint redaction removes username and home path", () =>
+        {
+            foreach (var endpoint in new[]
+            {
+                "private-user@[2001:db8::7]:22:~/private-work",
+                "private-user@[fe80::7%eth0]:2222:~/private-work/subdir",
+                "private-user@[2001:db8::7]:/private-work",
+                "[2001:db8::7]:22:~/private-work",
+                "ssh://private-user@[fe80::7%eth0]:22/~/private-work",
+            })
+            {
+                var clean = SyncReliability.SanitizeErrorText($"agent-launcher-review mutagen 0.18.1: endpoint {endpoint} failed");
+                assert(!clean.Contains("private-user") && !clean.Contains("private-work") && !clean.Contains("~/"), "IPv6 端点用户名或路径未脱敏：" + clean);
+                assert(!clean.Contains("2001:db8") && !clean.Contains("fe80") && !clean.Contains("eth0"), "IPv6 端点地址未脱敏：" + clean);
+                assert(clean.Contains("agent-launcher-review") && clean.Contains("0.18.1") && clean.Contains("failed"), "会话名、版本号或错误原因丢失");
+            }
+        });
+
+        test("R34 IPv6 redaction preserves non-address colons and session identity", () =>
+        {
+            const string text = "agent-launcher-dead-beef mutagen 0.18.1: failed at 14:02:11; code dead:beef; [status]";
+            assert(SyncReliability.SanitizeErrorText(text) == text, "非地址文本被误删");
+        });
+
         test("R42 create arguments use two-way-safe and keep the exact ignore list", () =>
         {
             var spec = new WorkspaceSyncSpec(WorkspaceSyncMode.Mutagen, "D:\\fixture\\hub", "/home/agent/work", null, null);
@@ -293,13 +541,89 @@ internal static class SyncReliabilityChecks
             var jy = Session("agent-launcher-jy0001", "Two Way Safe", "Watching for changes");
             var aliyun = Session("agent-launcher-aly0002", "Two Way Safe", "Watching for changes").Replace("jy.example.com", "aly.example.com");
             var output = jy + aliyun;
-            var named = AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "jy.example.com", "/home/agent/work", "agent-launcher-jy0001");
+            var named = AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "jy.example.com", "/home/agent/work", "agent", 22, "agent-launcher-jy0001");
             assert(named is { Name: "agent-launcher-jy0001" } && named.Value.Session.SyncMode == "two-way-safe", "命名匹配失败");
-            var byEndpoint = AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "aly.example.com", "/home/agent/work");
+            var byEndpoint = AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "aly.example.com", "/home/agent/work", "agent", 22);
             assert(byEndpoint is { Name: "agent-launcher-aly0002" }, "端点匹配失败");
-            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "jy.example.com", "/home/agent/work", "agent-launcher-missing") == null, "不存在的名字被匹配");
-            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession("", "D:\\fixture\\hub", "jy.example.com", "/home/agent/work") == null, "空 list 匹配到会话");
-            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "", "jy.example.com", "/home/agent/work") == null, "缺本地路径未拒绝");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "jy.example.com", "/home/agent/work", "agent", 22, "agent-launcher-missing") == null, "不存在的名字被匹配");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession("", "D:\\fixture\\hub", "jy.example.com", "/home/agent/work", "agent", 22) == null, "空 list 匹配到会话");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "", "jy.example.com", "/home/agent/work", "agent", 22) == null, "缺本地路径未拒绝");
+        });
+
+        foreach (var conflictText in new[] { "Conflicts: unreadable\n", "Conflicts:\n", "Conflicts: -1\n" })
+            test("R39 malformed conflict section stays unknown: " + conflictText.TrimEnd(), () =>
+            {
+                var parsed = SyncReliability.ParseSession(Session("agent-launcher-review", "Two Way Safe", "Watching for changes", conflicts: conflictText))!;
+                assert(SyncReliability.EvaluateLink(parsed, fresh, now).State == SyncLinkState.Unknown, "无法解析的冲突被显示为已收敛");
+            });
+
+        test("R36 malformed conflict header preserves safe rows as conflict", () =>
+        {
+            var conflicts = ConflictLines("ok.txt").Replace("Conflicts:\n", "Conflicts: unreadable\n");
+            var parsed = SyncReliability.ParseSession(Session("agent-launcher-review", "Two Way Safe", "Watching for changes", conflicts: conflicts))!;
+            assert(SyncReliability.EvaluateLink(parsed, fresh, now).State == SyncLinkState.Conflict, "安全冲突行被丢弃");
+            assert(parsed.SafeConflictPaths.SequenceEqual(new[] { "ok.txt" }) && parsed.DiscardedConflictEntries > 0, "冲突路径或无法展示提示丢失");
+        });
+
+        test("R34 DNS error sanitization keeps version and session identity", () =>
+        {
+            foreach (var (raw, host) in new[]
+            {
+                ("could not resolve hostname node.example.test: name not known", "node.example.test"),
+                ("dial tcp: lookup api.example.test on 203.0.113.7:53: no such host", "api.example.test"),
+                ("could not resolve hostname private-node: name not known", "private-node"),
+                ("failed connecting to API.Example.TEST.:22", "API.Example.TEST"),
+            })
+            {
+                var clean = SyncReliability.SanitizeErrorText("agent-launcher-review mutagen 0.18.1: " + raw);
+                assert(!clean.Contains(host, StringComparison.OrdinalIgnoreCase), "DNS 主机名未脱敏：" + clean);
+                assert(clean.Contains("agent-launcher-review") && clean.Contains("0.18.1"), "会话名或版本号被误删");
+            }
+        });
+
+        test("R34 session lookup rejects endpoint prefix collisions and ambiguous matches", () =>
+        {
+            var good = Session("agent-launcher-review", "Two Way Safe", "Watching for changes");
+            foreach (var unrelated in new[]
+            {
+                good.Replace(@"D:\fixture\hub", @"D:\fixture\hub-backup"),
+                good.Replace("jy.example.com", "not-jy.example.com"),
+                good.Replace("/home/agent/work", "/home/agent/work-backup"),
+            })
+            {
+                assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(unrelated, @"D:\fixture\hub", "jy.example.com", "/home/agent/work", "agent", 22) is null, "不相关端点被匹配");
+                assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(unrelated, @"D:\fixture\hub", "jy.example.com", "/home/agent/work", "agent", 22, "agent-launcher-review") is null, "命名匹配忽略了端点不符");
+            }
+            var duplicate = good + good.Replace("agent-launcher-review", "agent-launcher-second");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(duplicate, @"D:\fixture\hub", "jy.example.com", "/home/agent/work", "agent", 22) is null, "含糊会话被当成唯一匹配");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(duplicate, @"D:\fixture\hub", "jy.example.com", "/home/agent/work", "agent", 22, "agent-launcher-review")?.Name == "agent-launcher-review", "明确会话名无法消除歧义");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(good, @"d:\fixture\hub\", "JY.EXAMPLE.COM", "/home/agent/work/", "agent", 22) is not null, "规范化后的相同端点被拒绝");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(good, @"D:\fixture\hub", "jy.example.com", "~/work", "agent", 22) is null, "仅凭目录后缀猜测了远程 home");
+        });
+
+        test("R34 session lookup rejects a different SSH identity", () =>
+        {
+            var fixture = Session("agent-launcher-review", "Two Way Safe", "Watching for changes");
+            foreach (var endpoint in new[] { "other@jy.example.com:22:/home/agent/work", "agent@jy.example.com:2222:/home/agent/work", "ssh://other@jy.example.com:2222/home/agent/work" })
+            {
+                var output = fixture.Replace("ssh://agent@jy.example.com:22/home/agent/work", endpoint);
+                assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, @"D:\fixture\hub", "jy.example.com", "/home/agent/work", "agent", 22, "agent-launcher-review") is null, "不同 SSH 身份仍匹配：" + endpoint);
+            }
+        });
+
+        test("R34 session lookup supports canonical Mutagen SSH endpoint output", () =>
+        {
+            var fixture = Session("agent-launcher-review", "Two Way Safe", "Watching for changes");
+            foreach (var endpoint in new[] { "agent@jy.example.com:22:/home/agent/work", "agent@jy.example.com:/home/agent/work", "jy.example.com:/home/agent/work" })
+            {
+                var output = fixture.Replace("ssh://agent@jy.example.com:22/home/agent/work", endpoint);
+                var expectedUser = endpoint.Contains('@') ? "agent" : "";
+                assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, @"D:\fixture\hub", "jy.example.com", "/home/agent/work", expectedUser, 22) is not null, "Mutagen 原生端点格式无法匹配：" + endpoint);
+                if(expectedUser.Length==0)assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, @"D:\fixture\hub", "jy.example.com", "/home/agent/work", "agent", 22) is null, "未声明用户的端点被当成指定用户");
+            }
+            var relative = fixture.Replace("ssh://agent@jy.example.com:22/home/agent/work", "agent@jy.example.com:22:~/work");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(relative, @"D:\fixture\hub", "jy.example.com", "~/work", "agent", 22) is not null, "同一个 home 相对路径被拒绝");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(relative, @"D:\fixture\hub", "jy.example.com", "/home/other/work", "agent", 22) is null, "凭目录尾段匹配了其他用户的目录");
         });
 
         test("R41 None save and launch are rejected with readable equal-rights copy", () =>

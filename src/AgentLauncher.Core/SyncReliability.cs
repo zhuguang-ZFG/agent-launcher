@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Text.RegularExpressions;
 
 namespace AgentLauncher.Core;
@@ -17,7 +19,12 @@ public sealed record ParsedMutagenSession(
     string Name, string AlphaUrl, string BetaUrl,
     string SyncMode, string Status, bool Paused, bool BetaConnected, bool ConnectionFailure,
     string LastError, bool TransitionProblems,
-    string[] SafeConflictPaths, int DiscardedConflictEntries, int ExcludedConflicts, bool ConflictSectionPresent);
+    string[] SafeConflictPaths, int DiscardedConflictEntries, int ExcludedConflicts, bool ConflictSectionPresent)
+{
+    public bool? AlphaConnected { get; init; }
+    public bool BetaConnectionKnown { get; init; }
+    public bool ScanProblems { get; init; }
+}
 
 /// <summary>一次链路评估：当前状态 + 可读详情 + 上次成功观测时间（始终单独给出，过期不升为当前）。</summary>
 public sealed record SyncLinkObservation(SyncLinkState State, string Detail, DateTimeOffset? LastObservedAt)
@@ -92,12 +99,13 @@ public static class SyncReliability
         var name = Field(block, "Name:");
         if (name.Length == 0) return null;
         string alphaUrl = "", betaUrl = "", section = "", syncMode = "";
-        var betaConnected = true;
+        bool? alphaConnected = null, betaConnected = null;
         var safe = new List<string>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var discardedPaths = new HashSet<string>(StringComparer.Ordinal);
         int discarded = 0, excluded = 0;
         var conflictSection = false;
+        var expectsConflictRows = false;
         var inConflicts = false;
         foreach (var raw in (block ?? "").Replace("\r\n", "\n").Split('\n'))
         {
@@ -115,8 +123,12 @@ public static class SyncReliability
                 if (section == "Alpha" && alphaUrl.Length == 0) alphaUrl = url;
                 if (section == "Beta" && betaUrl.Length == 0) betaUrl = url;
             }
-            if (section == "Beta" && trimmed.StartsWith("Connected:", StringComparison.Ordinal))
-                betaConnected = trimmed[10..].Trim() == "Yes";
+            if (trimmed.StartsWith("Connected:", StringComparison.Ordinal))
+            {
+                bool? connected = trimmed[10..].Trim() switch { "Yes" => true, "No" => false, _ => null };
+                if (section == "Alpha") alphaConnected = connected;
+                if (section == "Beta") betaConnected = connected;
+            }
             if (trimmed.StartsWith("Synchronization mode:", StringComparison.Ordinal))
                 syncMode = NormalizeMode(trimmed[21..].Trim());
             else if (trimmed.StartsWith("Sync mode:", StringComparison.Ordinal))
@@ -125,13 +137,18 @@ public static class SyncReliability
             {
                 conflictSection = true;
                 var value = trimmed[10..].Trim();
-                if (int.TryParse(value, out var count))
+                if (int.TryParse(value, out var count) && count >= 0)
                 {
                     // 默认 list 只有计数：知道有冲突但无法展示路径 → 全部记为无法展示（fail-closed 未知）。
                     discarded += count;
                     inConflicts = false;
                 }
-                else inConflicts = value.Length == 0;
+                else
+                {
+                    expectsConflictRows = true;
+                    inConflicts = true;
+                    if (value.Length > 0) discarded++;
+                }
                 continue;
             }
             if (!inConflicts) continue;
@@ -144,17 +161,23 @@ public static class SyncReliability
             if (!IsSafeRelativePath(path)) { if (discardedPaths.Add(path)) discarded++; continue; }
             if (seen.Add(path)) safe.Add(path);
         }
+        if (expectsConflictRows && safe.Count == 0 && discarded == 0 && excluded == 0) discarded = 1;
         var status = Field(block, "Status:");
         var lastError = Field(block, "Last error:");
-        var connectionFailure = !betaConnected &&
+        var connectionFailure = betaConnected == false &&
             (status is "Connecting to beta" or "Disconnected" ||
              ConnectionMarkers.Any(m => lastError.Contains(m, StringComparison.OrdinalIgnoreCase)));
         return new ParsedMutagenSession(
             name, alphaUrl, betaUrl, syncMode, status,
-            Paused: status == "[Paused]", BetaConnected: betaConnected, ConnectionFailure: connectionFailure,
+            Paused: status == "[Paused]", BetaConnected: betaConnected == true, ConnectionFailure: connectionFailure,
             LastError: lastError, TransitionProblems: (block ?? "").Contains("Transition problems:", StringComparison.Ordinal),
             SafeConflictPaths: safe.ToArray(), DiscardedConflictEntries: discarded, ExcludedConflicts: excluded,
-            ConflictSectionPresent: conflictSection);
+            ConflictSectionPresent: conflictSection)
+        {
+            AlphaConnected = alphaConnected,
+            BetaConnectionKnown = betaConnected.HasValue,
+            ScanProblems = (block ?? "").Contains("Scan problems:", StringComparison.Ordinal),
+        };
     }
 
     private static string NormalizeMode(string value)
@@ -212,10 +235,18 @@ public static class SyncReliability
             return (SyncLinkState.Unknown, "冲突段无法完整解析且没有任何安全冲突行；按未知处理，不能当成已收敛。");
         if (session.ConnectionFailure)
             return (SyncLinkState.Offline, "远端端点连接失败（本次 list 成功，beta 未连接）；会话与历史保留，不 terminate、不重建。");
+        if (session.AlphaConnected is null || !session.BetaConnectionKnown)
+            return (SyncLinkState.Unknown, "输出缺少或无法识别 alpha/beta 的 Connected 字段；不能确认两端连接状态。");
         if (!session.BetaConnected)
             return (SyncLinkState.NotConverged, "beta 端点未连接，但输出无法确认为连接失败；不能叫已收敛。");
+        if (session.AlphaConnected == false)
+            return (SyncLinkState.NotConverged, "alpha 端点未连接；不能叫已收敛。");
         if (session.TransitionProblems)
             return (SyncLinkState.NotConverged, "Mutagen 报告 Transition problems（常见原因：远程目录父目录不属于 agent 用户，无写权）；改动可能无法落回本机。");
+        if (session.ScanProblems)
+            return (SyncLinkState.NotConverged, "Mutagen 报告 Scan problems；文件扫描存在未处理问题，不能叫已收敛。");
+        if (!string.IsNullOrWhiteSpace(session.LastError))
+            return (SyncLinkState.NotConverged, "Mutagen 仍报告 Last error；尚有未处理错误，不能叫已收敛。");
         if (session.SyncMode == "two-way-resolved")
             return (SyncLinkState.NotConverged, "会话模式是 two-way-resolved：alpha（本机）赢得全部分歧，包括删除覆盖对方修改；同权下最高未收敛。替换需走破坏性重置的单独确认（本轮未实现）。");
         if (session.Status == "Watching for changes")
@@ -270,12 +301,33 @@ public static class SyncReliability
     {
         if (string.IsNullOrEmpty(text)) return text ?? "";
         var result = Regex.Replace(text, @"ssh://[^\s]+", "ssh://[已脱敏]");
+        result = Regex.Replace(result, @"(?:\b[A-Za-z0-9._%+-]+@)?\[(?<address>[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.~-]+)?)\](?::\d+)?(?::(?:~?/)[^\s]*)?",
+            match => IsIpv6Address(match.Groups["address"].Value) ? "[已脱敏]" : match.Value);
+        result = Regex.Replace(result, @"(?<![\w:])[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.~-]+)?(?![\w%])", match =>
+        {
+            var address = match.Value;
+            while (address.Length > 0)
+            {
+                if (IsIpv6Address(address)) return "[地址已脱敏]" + match.Value[address.Length..];
+                if (address[^1] is not ('.' or ':')) break;
+                address = address[..^1];
+            }
+            return match.Value;
+        });
         result = Regex.Replace(result, @"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", "[已脱敏]");
         result = Regex.Replace(result, @"\b\d{1,3}(?:\.\d{1,3}){3}\b", "[地址已脱敏]");
         result = Regex.Replace(result, @"\b[A-Za-z]:\\[^\s]*", "[路径已脱敏]");
         result = Regex.Replace(result, @"\\\\[^\s]+", "[路径已脱敏]");
         result = Regex.Replace(result, @"(?:/[\w.-]+){2,}", "[路径已脱敏]");
+        result = Regex.Replace(result, @"(?i)(\b(?:could not resolve hostname|lookup)\s+)(?!agent-launcher-)[a-z0-9][a-z0-9.-]*(?=[:\s]|$)", "$1[地址已脱敏]");
+        result = Regex.Replace(result, @"(?i)\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:[a-z]{2,}|xn--[a-z0-9-]+)\b\.?", "[地址已脱敏]");
         return result;
+    }
+
+    private static bool IsIpv6Address(string value)
+    {
+        var zone = value.IndexOf('%');
+        return IPAddress.TryParse(zone < 0 ? value : value[..zone], out var address) && address.AddressFamily == AddressFamily.InterNetworkV6;
     }
 
     /// <summary>§6/R41：None 与 SSHFS 都不是已收敛。None 按 2026-11-19 更晚决定（IMPLEMENTATION §92）是拒收文案。

@@ -314,6 +314,81 @@ internal static class SyncReliabilityIntegration
             }
         });
 
+        await Test("R42 blocked links retain session and bytes on disposal", async () =>
+        {
+            foreach (var blocked in new[] { "offline", "paused", "halted" })
+            {
+                FakeSyncSimulator.Reset();
+                var alpha = Path.Combine(testRoot, "blocked-" + blocked, "alpha");
+                var beta = Path.Combine(testRoot, "blocked-" + blocked, "beta");
+                Directory.CreateDirectory(alpha);
+                Directory.CreateDirectory(beta);
+                await File.WriteAllTextAsync(Path.Combine(beta, "remote.txt"), "unsynchronized bytes");
+                var name = "agent-launcher-blocked-" + blocked;
+                File.WriteAllText(scenarioPath, JsonSerializer.Serialize(new FakeSyncScenario
+                {
+                    CallLog = callLog,
+                    Links = [new FakeSyncLink { SessionName = name, AlphaPath = alpha, BetaPath = beta, Online = blocked != "offline", Paused = blocked == "paused", Halted = blocked == "halted" ? "root deletion" : null }]
+                }));
+                var session = await WorkspaceSync.StartAsync(Spec(name, alpha, beta), Remote("fixture.example.com", alpha, beta, Spec(name, alpha, beta)));
+                var error = await session.TryDisposeAsync();
+                Assert(error is not null && error.Contains("已保留"), blocked + " 收尾未报告失败");
+                Assert(!File.Exists(Path.Combine(alpha, "remote.txt")), blocked + " 期间传播了文件");
+                Assert(FakeSyncSimulator.IsRegistered(name) && !CallsFor(name).Contains("terminate"), blocked + " 收尾删除了会话");
+                Assert(await File.ReadAllTextAsync(Path.Combine(beta, "remote.txt")) == "unsynchronized bytes", "远端字节被改变");
+            }
+            FakeSyncSimulator.Reset();
+        });
+
+        foreach (var blocked in new[] { "paused", "halted" })
+        {
+            await Test($"R42 {blocked} link cannot report initial synchronization ready", async () =>
+            {
+                FakeSyncSimulator.Reset();
+                var alpha = Path.Combine(testRoot, "not-ready-" + blocked, "alpha");
+                var beta = Path.Combine(testRoot, "not-ready-" + blocked, "beta");
+                Directory.CreateDirectory(alpha);
+                Directory.CreateDirectory(beta);
+                await File.WriteAllTextAsync(Path.Combine(beta, "remote.txt"), "unsynchronized bytes");
+                var name = "agent-launcher-not-ready-" + blocked;
+                File.WriteAllText(scenarioPath, JsonSerializer.Serialize(new FakeSyncScenario
+                {
+                    CallLog = callLog,
+                    Links = [new FakeSyncLink { SessionName = name, AlphaPath = alpha, BetaPath = beta, Paused = blocked == "paused", Halted = blocked == "halted" ? "root deletion" : null }]
+                }));
+                var session = await WorkspaceSync.StartAsync(Spec(name, alpha, beta), Remote("fixture.example.com", alpha, beta, Spec(name, alpha, beta)));
+                var refused = false;
+                try { await session.WaitReadyAsync(); }
+                catch (Exception e) when (e is IOException or TimeoutException) { refused = true; }
+                Assert(refused, blocked + " 尚未同步却报告就绪");
+                Assert(!File.Exists(Path.Combine(alpha, "remote.txt")) && FakeSyncSimulator.IsRegistered(name), "暂停会话传播了文件或删除了历史");
+            });
+        }
+
+        await Test("R35 fixture writes complete before explicit synchronization cycles", async () =>
+        {
+            FakeSyncSimulator.Reset();
+            var alpha = Path.Combine(testRoot, "manual-cycle", "alpha");
+            var beta = Path.Combine(testRoot, "manual-cycle", "beta");
+            Directory.CreateDirectory(alpha);
+            Directory.CreateDirectory(beta);
+            await File.WriteAllTextAsync(Path.Combine(beta, "remote.txt"), "complete bytes");
+            var name = "agent-launcher-manual-cycle";
+            File.WriteAllText(scenarioPath, JsonSerializer.Serialize(new FakeSyncScenario
+            {
+                CallLog = callLog,
+                Links = [new FakeSyncLink { SessionName = name, AlphaPath = alpha, BetaPath = beta }]
+            }));
+            var session = await WorkspaceSync.StartAsync(Spec(name, alpha, beta), Remote("fixture.example.com", alpha, beta, Spec(name, alpha, beta)));
+            using (var writer = new FileStream(scenarioPath, FileMode.Open, FileAccess.Write, FileShare.None))
+                await Task.Delay(450);
+            Assert(!File.Exists(Path.Combine(alpha, "remote.txt")), "显式周期前出现了后台传播");
+            await session.WaitReadyAsync();
+            Assert(await File.ReadAllTextAsync(Path.Combine(alpha, "remote.txt")) == "complete bytes", "就绪周期未传播完整字节");
+            Assert(await session.TryDisposeAsync() is null, "在线收尾失败");
+            FakeSyncSimulator.Reset();
+        });
+
         Console.WriteLine($"RESULT {evidence.Count} cases, {evidence.Count(e => e.GetType().GetProperty("passed")?.GetValue(e) is false)} failed. Artifacts: {testRoot}");
         File.WriteAllText(Path.Combine(testRoot, "sync-reliability-results.json"), JsonSerializer.Serialize(evidence));
         return evidence.Any(e => e.GetType().GetProperty("passed")?.GetValue(e) is false) ? 1 : 0;

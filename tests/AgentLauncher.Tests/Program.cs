@@ -41,6 +41,15 @@ if(args is ["--startup-queue-checks"]) return await Integration.RunAsync(startup
 if(args is ["--admission-integration"]) return await AdmissionIntegration.RunAsync();
 if(args is ["--remote-execution-integration"])return await RemoteExecutionIntegration.RunAsync();
 if(args is ["--sync-review-checks"])return await AgentLauncher.Tests.SyncReviewChecks.RunAsync();
+if(args is ["--sync-reliability-checks"])
+{
+    var syncPassed=0;var syncFailed=0;
+    void SyncTest(string name,Action action){try{action();syncPassed++;Console.WriteLine("PASS "+name);}catch(Exception e){syncFailed++;Console.WriteLine("FAIL "+name+": "+e.Message);}}
+    AgentLauncher.Tests.SyncReliabilityChecks.Run(SyncTest,(value,message)=>{if(!value)throw new Exception(message);});
+    Console.WriteLine($"RESULT {syncPassed} passed, {syncFailed} failed.");return syncFailed==0?0:1;
+}
+if(args.Length is 3 or 4&&args.Take(3).SequenceEqual(new[]{"sync","list","--long"}))
+    return await AgentLauncher.Tests.SyncReliabilityChecks.WriteListFixtureAsync(args.Length==4?args[3]:null);
 #if INTEGRATION_TESTS
 if(args is ["--sync-reliability-integration"])return await SyncReliabilityIntegration.RunAsync();
 #endif
