@@ -158,17 +158,17 @@ public sealed class WorkspacePreparer
                 var resolvedCommand=new CommandSpec(slot.AgentId, slot.Current.Arguments, "remote");
                 
                 // 构造工作区同步配置（如果远程主机启用同步）
+                // 三台同权（2026-11-18 产品决定）：同步模式 None 等同于各机互相断开，不构成同权，启动时拒收。
                 WorkspaceSyncSpec? workspaceSync=null;
-                if(remoteHost.WorkspaceSyncMode!=WorkspaceSyncMode.None)
-                {
-                    workspaceSync=new WorkspaceSyncSpec(
-                        Mode:remoteHost.WorkspaceSyncMode,
-                        LocalPath:cwd,  // 本地工作区路径（当前工作目录）
-                        RemotePath:slot.RemoteDirectory,  // 远程工作目录（用户工作区，agent 可写）
-                        MutagenSessionName:null,  // 自动生成（agent-launcher-<guid>）
-                        SshfsMountPoint:null  // 自动分配（Z: 到 D:）
-                    );
-                }
+                if(remoteHost.WorkspaceSyncMode==WorkspaceSyncMode.None)
+                    throw new IOException($"远程主机「{remoteHost.Name}」的同步模式为 none（不同步）。不同步时远端 agent 只看见远程目录，改动不落回本机，不构成三台同权；请先在远程主机设置中改用 mutagen 或 sshfs。");
+                workspaceSync=new WorkspaceSyncSpec(
+                    Mode:remoteHost.WorkspaceSyncMode,
+                    LocalPath:cwd,  // 本地工作区路径（当前工作目录）
+                    RemotePath:slot.RemoteDirectory,  // 远程工作目录（用户工作区，agent 可写）
+                    MutagenSessionName:null,  // 自动生成（agent-launcher-<guid>）
+                    SshfsMountPoint:null  // 自动分配（Z: 到 D:）
+                );
                 
                 remoteSpec=new RemoteExecutionSpec(
                     Host:remoteHost.Address,
@@ -178,7 +178,7 @@ public sealed class WorkspacePreparer
                     AgentType:slot.AgentId,
                     RemoteWorkingDirectory:slot.RemoteDirectory,
                     Arguments:resolvedCommand.Arguments,  // 用解析后的参数（profile/preset）
-                    MemoryLimitBytes:null,  // 远程进程不受本地内存限制
+                    MemoryLimitBytes:remoteHost.MemoryLimitMib is { } mib?(long)mib*1024*1024:null,  // 主机级内存上限（MiB→字节）；启动时经 systemd scope 生效
                     SshKeyPath:remoteHost.SshKeyPath,
                     WorkspaceSync:workspaceSync  // 工作区同步配置（如果启用）
                 );

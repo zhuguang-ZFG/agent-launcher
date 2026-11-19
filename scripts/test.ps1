@@ -6,6 +6,8 @@ $runtime=[IO.Path]::GetFullPath($RuntimeDirectory)
 if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.TerminalModel.Tests/AgentLauncher.TerminalModel.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Embedded terminal model tests failed'}
+& dotnet run --project (Join-Path $root 'tests/AgentLauncher.ManualRelay.Tests/AgentLauncher.ManualRelay.Tests.csproj') -c Release
+if($LASTEXITCODE -ne 0){throw 'Manual relay tests failed'}
 foreach($project in @('tests/AgentLauncher.Soak','tests/AgentLauncher.Tests','src/AgentLauncher.Worker','src/AgentLauncher.App')){
   $name=Split-Path $project -Leaf
   & dotnet publish (Join-Path $root "$project/$name.csproj") -c Release -p:DefineConstants=INTEGRATION_TESTS -o $runtime --nologo -m:1
@@ -65,4 +67,12 @@ try {
   $env:PI_CODING_AGENT_DIR=$previousPiAgentDir
   Remove-Item Env:AGENT_LAUNCHER_FAKE_SAMPLE -ErrorAction SilentlyContinue
   Remove-Item Env:AGENT_LAUNCHER_TEST_ROOT -ErrorAction SilentlyContinue
+  # 测试卫生：清理超过 2 小时的历史测试根。本机多次门禁会遗留上千个 AgentLauncher-tests-* 根目录，
+  # 是环境瞬态（中途文件消失）的嫌疑来源。只匹配该前缀且只删过期根，正在使用的运行不受影响。
+  try{
+    $cutoff=(Get-Date).AddHours(-2)
+    Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'AgentLauncher-tests-*' -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -lt $cutoff } |
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  }catch{}
 }

@@ -131,6 +131,35 @@ internal static class RemoteExecutionChecks
             assert(RemoteReattach.AttachShell(Guid.NewGuid(),path).Contains("cd ~/'work/project with spaces'"),"挂接目录不同");
         });
 
+        test("R45 remote memory cap wraps systemd-run and validates bounds", () =>
+        {
+            // 命令形状：有上限时先守卫 systemd-run 可用性，再以 transient scope 包裹 su 内层命令（agent 及其后代落入同一 cgroup）。
+            var capped=new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",["--hold"],1024L*1024*1024,null,null);
+            capped.Validate();
+            using var runner=SshRunnerBackend.Create(capped);
+            var remoteCmd=runner.StartInfo.ArgumentList[^1];
+            assert(remoteCmd.Contains("command -v systemd-run"),"内存上限应带 systemd 可用性守卫");
+            assert(remoteCmd.Contains("systemd-run --scope -p MemoryMax=1073741824"),"MemoryMax 字节值错误");
+            assert(remoteCmd.Contains("su - agent -c"),"scope 应包裹 su 内层命令");
+            assert(remoteCmd.Contains("cd '/home/agent/work' && pi '--hold'"),"内存上限不得改变工作目录或参数");
+            // 无上限：命令形状与从前一致，不引入 systemd 包裹。
+            var uncapped=new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",["--hold"],null,null,null);
+            uncapped.Validate();
+            using var plain=SshRunnerBackend.Create(uncapped);
+            assert(!plain.StartInfo.ArgumentList[^1].Contains("systemd-run"),"无上限不应引入 systemd 包裹");
+            // 边界：256 MiB 下限、64 GiB 上限，出界拒收；留空合法。
+            foreach(var invalid in new long?[]{-1,255L*1024*1024,64L*1024*1024*1024+1})
+            {
+                var spec=new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",[],invalid,null,null);
+                try{spec.Validate();assert(false,"出界上限被接受："+invalid);}catch(InvalidDataException e){assert(e.Message.Contains("256 MiB"),e.Message);}
+            }
+            new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",[],256L*1024*1024,null,null).Validate();
+            new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",[],64L*1024*1024*1024,null,null).Validate();
+            assert(RemoteHost.ValidateMemoryLimitMib(null) is null,"留空应合法");
+            assert(RemoteHost.ValidateMemoryLimitMib(256) is null && RemoteHost.ValidateMemoryLimitMib(65536) is null,"边界值应合法");
+            assert(RemoteHost.ValidateMemoryLimitMib(255) is not null && RemoteHost.ValidateMemoryLimitMib(65537) is not null,"出界 MiB 应拒收");
+        });
+
         test("R4 SshRunnerBackend Create does not start process", () =>
         {
             var spec = new RemoteExecutionSpec(
@@ -282,9 +311,14 @@ internal static class RemoteExecutionChecks
                 assert(plan.ResourceMode is null, "远程计划不应有 ResourceMode（本地资源限制）");
                 assert(plan.PoolId is null, "远程计划不应有 PoolId（共享池）");
                 assert(plan.Budget == 0, "远程计划 Budget 应为 0（不受本地 Job 限制）");
+                // 三台同权：同步模式 None 在准备层拒收，准备必须给出可读错误而不是生成不同步的计划。
                 configuration.RemoteHosts[0]=configuration.RemoteHosts[0] with{Address="edited.example",SshPort=2222,WorkspaceSyncMode=WorkspaceSyncMode.None};
+                try{preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(false),default,configuration:configuration).GetAwaiter().GetResult();assert(false,"同步模式 None 被启动接受");}
+                catch(IOException e){assert(e.Message.Contains("同权"),"None 拒收说明缺少同权理由："+e.Message);}
+                // 主机编辑（地址/端口/同步模式）仍须反映到新准备，不复用旧端点。
+                configuration.RemoteHosts[0]=configuration.RemoteHosts[0] with{WorkspaceSyncMode=WorkspaceSyncMode.SshfsMount};
                 var edited=preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(false),default,configuration:configuration).GetAwaiter().GetResult().Single();
-                assert(edited.RemoteExecution is {Host:"edited.example",SshPort:2222,WorkspaceSync:null},"准备缓存复用了旧主机或同步配置");
+                assert(edited.RemoteExecution is {Host:"edited.example",SshPort:2222,WorkspaceSync:{Mode:WorkspaceSyncMode.SshfsMount}},"准备缓存复用了旧主机或同步配置");
                 assert(MutagenSyncSession.MutagenEndpoint(edited.RemoteExecution!,"/work")=="agent@edited.example:2222:/work","Mutagen 端口丢失");
             }
             finally

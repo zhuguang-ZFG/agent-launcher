@@ -13,9 +13,14 @@ public sealed record RemoteHost(
     string[] AvailableAgents,       // 可用的 agent 类型，如 ["pi", "kimi", "qodercli", "omp"]
     string? SshKeyPath,             // SSH 私钥路径（可选；免密登录走 密钥/ssh-agent/SSH config，绝不提示密码）
     WorkspaceSyncMode WorkspaceSyncMode = WorkspaceSyncMode.Mutagen,  // 工作区同步模式（默认 Mutagen，用户明确要求远程 agent 编辑本地工作区）
-    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Dictionary<string,string>? AgentUpgradeCommands = null  // 每-agent 升级命令覆盖（可选；缺省用 RemoteAgentMaintenance.DefaultUpgradeCommands）
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Dictionary<string,string>? AgentUpgradeCommands = null,  // 每-agent 升级命令覆盖（可选；缺省用 RemoteAgentMaintenance.DefaultUpgradeCommands）
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] int? MemoryLimitMib = null  // 远程内存上限 MiB（可选；留空不限制。启动时经 systemd transient scope 生效，见 2026-11-19 规格）
 )
 {
     public bool Supports(string agentId) => RemoteAgentMaintenance.AgentCommand(agentId) is {} command
         && AvailableAgents.Any(id => RemoteAgentMaintenance.AgentCommand(id) == command);
+
+    // 编辑器与准备层共用同一条边界：留空合法（不限制），出界拒收以防 MiB/GiB 录入错误静默生效。
+    public static string? ValidateMemoryLimitMib(int? memoryLimitMib) =>
+        memoryLimitMib is { } mib && mib is < 256 or > 65536 ? "远程内存上限必须在 256 到 65536 MiB 之间；留空表示不限制。" : null;
 }

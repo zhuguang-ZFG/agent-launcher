@@ -20,6 +20,8 @@ internal static class RemoteE2EIntegration
         var fakeSshDir = Path.GetDirectoryName(fakeSshPath)!;
         var originalPath = Environment.GetEnvironmentVariable("PATH");
         Environment.SetEnvironmentVariable("PATH", fakeSshDir + Path.PathSeparator + originalPath);
+        // 同步模式 None 自三台同权起在准备层拒收：E2E 改用 Mutagen 模式，由假同步后端代替真实 Mutagen（子 Worker 继承本环境）。
+        Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SYNC", "1");
 
         var workerProcesses = new List<System.Diagnostics.Process>();
         var evidence = new List<object>();
@@ -47,7 +49,7 @@ internal static class RemoteE2EIntegration
                 AgentUser: "agent",
                 AvailableAgents: ["pi"],
                 SshKeyPath: null,
-                WorkspaceSyncMode: WorkspaceSyncMode.None);  // 同步由 workspace-sync suite 单独覆盖，这里只验启动链
+                WorkspaceSyncMode: WorkspaceSyncMode.Mutagen);  // None 在准备层被拒收（三台同权）；假同步后端代替真实 Mutagen，这里只验启动链
             var configuration = new Configuration { SchemaVersion = 2 };
             configuration.Draft.SchemaVersion = 2;
             configuration.Draft.Revision = 3;

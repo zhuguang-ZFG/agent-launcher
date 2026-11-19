@@ -1068,17 +1068,29 @@ public partial class MainWindow : Window
                 ("agents","可用 agent 类型（逗号分隔，如：pi,kimi,qodercli）",isNew?"pi":string.Join(",",host!.AvailableAgents),false),
                 ("keyPath","SSH 私钥路径（可选，留空用 ssh-agent/SSH config，全程免密）",host?.SshKeyPath??"",false),
                 ("syncMode","工作区同步模式",RemoteHostEditor.SyncModeText(host?.WorkspaceSyncMode??WorkspaceSyncMode.Mutagen),false),
+                ("memoryLimit","远程内存上限 MiB（留空 = 不限制）",host?.MemoryLimitMib?.ToString()??"",false),
                 ("upgradeOverrides","Agent 升级命令覆盖（每行 agent=命令，留空用默认）",RemoteHostEditor.UpgradeOverridesText(host?.AgentUpgradeCommands),true)
             };
             var caption=isNew?"添加远程主机":"编辑远程主机";
-            var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的槽位会应用新配置。\n同步在远程启动时生效：mutagen 为实时双向同步。",choices:syncChoices);
+            var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的槽位会应用新配置。\n同步在远程启动时生效：mutagen 为实时双向同步；同步模式不能选 none（三台同权）。\n内存上限在启动时经 systemd 生效：远程主机需有 systemd-run（root 登录）；缺失时该次启动拒绝。",choices:syncChoices);
             if(dialog.ShowDialog()!=true)return;
             var name=dialog.Values["name"].Trim();
             var address=dialog.Values["address"].Trim();
+            var syncMode=RemoteHostEditor.ParseSyncMode(dialog.Values["syncMode"],host?.WorkspaceSyncMode??WorkspaceSyncMode.Mutagen);
             var error=RemoteHostEditor.Validate(name,address,dialog.Values["port"],dialog.Values["agents"]);
             error??=RemoteHostEditor.Duplicate(snapshot,name,address,host?.Id);
             var overrides=RemoteHostEditor.ParseUpgradeOverrides(dialog.Values["upgradeOverrides"],out var overrideError);
             error??=overrideError;
+            var memoryLimitText=dialog.Values["memoryLimit"].Trim();
+            int? memoryLimitMib=null;string? memoryLimitError=null;
+            if(memoryLimitText.Length>0)
+            {
+                if(int.TryParse(memoryLimitText,out var parsedMib))memoryLimitMib=parsedMib;
+                else memoryLimitError="远程内存上限必须是整数 MiB；留空表示不限制。";
+            }
+            error??=memoryLimitError??RemoteHost.ValidateMemoryLimitMib(memoryLimitMib);
+            // 三台同权（2026-11-18 产品决定）：不同步的远程主机不构成同权，保存时拒收并说明改法。
+            if(syncMode==WorkspaceSyncMode.None)error="同步模式不能选 none：不同步时各机只看见自己的目录，改动不落回本机，不构成三台同权。请选择 mutagen 或 sshfs。";
             if(error is not null){MessageBox.Show(window,error,caption,MessageBoxButton.OK,MessageBoxImage.Warning);return;}
             var updated=new RemoteHost(
                 Id:host?.Id??Guid.NewGuid(),
@@ -1089,7 +1101,8 @@ public partial class MainWindow : Window
                 AgentUser:dialog.Values["agentUser"].Trim(),
                 AvailableAgents:RemoteHostEditor.ParseAgents(dialog.Values["agents"]),
                 SshKeyPath:string.IsNullOrWhiteSpace(dialog.Values["keyPath"])?null:dialog.Values["keyPath"].Trim(),
-                WorkspaceSyncMode:RemoteHostEditor.ParseSyncMode(dialog.Values["syncMode"],host?.WorkspaceSyncMode??WorkspaceSyncMode.Mutagen),
+                WorkspaceSyncMode:syncMode,
+                MemoryLimitMib:memoryLimitMib,
                 AgentUpgradeCommands:overrides);
             if(isNew)snapshot.Add(updated);
             else snapshot[snapshot.FindIndex(h=>h.Id==host!.Id)]=updated;

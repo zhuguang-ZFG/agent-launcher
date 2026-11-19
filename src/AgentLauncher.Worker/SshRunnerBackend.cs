@@ -35,14 +35,23 @@ public sealed class SshRunnerBackend : IDisposable
         // 注入 Node 堆上限（非 Node 进程忽略 NODE_OPTIONS）；1024 MiB 适配 2–4 GiB 级 VPS。
         // trap '' HUP 让远程前台在本地 SSH 断开后仍可留存（SIG_IGN 会随 exec 继承）。断开仍不能当作进程已退出的证明。
         var attemptPrefix = attemptId is Guid attempt ? $"export {RemoteReattach.AttemptToken(attempt)}; " : "";
-        var remoteCmd = $"{attemptPrefix}trap '' HUP; export NODE_OPTIONS=--max-old-space-size=1024; cd {RemoteWorkspaceMappingHelper.ShellDirectory(spec.RemoteWorkingDirectory)} && {agentCmd}";
+        var innerCmd = $"{attemptPrefix}trap '' HUP; export NODE_OPTIONS=--max-old-space-size=1024; cd {RemoteWorkspaceMappingHelper.ShellDirectory(spec.RemoteWorkingDirectory)} && {agentCmd}";
+        // 远程内存上限（规格 2026-11-19）：systemd transient scope 包裹内层命令，agent 及其后代落入同一 cgroup。
+        // 守卫先确认远程有 systemd-run，缺失即以可读错误退出（fail-closed）；无上限时与从前完全一致。
+        // su 与 sh 层都在 scope 之内：scope 是它们的父进程，cgroup 覆盖整个 agent 进程树。
+        var suLayer = spec.AgentUser==spec.SshUser ? $"sh -c {SshRemoteCommand.QuoteDouble(innerCmd)}" : SshRemoteCommand.WrapSu(spec.AgentUser, innerCmd);
+        var remoteCmd = spec.MemoryLimitBytes is { } maxBytes
+            ? $"if ! command -v systemd-run >/dev/null 2>&1; then echo '远程内存上限需要 systemd（systemd-run）；当前远程主机不可用，未启动 agent。' >&2; exit 97; fi; systemd-run --scope -p MemoryMax={maxBytes} {suLayer}"
+            : (spec.AgentUser==spec.SshUser ? innerCmd : SshRemoteCommand.WrapSu(spec.AgentUser, innerCmd));
         return new SshRunnerBackend { Spec = spec, StartInfo = CreateStartInfo(spec, remoteCmd) };
     }
 
     // 重新挂接：同一主机、同一远程目录的新本地 SSH。远程命令只检查本次尝试是否仍在，然后进入该目录，不重新启动 Agent。
+    // 内存上限不参与重新挂接：存活进程保持启动时的限制，交互 shell 不新建 cgroup。
     public static SshRunnerBackend CreateAttachment(RemoteExecutionSpec spec, Guid attemptId)
     {
-        var remoteCmd = RemoteReattach.AttachShell(attemptId, spec.RemoteWorkingDirectory);
+        var attachCmd = RemoteReattach.AttachShell(attemptId, spec.RemoteWorkingDirectory);
+        var remoteCmd = spec.AgentUser==spec.SshUser ? attachCmd : SshRemoteCommand.WrapSu(spec.AgentUser, attachCmd);
         return new SshRunnerBackend { Spec = spec, StartInfo = CreateStartInfo(spec, remoteCmd) };
     }
 
@@ -75,8 +84,8 @@ public sealed class SshRunnerBackend : IDisposable
         psi.ArgumentList.Add("-o");
         psi.ArgumentList.Add("ConnectTimeout=10");
         psi.ArgumentList.Add($"{spec.SshUser}@{spec.Host}");
-        // 远程命令：su - agent -c "<remote-command>"（双引号，因为内部已有单引号 quoting；共享 SshRemoteCommand 的包装逻辑）
-        psi.ArgumentList.Add(spec.AgentUser==spec.SshUser?remoteCmd:SshRemoteCommand.WrapSu(spec.AgentUser, remoteCmd));
+        // 远程命令由调用方完成 su/systemd 组装（Create 决定层次），这里按原样作为最后一个参数传给 ssh。
+        psi.ArgumentList.Add(remoteCmd);
         return psi;
     }
 
