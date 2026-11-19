@@ -45,6 +45,9 @@ internal static class SyncReliabilityIntegration
                     new FakeSyncLink { SessionName = alyName, LinkLabel = "本机—阿里云", AlphaPath = hub, BetaPath = aly, Online = alyOnline },
                 ],
             }));
+        string[] Calls() => File.Exists(callLog)
+            ? File.ReadAllLines(callLog).Where(l => l.Length > 0).Select(l => JsonDocument.Parse(l).RootElement.GetProperty("op").GetString()!).ToArray()
+            : [];
         string[] CallsFor(string session) => File.Exists(callLog)
             ? File.ReadAllLines(callLog).Where(l => l.Length > 0)
                 .Select(l => JsonDocument.Parse(l).RootElement)
@@ -204,6 +207,111 @@ internal static class SyncReliabilityIntegration
             Assert(SyncReliability.OverallLabel([alyObs.State]) == "单链路已收敛", "单链路已收敛标签错误");
             WriteScenario(true, true);
             await Within120Seconds(() => SameBytes(Path.Combine(jy, "healthy-r38.txt"), healthyFile), "恢复后健康文件未到京云");
+        });
+
+        await Test("R42 offline pause and probe failure never terminate create or reset", async () =>
+        {
+            await Task.CompletedTask; // 本用例全是同步模拟器开关与断言；保持 Func<Task> 签名（CS1998）。
+            var before = Calls();
+            // 普通离线：切换开关 + 多轮 list，不 terminate 不 create。
+            WriteScenario(false, false);
+            FakeSyncSimulator.Tick();
+            _ = FakeSyncSimulator.RenderList();
+            // 暂停（场景开关模拟操作员 pause 后的状态；本轮产品无 pause 按钮）：同样不 terminate 不 create。
+            WriteScenario(true, true, jyPaused: true);
+            _ = FakeSyncSimulator.RenderList();
+            // 安全暂停（halted）：保持 halted，不自动 resume/reset。
+            WriteScenario(true, true, jyHalted: "root deletion");
+            _ = FakeSyncSimulator.RenderList();
+            // 探针失败：纯函数层评估为未知；产品没有任何因探针失败而写会话的路径。
+            var failed = SyncReliability.FailedProbe("mutagen sync list 超时（10 秒），已终止。", DateTimeOffset.UtcNow, SyncLinkState.Converged, DateTimeOffset.UtcNow);
+            Assert(failed.State == SyncLinkState.Unknown, "探针失败不是未知");
+            WriteScenario(true, true);
+            var after = Calls();
+            Assert(!after.Contains("terminate") && !after.Contains("reset"), "离线/暂停/探针失败触发了 terminate/reset");
+            Assert(after.Count(op => op == "create") == before.Count(op => op == "create"), "离线/暂停/探针失败重建了会话");
+            Assert(CallsFor(jyName).SequenceEqual(new[] { "create" }) || CallsFor(jyName).All(op => op is "create" or "list"), "京云会话出现意外写操作：" + string.Join(",", CallsFor(jyName)));
+            Assert(FakeSyncSimulator.IsRegistered(jyName) && FakeSyncSimulator.IsRegistered(alyName), "会话被悄悄移除");
+            // halted 状态解析为安全暂停（R40 的传播层佐证）。
+            WriteScenario(true, true, jyHalted: "root deletion");
+            var now = DateTimeOffset.UtcNow;
+            var halted = SyncReliability.SplitSessionBlocks(FakeSyncSimulator.RenderList()).Select(SyncReliability.ParseSession).First(p => p?.Name == jyName)!;
+            Assert(SyncReliability.EvaluateLink(halted, now, now).State == SyncLinkState.SafetyPaused, "模拟器 halted 不是安全暂停");
+            WriteScenario(true, true);
+        });
+
+        await Test("R42 flush failure keeps session in process", async () =>
+        {
+            WriteScenario(true, true, flushFails: true);
+            var session = await WorkspaceSync.StartAsync(Spec(jyName, hub, jy), Remote("jy.example.com", hub, jy, Spec(jyName, hub, jy)));
+            // 同名会话已注册：Register 幂等覆盖状态，但 create 会再记一次——断言按「flush 后无 terminate」判定。
+            var error = await session.TryDisposeAsync();
+            Assert(error is not null && error.Contains("已保留"), "flush 失败未返回可读保留错误：" + error);
+            Assert(FakeSyncSimulator.IsRegistered(jyName), "flush 失败后会话被终止");
+            Assert(!CallsFor(jyName).Contains("terminate"), "flush 失败仍 terminate");
+            Assert(CallsFor(jyName).Contains("flush"), "flush 未被调用");
+            WriteScenario(true, true);
+            var ok = await session.TryDisposeAsync();
+            Assert(ok is null && !FakeSyncSimulator.IsRegistered(jyName), "flush 成功后未正常终止");
+        });
+
+        await Test("R42 worker exit with flush failure writes problem receipt and keeps session evidence", async () =>
+        {
+            // Worker 驱动：fake-ssh hold=2 正常退出 → Worker flush（场景开关失败）→ sync-final problem + sync-session 保留。
+            // 调用日志截断：只断言 Worker 进程自己的操作（前面用例的 create/flush/terminate 不属于本条）。
+            if (File.Exists(callLog)) File.Delete(callLog);
+            var fakeSshDir = AppContext.BaseDirectory;
+            if (!File.Exists(Path.Combine(fakeSshDir, "ssh.exe"))) throw new IOException("fake SSH not found: " + fakeSshDir);
+            var originalPath = Environment.GetEnvironmentVariable("PATH");
+            Environment.SetEnvironmentVariable("PATH", fakeSshDir + Path.PathSeparator + originalPath);
+            var workerProcesses = new List<Process>();
+            try
+            {
+                var cwd = Path.Combine(Store.Root, "r42-cwd"); Directory.CreateDirectory(cwd);
+                var authorityConfig = new Configuration { SchemaVersion = 2 };
+                authorityConfig.Draft.SchemaVersion = 2; authorityConfig.Draft.Revision = 3;
+                authorityConfig.Draft.Project = cwd; authorityConfig.Draft.DirectoryMode = "isolated";
+                authorityConfig.Draft.Slots = [new Slot { Enabled = true, AgentId = "pi" }];
+                Store.Save(Store.FilePath("configuration.json"), authorityConfig);
+                var initial = await Ipc.EnsureMonitorAsync();
+                Assert(initial.Ok, "Monitor start failed: " + initial.Message);
+                var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "r42-flush", cwd, PhysicalDirectory.Workspace(cwd), false,
+                    new CommandSpec("pi", ["hold=2"], "remote"), 0,
+                    // 远程工作目录必须是 Unix 路径且与 sync.RemotePath 一致（RemoteExecutionSpec.Validate）；
+                    // 模拟器按会话名匹配场景链路，BetaPath 仍是本地夹具 jy，与该名义远程目录解耦。
+                    RemoteExecution: Remote("jy.example.com", cwd, "/home/agent/work", Spec(jyName, cwd, "/home/agent/work"), ["hold=2"]));
+                var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), 16 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB);
+                var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [plan], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([plan]), DraftRevision: 3));
+                Assert(reserved.Ok, "reserve failed: " + reserved.Message);
+                WriteScenario(true, true, flushFails: true, jyAlpha: cwd);
+                var start = new ProcessStartInfo(Store.WorkerPath) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+                start.ArgumentList.Add("pane"); start.ArgumentList.Add(plan.Id.ToString());
+                start.Environment["AGENT_LAUNCHER_TEST_ROOT"] = Store.Root;
+                start.Environment["PATH"] = fakeSshDir + Path.PathSeparator + originalPath;
+                start.Environment["AGENT_LAUNCHER_FAKE_SYNC"] = "1";
+                start.Environment["AGENT_LAUNCHER_FAKE_SYNC_SCENARIO"] = scenarioPath;
+                var worker = Process.Start(start)!;
+                worker.StandardInput.Close();
+                workerProcesses.Add(worker);
+                var deadline = Stopwatch.StartNew();
+                while (deadline.Elapsed < TimeSpan.FromSeconds(60) && !File.Exists(Store.SyncFinalPath(plan.Id))) await Task.Delay(200);
+                Assert(File.Exists(Store.SyncFinalPath(plan.Id)), "Worker 未写 sync-final 回执");
+                var final = Store.Read<SyncFinalRecord>(Store.SyncFinalPath(plan.Id))!;
+                Assert(final.SchemaVersion == 1 && final.State == SyncFinalRecord.Problem, "flush 失败回执不是 problem：" + final.State);
+                Assert(final.Detail.Contains("已保留"), "problem 回执未说明会话保留");
+                Assert(File.Exists(Store.SyncSessionPath(plan.Id)), "flush 失败删掉了 sync-session.json");
+                var sessionRecord = Store.Read<SyncSessionRecord>(Store.SyncSessionPath(plan.Id))!;
+                Assert(sessionRecord.Name == jyName, "会话名证据丢失");
+                Assert(!CallsFor(jyName).Contains("terminate"), "Worker flush 失败仍 terminate");
+                Assert(!Calls().Contains("reset"), "出现未确认的 reset");
+                await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            }
+            finally
+            {
+                foreach (var w in workerProcesses) { try { if (!w.HasExited) w.Kill(true); } catch { } w.Dispose(); }
+                Environment.SetEnvironmentVariable("PATH", originalPath);
+                WriteScenario(true, true);
+            }
         });
 
         Console.WriteLine($"RESULT {evidence.Count} cases, {evidence.Count(e => e.GetType().GetProperty("passed")?.GetValue(e) is false)} failed. Artifacts: {testRoot}");

@@ -1090,7 +1090,7 @@ public partial class MainWindow : Window
             }
             error??=memoryLimitError??RemoteHost.ValidateMemoryLimitMib(memoryLimitMib);
             // 三台同权（2026-11-18 产品决定）：不同步的远程主机不构成同权，保存时拒收并说明改法。
-            if(syncMode==WorkspaceSyncMode.None)error="同步模式不能选 none：不同步时各机只看见自己的目录，改动不落回本机，不构成三台同权。请选择 mutagen 或 sshfs。";
+            if(syncMode==WorkspaceSyncMode.None)error=RemoteHostEditor.ValidateSyncMode(syncMode)!;
             if(error is not null){MessageBox.Show(window,error,caption,MessageBoxButton.OK,MessageBoxImage.Warning);return;}
             var updated=new RemoteHost(
                 Id:host?.Id??Guid.NewGuid(),

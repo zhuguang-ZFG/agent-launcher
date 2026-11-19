@@ -301,5 +301,34 @@ internal static class SyncReliabilityChecks
             assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession("", "D:\\fixture\\hub", "jy.example.com", "/home/agent/work") == null, "空 list 匹配到会话");
             assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "", "jy.example.com", "/home/agent/work") == null, "缺本地路径未拒绝");
         });
+
+        test("R41 None save and launch are rejected with readable equal-rights copy", () =>
+        {
+            // 保存侧共享文案（EditHost 使用同一函数；偏差：规格 §6 的「None 继续允许」已被 IMPLEMENTATION §92 拒收决定取代）。
+            var error = RemoteHostEditor.ValidateSyncMode(WorkspaceSyncMode.None);
+            assert(error is not null && error.Contains("同权") && error.Contains("mutagen") && error.Contains("sshfs"), "None 保存拒收文案缺少同权与改法：" + error);
+            assert(RemoteHostEditor.ValidateSyncMode(WorkspaceSyncMode.Mutagen) == null && RemoteHostEditor.ValidateSyncMode(WorkspaceSyncMode.SshfsMount) == null, "合法模式被拒收");
+            // 启动侧：WorkspacePreparer 对 None 主机拒收（与 RemoteExecutionChecks 的 F09/R23 断言同源，R41 独立复证）。
+            var temp = Path.Combine(Path.GetTempPath(), "AgentLauncher-tests-r41-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            try
+            {
+                var host = new RemoteHost(Guid.NewGuid(), "R41 VPS", "r41.example.com", 22, "root", "agent", ["pi"], null, WorkspaceSyncMode.None);
+                var configuration = new Configuration { SchemaVersion = 2, RemoteHosts = [host] };
+                var draft = new Draft
+                {
+                    SchemaVersion = 2,
+                    Project = temp,
+                    DirectoryMode = "isolated",
+                    Slots = [new Slot { Enabled = true, AgentId = "pi", RemoteHostId = host.Id, RemoteDirectory = "/home/agent/work" }]
+                };
+                var preparer = new AgentLauncher.Windows.WorkspacePreparer(Path.Combine(temp, "worktrees"));
+                var rejected = false;
+                try { preparer.PrepareAsync(draft, _ => { }, _ => Task.FromResult(false), default, configuration: configuration).GetAwaiter().GetResult(); }
+                catch (IOException e) { rejected = e.Message.Contains("同权"); }
+                assert(rejected, "None 主机启动未被拒收或错误缺少同权说明");
+            }
+            finally { Directory.Delete(temp, recursive: true); }
+        });
     }
 }
