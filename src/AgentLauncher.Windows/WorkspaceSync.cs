@@ -27,6 +27,24 @@ public static class WorkspaceSync
             _ => throw new ArgumentException($"未知的同步模式：{spec.Mode}")
         };
     }
+
+    // 创建参数（纯函数，便于回归）：三台同权新建会话用 two-way-safe——双方修改同一路径时保留冲突，
+    // 不自动选边（规格 2026-11-18 §5/§7）。已存在的 two-way-resolved 会话不批量迁移；
+    // 解析到该模式时当前状态最高未收敛（SyncReliability 状态机）。忽略列表保持现状，不扩大。
+    internal static string[] BuildCreateArguments(WorkspaceSyncSpec spec, RemoteExecutionSpec remote, string sessionName) =>
+    [
+        "sync", "create",
+        "--name", sessionName,
+        "--sync-mode", "two-way-safe",
+        "--ignore-vcs",  // 忽略 .git 目录
+        "--ignore", "node_modules/",
+        "--ignore", "bin/",
+        "--ignore", "obj/",
+        "--default-file-mode", "0664",
+        "--default-directory-mode", "0775",
+        spec.LocalPath,
+        MutagenSyncSession.MutagenEndpoint(remote, spec.RemotePath)
+    ];
 }
 
 // 工作区同步会话（生命周期管理）
@@ -84,22 +102,7 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         var daemonProcess = await EnsureMutagenDaemonAsync(cancellation,agentNewlyStarted);
         
         // 创建同步会话；Mutagen 以 AgentUser 连接并创建文件，与远程 agent 使用同一身份。
-        var createArgs = new[]
-        {
-            "sync", "create",
-            "--name", sessionName,
-            "--sync-mode", "two-way-resolved",  // 双向同步，冲突时保留两个版本
-            "--ignore-vcs",  // 忽略 .git 目录（避免冲突）
-            "--ignore", "node_modules/",  // 忽略 node_modules
-            "--ignore", "bin/",
-            "--ignore", "obj/",
-            "--default-file-mode", "0664",  // 文件权限：owner/group 可读写，other 可读
-            "--default-directory-mode", "0775",  // 目录权限：owner/group 可读写执行，other 可读执行
-            spec.LocalPath,
-            MutagenEndpoint(remote,spec.RemotePath)
-        };
-        
-        await RunMutagenCommandAsync(createArgs, cancellation);
+        await RunMutagenCommandAsync(WorkspaceSync.BuildCreateArguments(spec, remote, sessionName), cancellation);
         
         // Mutagen 已切到 AgentUser，不需要 root 权限修复。
         return new MutagenSyncSession(sessionName, spec.RemotePath, daemonProcess);

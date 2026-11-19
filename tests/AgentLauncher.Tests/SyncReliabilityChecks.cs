@@ -255,5 +255,51 @@ internal static class SyncReliabilityChecks
             assert(!clean.Contains("/home/agent"), "远程路径未脱敏");
             assert(SyncReliability.SanitizeErrorText("") == "", "空文本脱敏崩溃");
         });
+
+        test("R42 create arguments use two-way-safe and keep the exact ignore list", () =>
+        {
+            var spec = new WorkspaceSyncSpec(WorkspaceSyncMode.Mutagen, "D:\\fixture\\hub", "/home/agent/work", null, null);
+            var remote = new RemoteExecutionSpec("jy.example.com", 22, "root", "agent", "pi", "/home/agent/work", [], null, null, spec);
+            var args = AgentLauncher.Windows.WorkspaceSync.BuildCreateArguments(spec, remote, "agent-launcher-test0001");
+            var modeIndex = Array.IndexOf(args, "--sync-mode");
+            assert(modeIndex >= 0 && args[modeIndex + 1] == "two-way-safe", "新建会话不是 two-way-safe");
+            assert(!args.Contains("two-way-resolved"), "创建参数仍含 two-way-resolved");
+            // 忽略列表不扩大：--ignore-vcs + 恰好 node_modules/ bin/ obj/ 三个 --ignore。
+            var ignores = args.Where((a, i) => i > 0 && args[i - 1] == "--ignore").ToArray();
+            assert(args.Contains("--ignore-vcs") && ignores.SequenceEqual(new[] { "node_modules/", "bin/", "obj/" }), "忽略列表被扩大或缩小：" + string.Join(",", ignores));
+            // 本地路径在前（alpha=本机），远程端点在后，名字精确。
+            assert(args[^2] == "D:\\fixture\\hub" && args[^1] == "agent@jy.example.com:22:/home/agent/work", "端点顺序或形状错误：" + args[^1]);
+            assert(args[0] == "sync" && args[1] == "create" && args[Array.IndexOf(args, "--name") + 1] == "agent-launcher-test0001", "create 命令形状错误");
+        });
+
+        test("R43 probe is a single read-only long list without flush reset or ssh", () =>
+        {
+            var all = AgentLauncher.Windows.WorkspaceInsights.BuildListArguments(null);
+            assert(all.SequenceEqual(new[] { "sync", "list", "--long" }), "全量探针参数错误：" + string.Join(" ", all));
+            var named = AgentLauncher.Windows.WorkspaceInsights.BuildListArguments("agent-launcher-test0001");
+            assert(named.SequenceEqual(new[] { "sync", "list", "--long", "agent-launcher-test0001" }), "命名探针参数错误");
+            foreach (var args in new[] { all, named })
+                assert(!args.Any(a => a is "flush" or "reset" or "terminate" or "create" or "pause" or "resume"), "诊断参数混入写操作");
+        });
+
+        test("R42 sync session interface exposes no unconfirmed reset pause resume", () =>
+        {
+            var methods = typeof(AgentLauncher.Windows.IWorkspaceSyncSession).GetMethods().Select(m => m.Name).ToArray();
+            assert(!methods.Any(n => n is "Reset" or "Pause" or "Resume"), "会话接口暴露了未确认的 reset/pause/resume：" + string.Join(",", methods));
+        });
+
+        test("R34 FindSyncSession matches by name then endpoints and parses mode", () =>
+        {
+            var jy = Session("agent-launcher-jy0001", "Two Way Safe", "Watching for changes");
+            var aliyun = Session("agent-launcher-aly0002", "Two Way Safe", "Watching for changes").Replace("jy.example.com", "aly.example.com");
+            var output = jy + aliyun;
+            var named = AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "jy.example.com", "/home/agent/work", "agent-launcher-jy0001");
+            assert(named is { Name: "agent-launcher-jy0001" } && named.Value.Session.SyncMode == "two-way-safe", "命名匹配失败");
+            var byEndpoint = AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "aly.example.com", "/home/agent/work");
+            assert(byEndpoint is { Name: "agent-launcher-aly0002" }, "端点匹配失败");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "D:\\fixture\\hub", "jy.example.com", "/home/agent/work", "agent-launcher-missing") == null, "不存在的名字被匹配");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession("", "D:\\fixture\\hub", "jy.example.com", "/home/agent/work") == null, "空 list 匹配到会话");
+            assert(AgentLauncher.Windows.WorkspaceInsights.FindSyncSession(output, "", "jy.example.com", "/home/agent/work") == null, "缺本地路径未拒绝");
+        });
     }
 }
