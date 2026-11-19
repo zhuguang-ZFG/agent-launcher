@@ -38,10 +38,13 @@ public sealed class SshRunnerBackend : IDisposable
         var innerCmd = $"{attemptPrefix}trap '' HUP; export NODE_OPTIONS=--max-old-space-size=1024; cd {RemoteWorkspaceMappingHelper.ShellDirectory(spec.RemoteWorkingDirectory)} && {agentCmd}";
         // 远程内存上限（规格 2026-11-19）：systemd transient scope 包裹内层命令，agent 及其后代落入同一 cgroup。
         // 守卫先确认远程有 systemd-run，缺失即以可读错误退出（fail-closed）；无上限时与从前完全一致。
-        // su 与 sh 层都在 scope 之内：scope 是它们的父进程，cgroup 覆盖整个 agent 进程树。
-        var suLayer = spec.AgentUser==spec.SshUser ? $"sh -c {SshRemoteCommand.QuoteDouble(innerCmd)}" : SshRemoteCommand.WrapSu(spec.AgentUser, innerCmd);
+        // 关键：scope 内不能用 su -——pam_systemd 会把进程迁到独立 session scope，使 MemoryMax 失效（实测 agent cgroup memory.max=max）。
+        // 改用 systemd-run --uid/--gid 直接以 agent 身份在 scope 内执行 sh：systemd 正确设置 HOME/USER/LOGNAME，pi 在系统 PATH，cgroup 覆盖整个 agent 进程树。
+        // 同用户（非 root）场景不带 --uid/--gid：systemd-run --scope 本身被 polkit 拒收（R45 nonroot 判据）。
+        var shLayer = $"sh -c {SshRemoteCommand.QuoteDouble(innerCmd)}";
+        var scopeUser = spec.AgentUser==spec.SshUser ? "" : $"--uid={spec.AgentUser} --gid={spec.AgentUser} ";
         var remoteCmd = spec.MemoryLimitBytes is { } maxBytes
-            ? $"if ! command -v systemd-run >/dev/null 2>&1; then echo '远程内存上限需要 systemd（systemd-run）；当前远程主机不可用，未启动 agent。' >&2; exit 97; fi; systemd-run --scope -p MemoryMax={maxBytes} {suLayer}"
+            ? $"if ! command -v systemd-run >/dev/null 2>&1; then echo '远程内存上限需要 systemd（systemd-run）；当前远程主机不可用，未启动 agent。' >&2; exit 97; fi; systemd-run --scope -p MemoryMax={maxBytes} {scopeUser}-- {shLayer}"
             : (spec.AgentUser==spec.SshUser ? innerCmd : SshRemoteCommand.WrapSu(spec.AgentUser, innerCmd));
         return new SshRunnerBackend { Spec = spec, StartInfo = CreateStartInfo(spec, remoteCmd) };
     }
