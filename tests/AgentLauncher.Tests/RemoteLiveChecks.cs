@@ -6,6 +6,7 @@ using AgentLauncher.Windows;
 // 真实 VPS 全链路验收（opt-in，不进 CI）：真实 planner → monitor reserve/begin → Worker pane → 真实 ssh → su agent → pi。
 // 用法：--remote-live <address> <sshUser> <agentUser> <remoteDir> <keyPath|-> <argsJson> <timeoutSeconds>
 // R45：--remote-live-memory <address> <sshUser> <agentUser> <remoteDir> <keyPath|-> <scope|oom|nonroot> <memoryLimitMib> <timeoutSeconds>
+// R33：--remote-live-reattach <address> <sshUser> <agentUser> <remoteDir> <keyPath|-> <timeoutSeconds>
 // 要求：全新隔离 AGENT_LAUNCHER_TEST_ROOT（含 AgentLauncher-tests-）；PATH 上是真实 ssh（不注入 fake）；
 // 不要设置 AGENT_LAUNCHER_FAKE_SAMPLE（用真实资源读数做准入）。远程目录需已存在且 agent 用户可写。
 internal static class RemoteLiveChecks
@@ -280,11 +281,13 @@ internal static class RemoteLiveChecks
     {
         public readonly List<object> Items = [];
         public bool SawStarted;
+        public bool SawTerminal;
         private string? last;
         public void Observe(ControlEntry? entry)
         {
             if (entry is null) return;
             if (entry.State == "Started") SawStarted = true;
+            if (Store.IsTerminal(entry)) SawTerminal = true;
             if (entry.State == last) return;
             Items.Add(new { at = DateTimeOffset.UtcNow, state = entry.State, detail = entry.Detail });
             Console.WriteLine($"STATE {entry.State}: {entry.Detail}");
@@ -534,6 +537,210 @@ internal static class RemoteLiveChecks
         };
         Store.Save(Path.Combine(Store.Root, "remote-live-memory-results.json"), evidence);
         Console.WriteLine((ok ? "PASS" : "FAIL") + $" live memory {scenario}: started={sawStarted}, memoryMax={memoryMax ?? "none"}, oomKill={oomKill}, heartbeatGrew={heartbeatGrew}, final={finalEntry?.State ?? "timeout"}, probe={finalProbe}");
+        KillMonitor();
+        run.Worker.Dispose();
+        return ok ? 0 : 1;
+    }
+
+    private static string? ReceiptText(Guid id) => File.Exists(Store.ReceiptPath(id)) ? File.ReadAllText(Store.ReceiptPath(id)) : null;
+
+    // R33 活测：--remote-live-reattach <address> <sshUser> <agentUser> <remoteDir> <keyPath|-> <timeoutSeconds>
+    // 真实断线（杀远端会话 sshd，不杀 agent）→ 探针 ALIVE → 未确认拒 → 确认挂接 → proof 字节 → pid 不变 → 释放后 Settled。
+    public static async Task<int> RunReattachAsync(string address, string sshUser, string agentUser, string remoteDir, string keyPath, string timeoutText)
+    {
+        var (timeoutSeconds, key) = GuardLiveRun(keyPath, timeoutText);
+        var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["pi"], key, WorkspaceSyncMode.Mutagen);
+        string[] arguments = ["-p", "-a", "--no-session", HeartbeatPrompt];
+        var run = await StartLiveAsync(host, remoteDir, arguments);
+        var log = new TransitionLog();
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        await WaitEntryAsync(run.Plan.Id, deadline, log, e => e.State == "Started" || Store.IsTerminal(e) || (log.SawStarted && e.State == "Disconnected"));
+        var sawStarted = log.SawStarted;
+        var nonce = Guid.NewGuid().ToString("N");
+        var proofMarker = "REATTACH_PROOF_" + nonce;
+        string? agentPidBefore = null, agentPidAfter = null;
+        var localSshPid = 0;
+        var (hbFirst, hbSecond, hbGrew) = (0, 0, false);
+        var (hbDiscFirst, hbDiscSecond, hbDiscGrew) = (0, 0, false);
+        var (hbFinalFirst, hbFinalSecond, hbFinalGrew) = (0, 0, false);
+        var disconnectOk = false;
+        int? sshExitCode = null, workerExit = null, attachWorkerExit = null;
+        var sshdKillOutput = ""; var probeAliveOutput = ""; var probeAlive = "";
+        var unconfirmedRejected = false; var unconfirmedMessage = "";
+        Response? confirmed = null;
+        var reattachEvidenceOk = false; var reattachEvidence = "";
+        var attachStarted = false; var attachEndedDisconnected = false;
+        var proofOk = false; var proofContent = "";
+        var attachStdoutText = ""; var attachStderrText = "";
+        string? receiptDisconnected = null, receiptAfterAttach = null;
+        string? flowError = null;
+        Process? attachWorker = null;
+        try
+        {
+            if (!sawStarted) throw new IOException("条目未进入 Started，无法进行断线重新挂接验收。");
+            (hbFirst, hbSecond, hbGrew) = await HeartbeatGrowthAsync(address, sshUser, key, remoteDir, deadline);
+            while (DateTime.UtcNow < deadline && agentPidBefore is null)
+            {
+                agentPidBefore = await FindAgentPidAsync(address, 22, sshUser, key, run.Plan.Id, 20);
+                if (agentPidBefore is null) await Task.Delay(500);
+            }
+            if (agentPidBefore is null) throw new IOException("未找到本次 attempt 的远端进程，无法模拟断线。");
+            localSshPid = Store.Read<Receipt>(Store.ReceiptPath(run.Plan.Id))?.Pid ?? 0;
+            // 模拟断线：沿 agent pid 的 PPid 链向上找首个 sshd 并杀之（只断会话，不杀 agent 本身）。
+            var killSshd = "p=" + agentPidBefore + "; hops=0; while [ \"$p\" -gt 1 ] && [ \"$hops\" -lt 64 ]; do p=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null); [ -z \"$p\" ] && break; hops=$((hops+1)); c=$(cat /proc/$p/comm 2>/dev/null); if [ \"$c\" = sshd ]; then echo SSHD_PID=$p; kill $p; echo KILL_EXIT=$?; exit 0; fi; done; echo SSHD_NOT_FOUND; exit 1";
+            var (_, killOut, killErr) = await SshAsync(address, 22, sshUser, key, killSshd, 30);
+            sshdKillOutput = killOut + (killErr.Length > 0 ? "\n" + killErr : "");
+            Console.WriteLine("SSHD " + sshdKillOutput.Trim());
+            var disconnected = await WaitEntryAsync(run.Plan.Id, deadline, log, e => e.State == "Disconnected" || Store.IsTerminal(e));
+            var receipt = Store.Read<Receipt>(Store.ReceiptPath(run.Plan.Id));
+            sshExitCode = receipt?.ExitCode;
+            receiptDisconnected = ReceiptText(run.Plan.Id);
+            var (_, _, exit) = await StopWorkerAsync(run, 30);
+            workerExit = exit;
+            disconnectOk = disconnected?.State == "Disconnected" && sshExitCode == 255 && workerExit == 255;
+            if (!disconnectOk) Console.WriteLine($"FAIL disconnect shape: state={disconnected?.State}, receiptExit={sshExitCode?.ToString() ?? "none"}, workerExit={workerExit?.ToString() ?? "none"}");
+            if (disconnected?.State != "Disconnected") throw new IOException("断线后条目不是 Disconnected，实际：" + (disconnected?.State ?? "timeout"));
+            // 断线后探针：trap '' HUP 生效 → ALIVE；heartbeat 继续增长。
+            var (probeExit, probeOut, probeErr) = await SshAsync(address, 22, sshUser, key, RemoteReattach.ProbeShell(run.Plan.Id), 20);
+            probeAliveOutput = probeOut + (probeErr.Length > 0 ? "\n" + probeErr : "");
+            probeAlive = RemoteReattach.ClassifyProbe(probeExit, probeExit == -1, probeOut);
+            (hbDiscFirst, hbDiscSecond, hbDiscGrew) = await HeartbeatGrowthAsync(address, sshUser, key, remoteDir, deadline);
+            // 负路径：未确认必须拒绝，账本仍 Disconnected，无 operator-reattach.json。
+            var unconfirmed = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: run.Plan.Id, Reattach: new OperatorReattach(false)));
+            unconfirmedMessage = unconfirmed.Message;
+            var afterUnconfirmed = await EntryAsync(run.Plan.Id);
+            log.Observe(afterUnconfirmed);
+            unconfirmedRejected = !unconfirmed.Ok && afterUnconfirmed?.State == "Disconnected" && !File.Exists(Store.OperatorReattachPath(run.Plan.Id));
+            // 正路径：确认后 SendAsync 内部自动 reattach-poll；成功 → Reattaching + operator-reattach.json。
+            confirmed = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: run.Plan.Id, Reattach: new OperatorReattach(true)));
+            var afterConfirmed = await EntryAsync(run.Plan.Id);
+            log.Observe(afterConfirmed);
+            if (File.Exists(Store.OperatorReattachPath(run.Plan.Id))) reattachEvidence = File.ReadAllText(Store.OperatorReattachPath(run.Plan.Id));
+            var record = Store.Read<OperatorReattachRecord>(Store.OperatorReattachPath(run.Plan.Id));
+            reattachEvidenceOk = confirmed.Ok && afterConfirmed?.State == "Reattaching" && record is { Confirmed: true, Probe: "ALIVE" } && record.AttemptId == run.Plan.Id;
+            if (!reattachEvidenceOk) throw new IOException("确认重新挂接未成立：" + confirmed.Message + "，状态：" + (afterConfirmed?.State ?? "none"));
+            // 挂接窗格：stdin 保持打开；煮熟模式需要 \r（§90）。先写 proof 再 exit，不重启 agent。
+            var attachStart = new ProcessStartInfo(Store.WorkerPath)
+            {
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+                StandardOutputEncoding = new System.Text.UTF8Encoding(false), StandardErrorEncoding = new System.Text.UTF8Encoding(false)
+            };
+            attachStart.ArgumentList.Add("pane");
+            attachStart.ArgumentList.Add(run.Plan.Id.ToString());
+            attachStart.ArgumentList.Add("reattach");
+            attachStart.Environment["AGENT_LAUNCHER_TEST_ROOT"] = Store.Root;
+            attachWorker = Process.Start(attachStart)!;
+            var attachStdout = attachWorker.StandardOutput.ReadToEndAsync();
+            var attachStderr = attachWorker.StandardError.ReadToEndAsync();
+            var attached = await WaitEntryAsync(run.Plan.Id, deadline, log, e => e.State is "Started" or "Disconnected" || Store.IsTerminal(e));
+            attachStarted = attached?.State == "Started";
+            if (attachStarted)
+            {
+                await attachWorker.StandardInput.WriteAsync("echo " + proofMarker + " > reattach-proof.txt\r");
+                await attachWorker.StandardInput.FlushAsync();
+                await Task.Delay(2000);
+                await attachWorker.StandardInput.WriteAsync("exit\r");
+                await attachWorker.StandardInput.FlushAsync();
+            }
+            try { await attachWorker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60)); }
+            catch (TimeoutException) { try { attachWorker.Kill(); attachWorker.WaitForExit(5000); } catch { } }
+            try { attachWorker.StandardInput.Close(); } catch { }
+            attachWorkerExit = attachWorker.HasExited ? attachWorker.ExitCode : null;
+            attachStdoutText = await attachStdout; attachStderrText = await attachStderr;
+            File.WriteAllText(Path.Combine(Store.Root, "reattach-worker-stdout.txt"), attachStdoutText);
+            File.WriteAllText(Path.Combine(Store.Root, "reattach-worker-stderr.txt"), attachStderrText);
+            var ended = await WaitEntryAsync(run.Plan.Id, deadline, log, e => e.State == "Disconnected" || Store.IsTerminal(e));
+            attachEndedDisconnected = ended?.State == "Disconnected";
+            receiptAfterAttach = ReceiptText(run.Plan.Id);
+            // 核验：proof 字节、agent pid 不变（没有重启 agent）、heartbeat 仍在增长。
+            var (_, proof, proofErr) = await SshAsync(address, 22, sshUser, key, "cat " + RemoteFile(remoteDir, "reattach-proof.txt") + " 2>/dev/null", 20);
+            proofContent = proof + (proofErr.Length > 0 ? "\n" + proofErr : "");
+            proofOk = proof.Contains(proofMarker);
+            agentPidAfter = await FindAgentPidAsync(address, 22, sshUser, key, run.Plan.Id, 20);
+            (hbFinalFirst, hbFinalSecond, hbFinalGrew) = await HeartbeatGrowthAsync(address, sshUser, key, remoteDir, deadline);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            flowError = e.ToString();
+            Console.WriteLine("FLOW ERROR " + e.Message);
+        }
+        // 收尾：杀 token 进程树 → 条目回 Disconnected → 探针 GONE 才确认释放 → Settled；杀 monitor；写证据。
+        var neverTerminalEarly = !log.SawTerminal;
+        var pidUnchanged = agentPidBefore is not null && agentPidAfter == agentPidBefore;
+        var (killOutput, finalProbe) = await KillAttemptTreeAsync(address, sshUser, key, run.Plan.Id);
+        await StopWorkerAsync(run, 30);
+        if (attachWorker is not null)
+        {
+            try { if (!attachWorker.HasExited) { attachWorker.Kill(); attachWorker.WaitForExit(5000); } } catch { }
+            attachWorker.Dispose();
+        }
+        var finalEntry = await EntryAsync(run.Plan.Id);
+        log.Observe(finalEntry);
+        Response? releaseResponse = null;
+        if (finalEntry is not null && finalEntry.State is "Disconnected" or "Reattaching" && finalProbe == "gone")
+        {
+            releaseResponse = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: run.Plan.Id, Release: new OperatorRelease("Gone", "live fixture cleanup", true)));
+            finalEntry = await EntryAsync(run.Plan.Id);
+            log.Observe(finalEntry);
+        }
+        var settled = releaseResponse?.Ok == true && finalEntry?.State == "Settled";
+        var ok = flowError is null && sawStarted && hbGrew && disconnectOk && probeAlive == "alive" && hbDiscGrew
+            && unconfirmedRejected && confirmed?.Ok == true && reattachEvidenceOk && attachStarted && attachWorkerExit == 0
+            && attachEndedDisconnected && proofOk && pidUnchanged && hbFinalGrew && neverTerminalEarly && settled;
+        var evidence = new
+        {
+            host = address,
+            sshUser,
+            agentUser,
+            remoteDir,
+            arguments,
+            planId = run.Plan.Id,
+            nonce,
+            sawStarted,
+            finalState = finalEntry?.State,
+            finalDetail = finalEntry?.Detail,
+            transitions = log.Items,
+            localSshPid,
+            agentPidBefore,
+            agentPidAfter,
+            pidUnchanged,
+            sshdKillOutput,
+            sshExitCode,
+            workerExitCode = workerExit,
+            disconnectOk,
+            receiptDisconnected,
+            probeAlive,
+            probeAliveOutput,
+            heartbeatBefore = new { first = hbFirst, second = hbSecond, grew = hbGrew },
+            heartbeatAfterDisconnect = new { first = hbDiscFirst, second = hbDiscSecond, grew = hbDiscGrew },
+            heartbeatAfterReattach = new { first = hbFinalFirst, second = hbFinalSecond, grew = hbFinalGrew },
+            unconfirmedRejected,
+            unconfirmedMessage,
+            confirmedOk = confirmed?.Ok,
+            confirmedMessage = confirmed?.Message,
+            reattachEvidenceOk,
+            reattachEvidence,
+            attachStarted,
+            attachWorkerExit,
+            attachEndedDisconnected,
+            receiptAfterAttach,
+            proofMarker,
+            proofContent,
+            proofOk,
+            neverTerminalEarly,
+            killOutput,
+            finalProbe,
+            releaseOk = releaseResponse?.Ok,
+            releaseMessage = releaseResponse?.Message,
+            settled,
+            flowError,
+            attachWorkerStdout = attachStdoutText,
+            attachWorkerStderr = attachStderrText,
+            passed = ok
+        };
+        Store.Save(Path.Combine(Store.Root, "remote-live-reattach-results.json"), evidence);
+        Console.WriteLine((ok ? "PASS" : "FAIL") + $" live reattach: disconnect255={disconnectOk}, probe={probeAlive}, unconfirmedRejected={unconfirmedRejected}, proof={proofOk}, pidUnchanged={pidUnchanged}, settled={settled}, final={finalEntry?.State ?? "timeout"}");
         KillMonitor();
         run.Worker.Dispose();
         return ok ? 0 : 1;

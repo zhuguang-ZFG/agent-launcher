@@ -47,6 +47,7 @@ if(args is ["--remote-host-editor-checks"]){var editorFailures=0;void EditorTest
 if(args is ["--remote-startup-e2e"])return await RemoteE2EIntegration.RunAsync();
 if(args is ["--remote-live",var liveHost,var liveSshUser,var liveAgentUser,var liveDir,var liveKey,var liveArgs,var liveTimeout])return await RemoteLiveChecks.RunAsync(liveHost,liveSshUser,liveAgentUser,liveDir,liveKey,liveArgs,liveTimeout);
 if(args is ["--remote-live-memory",var memHost,var memSshUser,var memAgentUser,var memDir,var memKey,var memScenario,var memMib,var memTimeout])return await RemoteLiveChecks.RunMemoryAsync(memHost,memSshUser,memAgentUser,memDir,memKey,memScenario,memMib,memTimeout);
+if(args is ["--remote-live-reattach",var reHost,var reSshUser,var reAgentUser,var reDir,var reKey,var reTimeout])return await RemoteLiveChecks.RunReattachAsync(reHost,reSshUser,reAgentUser,reDir,reKey,reTimeout);
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
 if(args is ["--allocate-hold",var holdMib,var holdMs]) return MemoryFixture.AllocateHold(int.Parse(holdMib),int.Parse(holdMs));
 if(args is ["--memory-cycle",var memoryPrefix]) return MemoryFixture.Cycle(memoryPrefix);
