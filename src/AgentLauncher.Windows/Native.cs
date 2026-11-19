@@ -44,12 +44,16 @@ public static class Native
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInfo info);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
     [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int which);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
+    // R30 同类防漏（2026-11-19）：.NET Process.Start 无法阻止子进程继承本进程 std 管道写端（实测 redirect/plain 两态都继承），
+    // 长命守护（job-custody/monitor）派生瞬间清继承位、CreateProcess 同步返回后立即恢复——窗口只有一次调用，无竞态。
+    public static void ClearStdInherit(){foreach(var handle in new[]{GetStdHandle(-11),GetStdHandle(-12)})SetHandleInformation(handle,1,0);}
+    public static void RestoreStdInherit(){foreach(var handle in new[]{GetStdHandle(-11),GetStdHandle(-12)})SetHandleInformation(handle,1,1);}
     // 只用于诊断：有无控制台窗口决定 ConPTY 场景该在哪启动，不参与产品逻辑。
     [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
     [DllImport("kernel32.dll",SetLastError=true)] public static extern bool GetConsoleMode(IntPtr handle,out uint mode);
     [DllImport("kernel32.dll",SetLastError=true)] public static extern bool SetConsoleMode(IntPtr handle,uint mode);
     [DllImport("kernel32.dll")] public static extern void SetLastError(uint error);
-    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref SecurityAttributes attributes, uint size);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool TerminateJobObject(SafeFileHandle job, uint code);
     // 已在本机 Windows SDK 10.0.26100 的 WinBase.h 核对：ProcThreadAttributePseudoConsole = 22，

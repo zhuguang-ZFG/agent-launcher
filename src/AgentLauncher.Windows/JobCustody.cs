@@ -30,9 +30,11 @@ public static class JobCustody
             try{await pipe.ConnectAsync(connect.Token);}
             catch(OperationCanceledException)when(!deadline.IsCancellationRequested)
             {
+                // 守护进程活得比派生者久：派生瞬间清 std 继承位（R30 同类），防守护握住派生者的管道让日志泵等不到 EOF。
                 var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden};start.ArgumentList.Add("job-custody");
-                using var process=Process.Start(start)??throw new IOException("无法启动资源句柄守护进程。");
-                await pipe.ConnectAsync(deadline.Token);
+                Native.ClearStdInherit();
+                try{using var process=Process.Start(start)??throw new IOException("无法启动资源句柄守护进程。");await pipe.ConnectAsync(deadline.Token);}
+                finally{Native.RestoreStdInherit();}
             }
         }
         await Ipc.WriteAsync(pipe,new KeepRequest(plan.Id,plan.PoolId,Store.BootId()),deadline.Token);

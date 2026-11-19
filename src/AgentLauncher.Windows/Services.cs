@@ -240,7 +240,10 @@ public static class Ipc
         var log=Environment.GetEnvironmentVariable("AGENT_LAUNCHER_MONITOR_SPAWN_LOG");
         if(!string.IsNullOrEmpty(log))File.AppendAllText(log,"monitor\n");
 #endif
-        using var p=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});
+        // 监视器活得比派生者久：派生瞬间清 std 继承位（R30 同类），防监视器握住派生者的管道让日志泵等不到 EOF。
+        Native.ClearStdInherit();
+        try{using var p=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});}
+        finally{Native.RestoreStdInherit();}
     }
 }
 public static partial class Commands
