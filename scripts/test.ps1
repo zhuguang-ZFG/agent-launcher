@@ -4,6 +4,8 @@ $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtime=[IO.Path]::GetFullPath($RuntimeDirectory)
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
+& dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release -- --sync-review-checks
+if($LASTEXITCODE -ne 0){throw 'Sync review checks failed'}
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.TerminalModel.Tests/AgentLauncher.TerminalModel.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Embedded terminal model tests failed'}
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.ManualRelay.Tests/AgentLauncher.ManualRelay.Tests.csproj') -c Release

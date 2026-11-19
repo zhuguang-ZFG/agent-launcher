@@ -261,6 +261,7 @@ Test("P02 Job memory evidence survives child exit and never invents crash cause"
 IdleWorkingSetChecks.Run(Test,Assert);
 SlotConvenienceChecks.Run(Test,Assert);
 AgentLauncher.Tests.RemoteExecutionChecks.Run(Test,Assert);
+AgentLauncher.Tests.SyncReliabilityChecks.Run(Test,Assert);
 AgentLauncher.Tests.RemoteHostEditorChecks.Run(Test,Assert);
 Test("W1 idle working-set trim reclaims physical and preserves data on page-in",()=>{
  using var root=new Job(@"Local\AL-trim-root-"+Guid.NewGuid(),root:true);using var job=new Job(@"Local\AL-trim-child-"+Guid.NewGuid(),512*ResourcePolicy.MiB);
