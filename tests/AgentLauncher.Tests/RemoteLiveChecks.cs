@@ -664,11 +664,13 @@ Do nothing else before or after.";
             sshdKillOutput = killOut + (killErr.Length > 0 ? "\n" + killErr : "");
             Console.WriteLine("SSHD " + sshdKillOutput.Trim());
             var disconnected = await WaitEntryAsync(run.Plan.Id, deadline, log, e => e.State == "Disconnected" || Store.IsTerminal(e));
+            // 先等 pane worker 自然退出再读回执：ssh 255 → worker 写 Disconnected(255) 回执后才 return 255。
+            // 若先读回执，control.json 已 Disconnected 而回执尚未从 Started 落盘，会读到 ExitCode=null（实测竞态）。
+            var (_, _, exit) = await StopWorkerAsync(run, 30);
+            workerExit = exit;
             var receipt = Store.Read<Receipt>(Store.ReceiptPath(run.Plan.Id));
             sshExitCode = receipt?.ExitCode;
             receiptDisconnected = ReceiptText(run.Plan.Id);
-            var (_, _, exit) = await StopWorkerAsync(run, 30);
-            workerExit = exit;
             disconnectOk = disconnected?.State == "Disconnected" && sshExitCode == 255 && workerExit == 255;
             if (!disconnectOk) Console.WriteLine($"FAIL disconnect shape: state={disconnected?.State}, receiptExit={sshExitCode?.ToString() ?? "none"}, workerExit={workerExit?.ToString() ?? "none"}");
             if (disconnected?.State != "Disconnected") throw new IOException("断线后条目不是 Disconnected，实际：" + (disconnected?.State ?? "timeout"));
