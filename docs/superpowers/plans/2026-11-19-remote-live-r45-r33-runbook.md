@@ -79,7 +79,7 @@ $env:AGENT_LAUNCHER_TEST_ROOT="D:\Users\pj\agent-launcher\artifacts\remote-live-
 | --- | --- |
 | scope | 条目 Started；agent 所在 cgroup 的 `memory.max` 精确等于 512×1024×1024；`heartbeat.txt` 两次采样（间隔 6 秒）行数增长 |
 | oom | 条目 Started；`memory.max` 精确相等；scope 的 `memory.events` `oom_kill`≥1（python3 是否已死仅记录，不作判据） |
-| nonroot | 条目到达终态；Detail/回执/worker-stderr 含 `Access denied` 或 `Failed to start transient scope unit`（大小写不敏感）；远端无本次 agent（token 探针 GONE 且 `pgrep -f 'pi -p'` 为空）；`heartbeat.txt` 从未创建 |
+| nonroot | 条目到达终态；Detail/回执/worker-stdout/worker-stderr 含 `Access denied` 或 `Failed to start transient scope unit`（大小写不敏感；远端终端输出经 pane worker 转发，实际落在 **worker-stdout**，polkit 无 tty 代理时文案为 `Failed to start transient scope unit: Connection timed out`）；远端无本次 agent（token 探针 GONE 且 `pgrep -f 'pi -p'` 为空）；`heartbeat.txt` 从未创建 |
 | reattach | 杀会话 sshd 后本地 ssh 退出码 255 且条目 Disconnected；断线后探针 ALIVE 且 heartbeat 继续增长；未确认 reattach 被拒（账本不变、无 operator-reattach.json）；确认后 Reattaching + operator-reattach.json；挂接窗格写入的 proof 文件含 nonce；agent pid 与断线前相同（未重启 agent）；heartbeat 仍在增长；全程条目非终态占名额；释放后 Settled |
 
 说明（与计划的一处偏差，按代码现实）：产品语义里 `Started` 回执在**本地 ssh 启动**即写（远端命令尚未执行），nonroot 被拒前可能短暂出现 Started。因此「agent 从未运行」用 attempt 级证据判定：token 探针 GONE + pgrep 为空 + heartbeat.txt 从未创建 + 终态 + 拒绝文案；`sawStarted` 原样记录在证据里供核对。

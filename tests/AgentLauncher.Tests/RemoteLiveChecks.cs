@@ -562,7 +562,8 @@ Do nothing else before or after.";
         {
             // 产品语义：Started 回执在本地 ssh 启动即写（远端命令尚未执行），nonroot 拒绝前可能短暂出现 Started。
             // 「agent 从未运行」以 attempt 级证据判定：token 探针 GONE + pgrep 无 pi + heartbeat.txt 从未创建 + 终态 + systemd 拒绝文案。
-            var text = (finalEntry?.Detail ?? "") + "\n" + (receipt ?? "") + "\n" + stderrText;
+            // 远端终端输出（含 systemd/polkit 拒绝文案）经 pane worker 转发到 worker-stdout，不在 Detail/回执/worker-stderr，故一并搜索。
+            var text = (finalEntry?.Detail ?? "") + "\n" + (receipt ?? "") + "\n" + stderrText + "\n" + stdoutText;
             var rejection = text.Contains("Access denied", StringComparison.OrdinalIgnoreCase) || text.Contains("Failed to start transient scope unit", StringComparison.OrdinalIgnoreCase);
             ok = finalEntry is not null && Store.IsTerminal(finalEntry) && rejection && finalProbe == "gone" && pgrepOutput.Trim().Length == 0 && heartbeatProbe == "HEARTBEAT_ABSENT";
         }
