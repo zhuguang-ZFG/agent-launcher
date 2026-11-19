@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
@@ -47,9 +48,11 @@ internal static class RemoteLiveChecks
         foreach (var other in configuration.Draft.Slots.Skip(1)) other.Enabled = false;
         Store.Save(Store.FilePath("configuration.json"), configuration);
 
-        var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), 16 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB);
         var initial = await Ipc.EnsureMonitorAsync();
         if (!initial.Ok) throw new IOException("Monitor start failed: " + initial.Message);
+        // monitor 用真实系统读数算策略哈希；硬编码 16/32 GiB 在提交限额不同的机器上会被 reserve 拒绝。
+        if (initial.Memory is null) throw new IOException("Monitor did not report a memory sample.");
+        var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), initial.Memory.Total, initial.Memory.CommitLimit);
 
         var preparer = new WorkspacePreparer(Path.Combine(Store.Root, "worktrees"));
         var plans = await preparer.PrepareAsync(configuration.Draft, _ => { }, _ => Task.FromResult(false), CancellationToken.None, configuration: configuration);
@@ -195,9 +198,15 @@ Do nothing else before or after.";
         return (timeoutSeconds, key);
     }
 
+    // 活测阶段日志：带 UTC 时间戳，定位卡点；控制台 UTF-8 避免中文乱码。
+    private static void Step(string name) => Console.WriteLine($"STEP {DateTimeOffset.UtcNow:HH:mm:ss} {name}");
+    private static void LiveConsole() { try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { } }
+
     // 独立核验连接：真实 ssh + ArgumentList，UTF-8 无 BOM 读取，超时 Kill 整树并以 exit=-1 标记超时（不冒充远端退出码）。
     public static async Task<(int exit, string stdout, string stderr)> SshAsync(string address, int port, string user, string? key, string remoteCommand, int timeoutSeconds)
     {
+        var watch = Stopwatch.StartNew();
+        Step("ssh begin: " + (remoteCommand.Length > 60 ? remoteCommand[..60] : remoteCommand));
         var psi = new ProcessStartInfo("ssh")
         {
             UseShellExecute = false, CreateNoWindow = true,
@@ -212,8 +221,8 @@ Do nothing else before or after.";
         psi.ArgumentList.Add(remoteCommand);
         using var process = Process.Start(psi)!;
         process.StandardInput.Close();
-        var stdout = process.StandardOutput.ReadToEndAsync();
-        var stderr = process.StandardError.ReadToEndAsync();
+        var stdout = new PipeCapture(process.StandardOutput);
+        var stderr = new PipeCapture(process.StandardError);
         var timedOut = false;
         try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(timeoutSeconds)); }
         catch (TimeoutException)
@@ -222,7 +231,10 @@ Do nothing else before or after.";
             try { process.Kill(true); } catch { }
             try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
         }
-        return (timedOut ? -1 : process.ExitCode, await stdout, await stderr);
+        Step($"ssh exited={(timedOut ? "timeout-killed" : process.ExitCode.ToString())} elapsed={watch.Elapsed.TotalSeconds:F1}s, reading streams");
+        var result = (timedOut ? -1 : process.ExitCode, await stdout.DrainAsync(5), await stderr.DrainAsync(5));
+        Step("ssh end exit=" + result.Item1);
+        return result;
     }
 
     // 复用 Core 探针：ProbeShell 命中后 $envf 即 /proc/<pid>/environ，追加一段输出 PID，不复制扫描逻辑、不改 Core。
@@ -239,7 +251,32 @@ Do nothing else before or after.";
         return null;
     }
 
-    private sealed record LiveRun(Configuration Configuration, LaunchItem Plan, Process Worker, Task<string> Stdout, Task<string> Stderr);
+    // 子进程（Windows Terminal 窗格等）会继承管道句柄：进程退出后 ReadToEndAsync 可能永不返回。
+    // 增量捕获 + 有限排空：退出后最多等几秒，超时用已捕获快照，收尾不得被管道挂住。
+    private sealed class PipeCapture
+    {
+        private readonly StringBuilder _text = new();
+        private readonly object _gate = new();
+        public Task Done { get; }
+        public PipeCapture(StreamReader reader)
+        {
+            Done = Task.Run(async () =>
+            {
+                var buffer = new char[4096];
+                int read;
+                while ((read = await reader.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                    lock (_gate) _text.Append(buffer, 0, read);
+            });
+        }
+        public async Task<string> DrainAsync(int waitSeconds)
+        {
+            try { await Done.WaitAsync(TimeSpan.FromSeconds(waitSeconds)); }
+            catch (Exception e) when (e is TimeoutException or IOException) { Step("pipe drain timed out, using captured snapshot"); }
+            lock (_gate) return _text.ToString();
+        }
+    }
+
+    private sealed record LiveRun(Configuration Configuration, LaunchItem Plan, Process Worker, PipeCapture Stdout, PipeCapture Stderr);
     // 与 RunAsync 相同的配置 → monitor → planner → reserve → pane worker 链路（RunAsync 本体保持不动）。
     private static async Task<LiveRun> StartLiveAsync(RemoteHost host, string remoteDir, string[] arguments)
     {
@@ -260,9 +297,11 @@ Do nothing else before or after.";
         slot.Profiles["pi"] = new AgentProfile { Executable = "pi", Arguments = arguments };
         foreach (var other in configuration.Draft.Slots.Skip(1)) other.Enabled = false;
         Store.Save(Store.FilePath("configuration.json"), configuration);
-        var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), 16 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB);
         var initial = await Ipc.EnsureMonitorAsync();
         if (!initial.Ok) throw new IOException("Monitor start failed: " + initial.Message);
+        // monitor 用真实系统读数算策略哈希；硬编码 16/32 GiB 在提交限额不同的机器上会被 reserve 拒绝。
+        if (initial.Memory is null) throw new IOException("Monitor did not report a memory sample.");
+        var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), initial.Memory.Total, initial.Memory.CommitLimit);
         var preparer = new WorkspacePreparer(Path.Combine(Store.Root, "worktrees"));
         var plans = await preparer.PrepareAsync(configuration.Draft, _ => { }, _ => Task.FromResult(false), CancellationToken.None, configuration: configuration);
         if (plans.Count != 1 || plans[0].RemoteExecution is null) throw new IOException("Planner did not emit one remote plan.");
@@ -284,7 +323,7 @@ Do nothing else before or after.";
         workerStart.Environment["AGENT_LAUNCHER_TEST_ROOT"] = Store.Root;
         var worker = Process.Start(workerStart)!;
         worker.StandardInput.Close();
-        return new(configuration, plan, worker, worker.StandardOutput.ReadToEndAsync(), worker.StandardError.ReadToEndAsync());
+        return new(configuration, plan, worker, new PipeCapture(worker.StandardOutput), new PipeCapture(worker.StandardError));
     }
 
     private sealed class TransitionLog
@@ -300,7 +339,7 @@ Do nothing else before or after.";
             if (Store.IsTerminal(entry)) SawTerminal = true;
             if (entry.State == last) return;
             Items.Add(new { at = DateTimeOffset.UtcNow, state = entry.State, detail = entry.Detail });
-            Console.WriteLine($"STATE {entry.State}: {entry.Detail}");
+            Console.WriteLine($"STATE {DateTimeOffset.UtcNow:HH:mm:ss} {entry.State}: {entry.Detail}");
             last = entry.State;
         }
     }
@@ -400,8 +439,10 @@ Do nothing else before or after.";
     private static async Task<(string stdout, string stderr, int? exitCode)> StopWorkerAsync(LiveRun run, int waitSeconds)
     {
         try { await run.Worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(waitSeconds)); }
-        catch (TimeoutException) { try { run.Worker.Kill(); run.Worker.WaitForExit(5000); } catch { } }
-        var stdout = await run.Stdout; var stderr = await run.Stderr;
+        catch (TimeoutException) { Step("worker wait timeout, killing"); try { run.Worker.Kill(); run.Worker.WaitForExit(5000); } catch { } }
+        Step("worker exited, reading streams");
+        var stdout = await run.Stdout.DrainAsync(5); var stderr = await run.Stderr.DrainAsync(5);
+        Step("worker streams read");
         File.WriteAllText(Path.Combine(Store.Root, "worker-stdout.txt"), stdout);
         File.WriteAllText(Path.Combine(Store.Root, "worker-stderr.txt"), stderr);
         int? exit = null; try { exit = run.Worker.ExitCode; } catch { }
@@ -421,13 +462,16 @@ Do nothing else before or after.";
     // nonroot 场景调用方必须传 sshUser==agentUser（非 root 登录触发 systemd 拒绝）。
     public static async Task<int> RunMemoryAsync(string address, string sshUser, string agentUser, string remoteDir, string keyPath, string scenario, string memoryLimitMibText, string timeoutText)
     {
+        LiveConsole();
         GuardLive(scenario, memoryLimitMibText);
         var (timeoutSeconds, key) = GuardLiveRun(keyPath, timeoutText);
         var mib = int.Parse(memoryLimitMibText);
         if (scenario == "nonroot" && sshUser != agentUser) throw new IOException("nonroot 场景要求 sshUser 与 agentUser 相同（以非 root 登录触发 systemd 拒绝）。");
         var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["pi"], key, WorkspaceSyncMode.Mutagen, null, mib);
         string[] arguments = ["-p", "-a", "--no-session", scenario == "oom" ? OomPrompt : HeartbeatPrompt];
+        Step("start-live begin");
         var run = await StartLiveAsync(host, remoteDir, arguments);
+        Step("start-live done, waiting entry");
         var log = new TransitionLog();
         var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
         // 远程创建阶段（CreatedSuspended/ResumeIntent）会短暂映射为 Disconnected；只有 Started 之后的 Disconnected 才提前结束等待。
@@ -483,8 +527,11 @@ Do nothing else before or after.";
             heartbeatProbe = exists.Trim();
         }
         // 收尾（所有 scenario）：杀本次 token 进程树 → 等 pane worker 退出 → Disconnected/Reattaching 且探针 GONE 才操作员确认释放。
+        Step("cleanup: kill attempt tree");
         var (killOutput, finalProbe) = await KillAttemptTreeAsync(address, sshUser, key, run.Plan.Id);
+        Step("cleanup: stop worker");
         var (stdoutText, stderrText, workerExit) = await StopWorkerAsync(run, 30);
+        Step("cleanup: worker stopped exit=" + (workerExit?.ToString() ?? "none"));
         var receiptPath = Store.ReceiptPath(run.Plan.Id);
         var receipt = File.Exists(receiptPath) ? File.ReadAllText(receiptPath) : null;
         var finalEntry = await EntryAsync(run.Plan.Id);
@@ -545,6 +592,7 @@ Do nothing else before or after.";
             releaseMessage = releaseResponse?.Message,
             passed = ok
         };
+        Step("writing evidence");
         Store.Save(Path.Combine(Store.Root, "remote-live-memory-results.json"), evidence);
         Console.WriteLine((ok ? "PASS" : "FAIL") + $" live memory {scenario}: started={sawStarted}, memoryMax={memoryMax ?? "none"}, oomKill={oomKill}, heartbeatGrew={heartbeatGrew}, final={finalEntry?.State ?? "timeout"}, probe={finalProbe}");
         KillMonitor();
@@ -558,6 +606,7 @@ Do nothing else before or after.";
     // 真实断线（杀远端会话 sshd，不杀 agent）→ 探针 ALIVE → 未确认拒 → 确认挂接 → proof 字节 → pid 不变 → 释放后 Settled。
     public static async Task<int> RunReattachAsync(string address, string sshUser, string agentUser, string remoteDir, string keyPath, string timeoutText)
     {
+        LiveConsole();
         var (timeoutSeconds, key) = GuardLiveRun(keyPath, timeoutText);
         var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["pi"], key, WorkspaceSyncMode.Mutagen);
         string[] arguments = ["-p", "-a", "--no-session", HeartbeatPrompt];
@@ -641,8 +690,8 @@ Do nothing else before or after.";
             attachStart.ArgumentList.Add("reattach");
             attachStart.Environment["AGENT_LAUNCHER_TEST_ROOT"] = Store.Root;
             attachWorker = Process.Start(attachStart)!;
-            var attachStdout = attachWorker.StandardOutput.ReadToEndAsync();
-            var attachStderr = attachWorker.StandardError.ReadToEndAsync();
+            var attachStdout = new PipeCapture(attachWorker.StandardOutput);
+            var attachStderr = new PipeCapture(attachWorker.StandardError);
             var attached = await WaitEntryAsync(run.Plan.Id, deadline, log, e => e.State is "Started" or "Disconnected" || Store.IsTerminal(e));
             attachStarted = attached?.State == "Started";
             if (attachStarted)
@@ -657,7 +706,7 @@ Do nothing else before or after.";
             catch (TimeoutException) { try { attachWorker.Kill(); attachWorker.WaitForExit(5000); } catch { } }
             try { attachWorker.StandardInput.Close(); } catch { }
             attachWorkerExit = attachWorker.HasExited ? attachWorker.ExitCode : null;
-            attachStdoutText = await attachStdout; attachStderrText = await attachStderr;
+            attachStdoutText = await attachStdout.DrainAsync(5); attachStderrText = await attachStderr.DrainAsync(5);
             File.WriteAllText(Path.Combine(Store.Root, "reattach-worker-stdout.txt"), attachStdoutText);
             File.WriteAllText(Path.Combine(Store.Root, "reattach-worker-stderr.txt"), attachStderrText);
             var ended = await WaitEntryAsync(run.Plan.Id, deadline, log, e => e.State == "Disconnected" || Store.IsTerminal(e));
