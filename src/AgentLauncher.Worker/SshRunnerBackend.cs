@@ -41,10 +41,12 @@ public sealed class SshRunnerBackend : IDisposable
         // 关键：scope 内不能用 su -——pam_systemd 会把进程迁到独立 session scope，使 MemoryMax 失效（实测 agent cgroup memory.max=max）。
         // 改用 systemd-run --uid/--gid 直接以 agent 身份在 scope 内执行 sh：systemd 正确设置 HOME/USER/LOGNAME，pi 在系统 PATH，cgroup 覆盖整个 agent 进程树。
         // 同用户（非 root）场景不带 --uid/--gid：systemd-run --scope 本身被 polkit 拒收（R45 nonroot 判据）。
+        // MemorySwapMax=0：仅 MemoryMax 时匿名内存可溢出到 swap，超限进程不被 OOM 杀（实测 4GiB swap 主机 700MiB 分配 exit 0、oom_kill=0、memory.peak 恰为上限）；置 0 才使上限成为硬顶。
+        // OOMPolicy=continue：默认 stop 会在任一成员被 OOM 杀后停掉整个 scope（连带杀死 agent，ssh 255 断连）；continue 只杀超限子进程，agent 留存（实测 oom_kill=1 且 agent SURVIVED）。
         var shLayer = $"sh -c {SshRemoteCommand.QuoteDouble(innerCmd)}";
         var scopeUser = spec.AgentUser==spec.SshUser ? "" : $"--uid={spec.AgentUser} --gid={spec.AgentUser} ";
         var remoteCmd = spec.MemoryLimitBytes is { } maxBytes
-            ? $"if ! command -v systemd-run >/dev/null 2>&1; then echo '远程内存上限需要 systemd（systemd-run）；当前远程主机不可用，未启动 agent。' >&2; exit 97; fi; systemd-run --scope -p MemoryMax={maxBytes} {scopeUser}-- {shLayer}"
+            ? $"if ! command -v systemd-run >/dev/null 2>&1; then echo '远程内存上限需要 systemd（systemd-run）；当前远程主机不可用，未启动 agent。' >&2; exit 97; fi; systemd-run --scope -p MemoryMax={maxBytes} -p MemorySwapMax=0 -p OOMPolicy=continue {scopeUser}-- {shLayer}"
             : (spec.AgentUser==spec.SshUser ? innerCmd : SshRemoteCommand.WrapSu(spec.AgentUser, innerCmd));
         return new SshRunnerBackend { Spec = spec, StartInfo = CreateStartInfo(spec, remoteCmd) };
     }

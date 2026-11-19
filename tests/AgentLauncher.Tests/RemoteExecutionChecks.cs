@@ -140,6 +140,9 @@ internal static class RemoteExecutionChecks
             var remoteCmd=runner.StartInfo.ArgumentList[^1];
             assert(remoteCmd.Contains("command -v systemd-run"),"内存上限应带 systemd 可用性守卫");
             assert(remoteCmd.Contains("systemd-run --scope -p MemoryMax=1073741824"),"MemoryMax 字节值错误");
+            // 硬顶：MemorySwapMax=0 堵住 swap 溢出（否则超限进程不被 OOM 杀），OOMPolicy=continue 使 agent 在子进程被 OOM 杀后留存。
+            assert(remoteCmd.Contains("-p MemorySwapMax=0"),"内存上限应禁 swap 溢出（MemorySwapMax=0），否则超限不触发 OOM");
+            assert(remoteCmd.Contains("-p OOMPolicy=continue"),"内存上限应设 OOMPolicy=continue，避免子进程 OOM 连带停掉整个 scope 杀死 agent");
             // scope 内用 --uid/--gid 直接以 agent 身份执行 sh，不用 su -（pam_systemd 会把进程迁出 scope 使 MemoryMax 失效，实测 memory.max=max）。
             assert(remoteCmd.Contains("--uid=agent --gid=agent")&&remoteCmd.Contains("sh -c"),"scope 应以 --uid/--gid 在 scope 内执行 sh");
             assert(!remoteCmd.Contains("su - agent"),"内存上限不得用 su（pam_systemd 迁出 scope 使 MemoryMax 失效）");
