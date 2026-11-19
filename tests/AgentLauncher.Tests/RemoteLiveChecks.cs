@@ -345,8 +345,20 @@ Do nothing else before or after.";
     }
     private static async Task<ControlEntry?> EntryAsync(Guid id)
     {
-        var status = await Ipc.SendAsync(new("status", Guid.NewGuid()));
-        return status.Ok ? status.Entries?.FirstOrDefault(e => e.Plan.Id == id) : null;
+        try
+        {
+            var status = await Ipc.SendAsync(new("status", Guid.NewGuid()));
+            var entry = status.Ok ? status.Entries?.FirstOrDefault(e => e.Plan.Id == id) : null;
+            if (entry is not null) return entry;
+        }
+        catch (Exception e) when (e is IOException or TimeoutException or OperationCanceledException) { }
+        // monitor 在全部条目终态且空闲后会自行退出（CanRetire）；IPC 不可达时持久化账本是终态后的权威来源，不回退成 null 而误判。
+        return LedgerEntry(id);
+    }
+    private static ControlEntry? LedgerEntry(Guid id)
+    {
+        try { return Store.Read<Ledger>(Store.FilePath("control.json"))?.Entries.FirstOrDefault(e => e.Plan.Id == id); }
+        catch (Exception e) when (e is IOException or JsonException) { return null; }
     }
     private static async Task<ControlEntry?> WaitEntryAsync(Guid id, DateTime deadline, TransitionLog log, Func<ControlEntry, bool> done)
     {
