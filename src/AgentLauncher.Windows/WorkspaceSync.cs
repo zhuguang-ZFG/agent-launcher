@@ -355,16 +355,20 @@ internal sealed class FakeSyncSession : IWorkspaceSyncSession
 {
     private readonly string? _name;
     private readonly string _remotePath;
+    private readonly bool _simulated;
     public FakeSyncSession(WorkspaceSyncSpec spec)
     {
         _name = spec.Mode == WorkspaceSyncMode.Mutagen ? spec.MutagenSessionName ?? $"{WorkspaceSync.SessionNamePrefix}fake{Guid.NewGuid():N}" : null;
         _remotePath = spec.RemotePath;
+        // 未设场景变量时保持原有即时成功行为（R33/E2E 回归不受影响）；设了则路由到传播模拟器。
+        _simulated = _name is not null && Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SYNC_SCENARIO") is { Length: > 0 };
+        if (_simulated) FakeSyncSimulator.Register(_name!, spec.LocalPath, spec.RemotePath);
     }
     public string? SessionName => _name;
-    public Task WaitReadyAsync(CancellationToken cancellation) => Task.CompletedTask;
+    public Task WaitReadyAsync(CancellationToken cancellation) => _simulated ? FakeSyncSimulator.WaitReadyAsync(_name!, cancellation) : Task.CompletedTask;
     public string GetRemoteWorkingDirectory() => _remotePath;
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-    public Task<string?> TryDisposeAsync() => Task.FromResult<string?>(null);
+    public async ValueTask DisposeAsync() { if (_simulated) await TryDisposeAsync(); }
+    public Task<string?> TryDisposeAsync() => _simulated ? Task.FromResult(FakeSyncSimulator.Flush(_name!)) : Task.FromResult<string?>(null);
 }
 #endif
 
