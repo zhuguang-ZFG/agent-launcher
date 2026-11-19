@@ -602,13 +602,15 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
 - 正常：登记主机、槽位指向该主机，reserve/begin 后本地 SSH 存活，账本为 `Started`，无本地 Job。
 - 基准：fake-ssh 正常退出转为 `Settled` 并释放；255 转为 `Disconnected` 且预算保留。
 - 异常：创建中断、密钥不可用、远程目录不存在、同步未就绪超时、操作员在无法判断时请求释放。均不得产生重复远程进程或静默释放。
-- 待实现：冲突、离线、传播延迟、安全暂停和会话历史以 [同步可靠性设计](superpowers/specs/2026-11-18-sync-reliability-design.md) 为准，验收为 R34～R44，现在全部未执行。flush 失败或超时仍保留会话并写入回执。本条不把该设计或 §83–§84 的单对活测写成三台已收敛，也不改操作员重新挂接的段落。
+- 已实现（2026-11-19，隔离同步分支，IMPLEMENTATION §93）：按 [同步可靠性设计](superpowers/specs/2026-11-18-sync-reliability-design.md) 提供每链路七态、30 秒观测有效期、安全相对路径冲突清单（最多 50 行及剩余计数）、two-way-safe 新建会话和一次只读 `sync list --long`（10 秒超时、512 KiB 上限、15 秒自动节流、单飞）。缺失连接信息、解析失败、过期、截断均不能声称当前已收敛；端点匹配包含本地目录、主机、SSH 用户/端口与远程目录，旧端点缓存和回执不能证明新端点健康。详情按同一工作区的独立端点聚合：先评估全部会话，再按七态优先级合并；重复配置 ID 不算多台机器，也不能隐藏同端点其他会话的故障。冲突按端点/会话去重，不把终态 `synced` 当成当前三台已收敛。普通离线、暂停和探针失败不 terminate/create；flush 失败或超时保留会话并写回执。没有 pause/resume、冲突处理或 reset 入口，既有 two-way-resolved 会话不批量迁移。R41 的 None 按更晚的拒收决定执行。R34～R43 的 fake 验收及无跳过完整门禁已通过，证据见 IMPLEMENTATION §93；R44 仍未授权或执行。不以 fake 或既有单对活测替代三机活测，不改操作员重新挂接合同。
 
 ### 6. 必要测试
 
 - 已有记录（次数与日志以 IMPLEMENTATION 原文为准，本合同不重跑、不改写计数）：`RemoteHostEditorChecks`、`RemoteExecutionChecks`（含 R27）、`RemoteExecutionIntegration`（R23～R25 与 R28 的 fake-ssh 回归）、分域 R26、工作区同步集成，以及 opt-in 的 `RemoteLiveChecks`（不进 CI）。R28 不打开真实 VPS 的回归记在 §83：未确认不释放、无法判断不释放、确认后写回执并终态化。R29 的双 VPS 活测与发货预览包复验记在 §83–§84，证据只引用路径，不作为 CI 门禁，也不是浸泡。R30 探针挂死与 R31 桌面启动 ssh-agent 1058 的回归记在 §84。
 - §84 记录的最近一次完整门禁是 `scripts/test.ps1` 退出 0；该节单独写出的隔离 `--ui-check` 为 397/397。含远程 UI 的后续改动仍须跑完整 `scripts/test.ps1`，不得只用 `-SkipUi -SkipBrowser` 关闭远程合同。
 - 仍未实现：SSH 断开后的自动重连。内存上限的 systemd scope 在真实 VPS 上的生效/超限/非 root 拒绝路径仍是 opt-in 活测待办（R45 的命令形状与边界回归已记录，不进 CI）。「拒绝同步模式 `None`」已在 2026-11-19 实现（编辑器保存与启动准备拒收）。操作员确认的重新挂接（R33）已实现，回归不打开真实 VPS，也不把这一次 fake-ssh 写成 G4 或活测。8 窗格名额包含远程、未释放的 `Disconnected` 和 `Reattaching`，上限仍是 8。同权不把远端主机纳入本地内存/CPU 准入。本节不新增测试次数，不把 §83–§84 的活测改写成三台同权已活测。
+
+- 同步可靠性（2026-11-19）：`SyncReliabilityChecks` 覆盖状态、脱敏、端点匹配与真实本地进程捕获边界；`--sync-reliability-integration` 用三个本地目录模拟 R35–R38/R42，不打开真实 VPS；UiChecks 验证导航、观测有效期、端点变更、详情与冲突清单。`--sync-review-checks` 已接入完整门禁，实际次数与结论见 IMPLEMENTATION §93，不改写历史测试记录。
 
 ### 7. 错误与正确做法
 
