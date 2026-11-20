@@ -529,17 +529,22 @@ public partial class MainWindow
             ControlEntry Entry(string state)=>new(){Plan=plan,State=state};
             status=new(true,"sync review probe",[Entry("Settled")]);
             Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Synced,"Mutagen flush 成功，会话已终止。",DateTimeOffset.UtcNow));
-            await ProbeSyncHealthAsync(force:true);
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
             check("UX12 A1 terminal synced attempt shows 已同步 badge",badge!.Text=="同步：已同步"&&badge.ToolTip!.ToString()!.Contains("sync-final"));
             Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Problem,"Mutagen flush 失败，会话已保留。",DateTimeOffset.UtcNow));
-            await ProbeSyncHealthAsync(force:true);
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
             check("UX12 A1 terminal problem attempt shows 同步有问题 badge",badge.Text=="同步：同步有问题");
             System.IO.File.Delete(Store.SyncFinalPath(attempt));
+            // 徽章文案的确定性断言显式投递 list 结果：真实探针依赖本机 mutagen，CI 未安装时按规格 fail-closed
+            // 显示 未知（R39 探针失败检查覆盖该路径），不能把环境差异当产品回归。探针本身仍在此处实跑一次，
+            // 只断言与安装状态无关的不变量：无 sync-final 记录时绝不宣称已同步。
             await ProbeSyncHealthAsync(force:true);
+            check("UX12 A1 probe without record never claims 已同步",badge.Text!="同步：已同步");
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
             check("UX12 A1 terminal attempt without record shows 未同步",badge.Text=="同步：未同步");
             Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Synced,"Mutagen flush 成功，会话已终止。",DateTimeOffset.UtcNow));
             status=new(true,"sync review probe",[Entry("Disconnected")]);
-            await ProbeSyncHealthAsync(force:true);
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
             check("UX12 A1 Disconnected stays live-evaluated and never claims 已同步",badge.Text=="同步：未同步");
             status=new(true,"sync review probe",[Entry("Settled")]);
             var sessionName="agent-launcher-"+Guid.NewGuid().ToString("N");
