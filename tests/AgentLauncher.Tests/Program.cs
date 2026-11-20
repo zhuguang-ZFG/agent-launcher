@@ -58,6 +58,8 @@ if(args is ["--workspace-sync"])return await WorkspaceSyncIntegration.RunAsync()
 if(args is ["--remote-host-editor-checks"]){var editorFailures=0;void EditorTest(string name,Action action){try{action();Console.WriteLine("PASS "+name);}catch(Exception e){editorFailures++;Console.WriteLine("FAIL "+name+": "+e.Message);}}AgentLauncher.Tests.RemoteHostEditorChecks.Run(EditorTest,(value,message)=>{if(!value)throw new Exception(message);});return editorFailures==0?0:1;}
 if(args is ["--remote-startup-e2e"])return await RemoteE2EIntegration.RunAsync();
 if(args is ["--remote-live",var liveHost,var liveSshUser,var liveAgentUser,var liveDir,var liveKey,var liveArgs,var liveTimeout])return await RemoteLiveChecks.RunAsync(liveHost,liveSshUser,liveAgentUser,liveDir,liveKey,liveArgs,liveTimeout);
+if(args is ["--remote-live-memory",var memHost,var memSshUser,var memAgentUser,var memDir,var memKey,var memScenario,var memMib,var memTimeout])return await RemoteLiveChecks.RunMemoryAsync(memHost,memSshUser,memAgentUser,memDir,memKey,memScenario,memMib,memTimeout);
+if(args is ["--remote-live-reattach",var reHost,var reSshUser,var reAgentUser,var reDir,var reKey,var reTimeout])return await RemoteLiveChecks.RunReattachAsync(reHost,reSshUser,reAgentUser,reDir,reKey,reTimeout);
 if(args is ["--allocate-commit",var mib]) return MemoryFixture.Allocate(int.Parse(mib));
 if(args is ["--allocate-hold",var holdMib,var holdMs]) return MemoryFixture.AllocateHold(int.Parse(holdMib),int.Parse(holdMs));
 if(args is ["--memory-cycle",var memoryPrefix]) return MemoryFixture.Cycle(memoryPrefix);
@@ -274,6 +276,11 @@ IdleWorkingSetChecks.Run(Test,Assert);
 SlotConvenienceChecks.Run(Test,Assert);
 AgentLauncher.Tests.RemoteExecutionChecks.Run(Test,Assert);
 AgentLauncher.Tests.SyncReliabilityChecks.Run(Test,Assert);
+Test("R45 live harness rejects bad scenario and limit",()=>{
+    foreach(var scenario in new[]{"","SCOPE","root","scope oom"}){var rejected=false;try{RemoteLiveChecks.GuardLive(scenario,"512");}catch(IOException){rejected=true;}Assert(rejected,"非法 scenario 被接受："+scenario);}
+    foreach(var limit in new[]{"","abc","255","65537","0","-512","512.5"}){var rejected=false;try{RemoteLiveChecks.GuardLive("scope",limit);}catch(IOException){rejected=true;}Assert(rejected,"非法内存上限被接受："+limit);}
+    foreach(var scenario in new[]{"scope","oom","nonroot"}){RemoteLiveChecks.GuardLive(scenario,"512");RemoteLiveChecks.GuardLive(scenario,"256");RemoteLiveChecks.GuardLive(scenario,"65536");}
+});
 AgentLauncher.Tests.RemoteHostEditorChecks.Run(Test,Assert);
 Test("W1 idle working-set trim reclaims physical and preserves data on page-in",()=>{
  using var root=new Job(@"Local\AL-trim-root-"+Guid.NewGuid(),root:true);using var job=new Job(@"Local\AL-trim-child-"+Guid.NewGuid(),512*ResourcePolicy.MiB);

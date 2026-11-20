@@ -133,14 +133,19 @@ internal static class RemoteExecutionChecks
 
         test("R45 remote memory cap wraps systemd-run and validates bounds", () =>
         {
-            // 命令形状：有上限时先守卫 systemd-run 可用性，再以 transient scope 包裹 su 内层命令（agent 及其后代落入同一 cgroup）。
+            // 命令形状：有上限时先守卫 systemd-run 可用性，再以 transient scope 包裹内层命令（agent 及其后代落入同一 cgroup）。
             var capped=new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",["--hold"],1024L*1024*1024,null,null);
             capped.Validate();
             using var runner=SshRunnerBackend.Create(capped);
             var remoteCmd=runner.StartInfo.ArgumentList[^1];
             assert(remoteCmd.Contains("command -v systemd-run"),"内存上限应带 systemd 可用性守卫");
             assert(remoteCmd.Contains("systemd-run --scope -p MemoryMax=1073741824"),"MemoryMax 字节值错误");
-            assert(remoteCmd.Contains("su - agent -c"),"scope 应包裹 su 内层命令");
+            // 硬顶：MemorySwapMax=0 堵住 swap 溢出（否则超限进程不被 OOM 杀），OOMPolicy=continue 使 agent 在子进程被 OOM 杀后留存。
+            assert(remoteCmd.Contains("-p MemorySwapMax=0"),"内存上限应禁 swap 溢出（MemorySwapMax=0），否则超限不触发 OOM");
+            assert(remoteCmd.Contains("-p OOMPolicy=continue"),"内存上限应设 OOMPolicy=continue，避免子进程 OOM 连带停掉整个 scope 杀死 agent");
+            // scope 内用 --uid/--gid 直接以 agent 身份执行 sh，不用 su -（pam_systemd 会把进程迁出 scope 使 MemoryMax 失效，实测 memory.max=max）。
+            assert(remoteCmd.Contains("--uid=agent --gid=agent")&&remoteCmd.Contains("sh -c"),"scope 应以 --uid/--gid 在 scope 内执行 sh");
+            assert(!remoteCmd.Contains("su - agent"),"内存上限不得用 su（pam_systemd 迁出 scope 使 MemoryMax 失效）");
             assert(remoteCmd.Contains("cd '/home/agent/work' && pi '--hold'"),"内存上限不得改变工作目录或参数");
             // 无上限：命令形状与从前一致，不引入 systemd 包裹。
             var uncapped=new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",["--hold"],null,null,null);

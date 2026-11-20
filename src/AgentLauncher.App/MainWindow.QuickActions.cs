@@ -139,6 +139,7 @@ public partial class MainWindow
     }
     private void JumpToRecord(Expander section, Panel list, Guid id, string missing)
     {
+        EmbeddedPanel.Visibility = Visibility.Collapsed;
         section.IsExpanded = true;
         Dispatcher.BeginInvoke(new Action(() =>
         {
