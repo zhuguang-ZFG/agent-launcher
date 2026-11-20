@@ -567,7 +567,7 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
 - 名称和地址在主机列表中各自唯一（忽略大小写）。槽位只通过 `Id` 引用主机；删除主机前必须核对应槽位引用，存在引用则拒绝删除。
 - 认证只使用 `ssh-agent` 或私钥路径，启动参数包含 `BatchMode=yes`。配置、账本和普通日志不得保存密码或私钥内容。
 - 远程目录必须是绝对路径或以 `~/` 开头。远程参数不得包含 Windows 盘符或 UNC 路径，否则准备/预约拒绝，提示「远程参数包含 Windows 本地路径」。
-- 当前允许的远程 Agent 类型为 `pi`、`kimi`、`qodercli`、`omp`、`codex`。`custom` 和未知类型拒绝。远程内存上限已实现（2026-11-19 [规格](superpowers/specs/2026-11-19-remote-memory-limit-spec.md)）：主机级 `MemoryLimitMib`（256–65536 MiB，留空不限制）在准备层换算为 `RemoteExecutionSpec.MemoryLimitBytes`，启动命令以 `systemd-run --scope -p MemoryMax=<bytes>` 包裹内层命令并先守卫 systemd-run 可用性，缺失即以可读错误拒绝启动（fail-closed）；出界值在 `Validate()` 拒收。远程启动命令另注入固定 `NODE_OPTIONS=--max-old-space-size=1024`，只约束 Node 老生代堆；非 Node 进程忽略该变量。该注入仍是护栏，不是内存上限合同本身。重新挂接不新建限制，存活进程保持启动时的限制。真实 VPS 上 scope 生效、超限终止与非 root 拒绝路径仍是 opt-in 活测待办（R45 只覆盖命令形状与边界校验）。
+- 当前允许的远程 Agent 类型为 `pi`、`kimi`、`qodercli`、`omp`、`codex`。`custom` 和未知类型拒绝。远程内存上限已实现（2026-11-19 [规格](superpowers/specs/2026-11-19-remote-memory-limit-spec.md)）：主机级 `MemoryLimitMib`（256–65536 MiB，留空不限制）在准备层换算为 `RemoteExecutionSpec.MemoryLimitBytes`，启动命令以 `systemd-run --scope -p MemoryMax=<bytes> -p MemorySwapMax=0 -p OOMPolicy=continue --uid=<agent> --gid=<agent> -- sh -c <inner>` 包裹内层命令并先守卫 systemd-run 可用性，缺失即以可读错误拒绝启动（fail-closed）；scope 内不用 su（pam_systemd 会迁出 scope），MemorySwapMax=0 使超限触发 OOM、OOMPolicy=continue 使 agent 留存；出界值在 `Validate()` 拒收。远程启动命令另注入固定 `NODE_OPTIONS=--max-old-space-size=1024`，只约束 Node 老生代堆；非 Node 进程忽略该变量。该注入仍是护栏，不是内存上限合同本身。重新挂接不新建限制，存活进程保持启动时的限制。真实 VPS 上 scope 生效、超限 OOM 终止与非 root 拒绝路径已于 2026-11-19 活测通过（IMPLEMENTATION §94，证据归档忽略目录，不进 CI；R45 的命令形状与边界校验随原生套件运行）。
 - 远程条目不创建本地 Job 或 custody，不按本地内存/CPU 压力拦截。同一监视器上的本地计划仍受原准入约束。账本、授权代次和程序身份等共享安全闸门对两域同样生效。本地 `Budget=0` 的拒绝不得被远程豁免扩散。
 - 8 窗格并发上限包含每一个非终态 agent，不论本机还是远程。Worker 在 reserve 与 begin、界面 `ActiveAgentCount`（`UpdateLaunch` 用它决定能否启动）按 `MaxConcurrentAgents = 8` 计数。把工作放到 VPS 不腾出本地窗格名额。远程 `Disconnected` 在操作员确认释放之前保持非终态，继续占一个名额；确认释放并进入终态后才让出名额。内存/CPU 准入不把远程批次算进本地压力，这与 8 窗格名额是两件事。
 - 状态映射：SSH 存活且 PID/创建时间可核对 → `Started`；SSH 退出码不是 255 → `Settled`，可释放；退出码 255 → `Disconnected`，预算不释放；Started 之前的创建中断 → `Disconnected`，预算不释放。`Disconnected` 与重新挂接进行中的 `Reattaching` 都不是终态，继续占一个窗格名额。为维持同权，SSH 断开后的操作员确认重新挂接已实现（R33，见上条）。自动重连不在本合同，也未实现。`Disconnected` 在操作员确认释放或系统重启后的既有 boot 证明成立前，保持非终止。
@@ -602,13 +602,15 @@ F15～F17、V09：原型与原生分别验证 Agent/profile 往返切换、模�
 - 正常：登记主机、槽位指向该主机，reserve/begin 后本地 SSH 存活，账本为 `Started`，无本地 Job。
 - 基准：fake-ssh 正常退出转为 `Settled` 并释放；255 转为 `Disconnected` 且预算保留。
 - 异常：创建中断、密钥不可用、远程目录不存在、同步未就绪超时、操作员在无法判断时请求释放。均不得产生重复远程进程或静默释放。
-- 待实现：冲突、离线、传播延迟、安全暂停和会话历史以 [同步可靠性设计](superpowers/specs/2026-11-18-sync-reliability-design.md) 为准，验收为 R34～R44，现在全部未执行。flush 失败或超时仍保留会话并写入回执。本条不把该设计或 §83–§84 的单对活测写成三台已收敛，也不改操作员重新挂接的段落。
+- 已实现（2026-11-19，隔离同步分支，IMPLEMENTATION §93）：按 [同步可靠性设计](superpowers/specs/2026-11-18-sync-reliability-design.md) 提供每链路七态、30 秒观测有效期、安全相对路径冲突清单（最多 50 行及剩余计数）、two-way-safe 新建会话和一次只读 `sync list --long`（10 秒超时、512 KiB 上限、15 秒自动节流、单飞）。缺失连接信息、解析失败、过期、截断均不能声称当前已收敛；端点匹配包含本地目录、主机、SSH 用户/端口与远程目录，旧端点缓存和回执不能证明新端点健康。详情按同一工作区的独立端点聚合：先评估全部会话，再按七态优先级合并；重复配置 ID 不算多台机器，也不能隐藏同端点其他会话的故障。冲突按端点/会话去重，不把终态 `synced` 当成当前三台已收敛。普通离线、暂停和探针失败不 terminate/create；flush 失败或超时保留会话并写回执。没有 pause/resume、冲突处理或 reset 入口，既有 two-way-resolved 会话不批量迁移。R41 的 None 按更晚的拒收决定执行。R34～R43 的 fake 验收及无跳过完整门禁已通过，证据见 IMPLEMENTATION §93；R44 仍未授权或执行。不以 fake 或既有单对活测替代三机活测，不改操作员重新挂接合同。
 
 ### 6. 必要测试
 
 - 已有记录（次数与日志以 IMPLEMENTATION 原文为准，本合同不重跑、不改写计数）：`RemoteHostEditorChecks`、`RemoteExecutionChecks`（含 R27）、`RemoteExecutionIntegration`（R23～R25 与 R28 的 fake-ssh 回归）、分域 R26、工作区同步集成，以及 opt-in 的 `RemoteLiveChecks`（不进 CI）。R28 不打开真实 VPS 的回归记在 §83：未确认不释放、无法判断不释放、确认后写回执并终态化。R29 的双 VPS 活测与发货预览包复验记在 §83–§84，证据只引用路径，不作为 CI 门禁，也不是浸泡。R30 探针挂死与 R31 桌面启动 ssh-agent 1058 的回归记在 §84。
 - §84 记录的最近一次完整门禁是 `scripts/test.ps1` 退出 0；该节单独写出的隔离 `--ui-check` 为 397/397。含远程 UI 的后续改动仍须跑完整 `scripts/test.ps1`，不得只用 `-SkipUi -SkipBrowser` 关闭远程合同。
-- 仍未实现：SSH 断开后的自动重连。内存上限的 systemd scope 在真实 VPS 上的生效/超限/非 root 拒绝路径仍是 opt-in 活测待办（R45 的命令形状与边界回归已记录，不进 CI）。「拒绝同步模式 `None`」已在 2026-11-19 实现（编辑器保存与启动准备拒收）。操作员确认的重新挂接（R33）已实现，回归不打开真实 VPS，也不把这一次 fake-ssh 写成 G4 或活测。8 窗格名额包含远程、未释放的 `Disconnected` 和 `Reattaching`，上限仍是 8。同权不把远端主机纳入本地内存/CPU 准入。本节不新增测试次数，不把 §83–§84 的活测改写成三台同权已活测。
+- 仍未实现：SSH 断开后的自动重连。内存上限的 systemd scope 硬顶在真实 VPS 上的生效/超限 OOM/非 root 拒绝路径已于 2026-11-19 活测通过（IMPLEMENTATION §94，不进 CI）。「拒绝同步模式 `None`」已在 2026-11-19 实现（编辑器保存与启动准备拒收）。操作员确认的重新挂接（R33）已实现，fake-ssh 回归不打开真实 VPS；2026-11-19 另在真实 VPS 活测通过（§94），仍不宣称 G4。8 窗格名额包含远程、未释放的 `Disconnected` 和 `Reattaching`，上限仍是 8。同权不把远端主机纳入本地内存/CPU 准入。本节不新增测试次数，不把 §83–§84 的活测改写成三台同权已活测。
+
+- 同步可靠性（2026-11-19）：`SyncReliabilityChecks` 覆盖状态、脱敏、端点匹配与真实本地进程捕获边界；`--sync-reliability-integration` 用三个本地目录模拟 R35–R38/R42，不打开真实 VPS；UiChecks 验证导航、观测有效期、端点变更、详情与冲突清单。`--sync-review-checks` 已接入完整门禁，实际次数与结论见 IMPLEMENTATION §93，不改写历史测试记录。
 
 ### 7. 错误与正确做法
 

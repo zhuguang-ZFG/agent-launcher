@@ -485,8 +485,10 @@ public partial class MainWindow
     // 不依赖 mutagen/VPS：list 失败或无匹配会话时徽章必须走 sync-final 回退链；git 夹具在隔离测试根内构造。
     private async Task RunSyncReviewUiChecksAsync(string folder,Action<string,bool> check)
     {
-        var originalConfig=config;var originalStatus=status;var polling=timer.IsEnabled;
-        timer.Stop();await saveTask;
+        var originalConfig=config;var originalStatus=status;var polling=timer.IsEnabled;var memoryPolling=memoryTimer.IsEnabled;
+        timer.Stop();memoryTimer.Stop();await saveTask;
+        for(var i=0;syncProbing&&i<600;i++)await Task.Delay(20);
+        check("R39 controlled sync fixtures start without an in-flight probe",!syncProbing);
         IEnumerable<T> FindLogical<T>(DependencyObject root) where T:DependencyObject
         {
             foreach(var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()){if(child is T target)yield return target;foreach(var nested in FindLogical<T>(child))yield return nested;}
@@ -527,28 +529,39 @@ public partial class MainWindow
             ControlEntry Entry(string state)=>new(){Plan=plan,State=state};
             status=new(true,"sync review probe",[Entry("Settled")]);
             Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Synced,"Mutagen flush 成功，会话已终止。",DateTimeOffset.UtcNow));
-            await ProbeSyncHealthAsync(force:true);
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
             check("UX12 A1 terminal synced attempt shows 已同步 badge",badge!.Text=="同步：已同步"&&badge.ToolTip!.ToString()!.Contains("sync-final"));
             Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Problem,"Mutagen flush 失败，会话已保留。",DateTimeOffset.UtcNow));
-            await ProbeSyncHealthAsync(force:true);
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
             check("UX12 A1 terminal problem attempt shows 同步有问题 badge",badge.Text=="同步：同步有问题");
             System.IO.File.Delete(Store.SyncFinalPath(attempt));
+            // 徽章文案的确定性断言显式投递 list 结果：真实探针依赖本机 mutagen，CI 未安装时按规格 fail-closed
+            // 显示 未知（R39 探针失败检查覆盖该路径），不能把环境差异当产品回归。探针本身仍在此处实跑一次，
+            // 只断言与安装状态无关的不变量：无 sync-final 记录时绝不宣称已同步。
             await ProbeSyncHealthAsync(force:true);
+            check("UX12 A1 probe without record never claims 已同步",badge.Text!="同步：已同步");
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
             check("UX12 A1 terminal attempt without record shows 未同步",badge.Text=="同步：未同步");
             Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Synced,"Mutagen flush 成功，会话已终止。",DateTimeOffset.UtcNow));
             status=new(true,"sync review probe",[Entry("Disconnected")]);
-            await ProbeSyncHealthAsync(force:true);
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
             check("UX12 A1 Disconnected stays live-evaluated and never claims 已同步",badge.Text=="同步：未同步");
-            // B3：持久化会话名让无活 spec 匹配的条目在重启后按名恢复健康（直接驱动回退链，注入 list 输出，不依赖真实 mutagen）。
             status=new(true,"sync review probe",[Entry("Settled")]);
             var sessionName="agent-launcher-"+Guid.NewGuid().ToString("N");
             Store.Save(Store.SyncSessionPath(attempt),new SyncSessionRecord(1,sessionName,repo,"/home/agent/work",DateTimeOffset.UtcNow));
-            var listOutput=$"Name: {sessionName}\nAlpha:\n\tURL: {repo}\nBeta:\n\tURL: ssh://agent@{host.Address}:22/home/agent/work\nStatus: Watching for changes\n";
-            var live=new SyncHealth(SyncHealthState.NotSynced,"","未找到匹配的 Mutagen 同步会话。");
-            var recovered=ResolveTerminalSync(live,slot,host,listOutput);
-            check("UX12 B3 persisted session name recovers live health after restart",recovered.State==SyncHealthState.Ready&&recovered.SessionName==sessionName);
-            var terminal=ResolveTerminalSync(live,slot,host,null);
-            check("UX12 B3 terminated session falls back to sync-final",terminal.State==SyncHealthState.Synced);
+            var listOutput=$"Name: {sessionName}\nConfiguration:\n\tSynchronization mode: Two Way Safe\nAlpha:\n\tURL: {repo}\n\tConnected: Yes\nBeta:\n\tURL: ssh://agent@{host.Address}:22/home/agent/work\n\tConnected: Yes\nStatus: Watching for changes\n";
+            await ApplySyncListToBadgesAsync(listOutput,true,"",DateTimeOffset.UtcNow);
+            check("UX12 B3 persisted session name recovers live health after restart",badge.Text=="同步：已收敛"&&badge.ToolTip!.ToString()!.Contains(sessionName));
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
+            check("UX12 B3 terminated session falls back to sync-final",badge.Text=="同步：已同步");
+            await ApplySyncListToBadgesAsync(listOutput.Replace("Two Way Safe","Two Way Resolved"),true,"",DateTimeOffset.UtcNow);
+            check("R39 terminal fallback never returns unchecked live readiness",badge.Text=="同步：未收敛");
+            config.Edit(d=>d.Slots[0].Directory=System.IO.Path.Combine(repo,"different-workspace"));
+            await ApplySyncListToBadgesAsync(listOutput,true,"",DateTimeOffset.UtcNow);
+            var oldLiveRejected=badge.Text=="同步：未同步";
+            await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
+            check("R39 old endpoint receipts never certify a changed workspace",oldLiveRejected&&badge.Text=="同步：未同步");
+            config.Edit(d=>d.Slots[0].Directory=repo);
             // B1：文件列表 + 只读 diff 对话框（未跟踪提示、已跟踪 diff、400 行截断）。
             var dialogSeen=false;
             var inspect=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};
@@ -584,11 +597,216 @@ public partial class MainWindow
             try{await ShowSlotChangesAsync(slot.Id);}finally{inspect.Stop();}
             check("UX12 B1 changes dialog opened for inspection",dialogSeen);
             check("UX12 B1 review left worktree untouched",await System.IO.File.ReadAllTextAsync(tracked)==string.Join("\n",Enumerable.Range(1,500).Select(i=>"changed "+i))+"\n");
+            // ---- 同步可靠性 R34/R39/R40/R41/R36：链路徽章 + 上次观测 + 只读冲突清单 ----
+            var jyHost=new RemoteHost(Guid.NewGuid(),"京云夹具","jy.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.Mutagen);
+            var alyHost=new RemoteHost(Guid.NewGuid(),"阿里云夹具","aly.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.Mutagen);
+            var sshfsHost=new RemoteHost(Guid.NewGuid(),"SSHFS 夹具","sshfs.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.SshfsMount);
+            var noneHost=new RemoteHost(Guid.NewGuid(),"None 遗留","none.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.None);
+            config=new Configuration();config.RemoteHosts=[jyHost,alyHost,sshfsHost,noneHost];
+            config.Edit(d=>{d.Project=repo;
+                d.Slots[0].Enabled=true;d.Slots[0].Directory=repo;d.Slots[0].RemoteHostId=jyHost.Id;d.Slots[0].RemoteDirectory="/home/agent/work";
+                d.Slots[1].Enabled=true;d.Slots[1].Directory=repo;d.Slots[1].RemoteHostId=alyHost.Id;d.Slots[1].RemoteDirectory="/home/agent/work";
+                d.Slots[2].Enabled=false;d.Slots[2].Directory=repo;d.Slots[2].RemoteHostId=sshfsHost.Id;d.Slots[2].RemoteDirectory="/home/agent/work";
+                d.Slots[3].Enabled=false;d.Slots[3].Directory=repo;d.Slots[3].RemoteHostId=noneHost.Id;d.Slots[3].RemoteDirectory="/home/agent/work";
+                foreach(var s in d.Slots.Skip(4))s.Enabled=false;});
+            Render();
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+            TextBlock Badge(int i)
+            {
+                FindLogical<Button>(RailSlots).Single(b=>AutomationProperties.GetName(b)==$"第 {i+1} 项 Agent 行").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                return FindLogical<TextBlock>(SlotList).Single(t=>AutomationProperties.GetName(t)==$"同步状态 {config.Draft.Slots[i].DisplayName}");
+            }
+            var renderedBadge=FindLogical<TextBlock>(SlotList).Single(t=>AutomationProperties.GetName(t)==$"同步状态 {config.Draft.Slots[0].DisplayName}");
+            check("R34 render retains registration for the visible sync badge",syncBadges.GetValueOrDefault(config.Draft.Slots[0].Id)==renderedBadge);
+            string RelSession(string name,string mode,string status,string betaConnected="Yes",string conflicts="",string lastError="")=>
+                "-------------------------------------------------------------------------------\n"+
+                $"Name: {name}\nIdentifier: sync_fake{name}\nConfiguration:\n\tSynchronization mode: {mode}\n"+
+                $"Alpha:\n\tURL: {repo}\n\tConnected: Yes\nBeta:\n\tURL: ssh://agent@jy.example.com:22/home/agent/work\n\tConnected: {betaConnected}\n"+
+                conflicts+(lastError.Length>0?$"Last error: {lastError}\n":"")+$"Status: {status}\n"+
+                "-------------------------------------------------------------------------------\n";
+            var jyAttempt=Guid.NewGuid();var alyAttempt=Guid.NewGuid();
+            var jyPlan=new LaunchItem(jyAttempt,Guid.NewGuid(),1,"r34-jy",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:config.Draft.Slots[0].Id,RemoteExecution:new RemoteExecutionSpec(jyHost.Address,22,"root","agent","pi","/home/agent/work",[],null,null));
+            var alyPlan=new LaunchItem(alyAttempt,Guid.NewGuid(),2,"r34-aly",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:config.Draft.Slots[1].Id,RemoteExecution:new RemoteExecutionSpec(alyHost.Address,22,"root","agent","pi","/home/agent/work",[],null,null));
+            status=new(true,"sync reliability probe",[new ControlEntry{Plan=jyPlan,State="Started"},new ControlEntry{Plan=alyPlan,State="Started"}]);
+            var jyName="agent-launcher-"+Guid.NewGuid().ToString("N");var alyName="agent-launcher-"+Guid.NewGuid().ToString("N");
+            Store.Save(Store.SyncSessionPath(jyAttempt),new SyncSessionRecord(1,jyName,repo,"/home/agent/work",DateTimeOffset.UtcNow));
+            Store.Save(Store.SyncSessionPath(alyAttempt),new SyncSessionRecord(1,alyName,repo,"/home/agent/work",DateTimeOffset.UtcNow));
+            // R34：两条链路都 Watching+two-way-safe → 各自已收敛，详情含上次观测；整体全部已收敛。
+            var bothOk=RelSession(jyName,"Two Way Safe","Watching for changes")+RelSession(alyName,"Two Way Safe","Watching for changes").Replace("jy.example.com","aly.example.com");
+            await ApplySyncListToBadgesAsync(bothOk,true,"",DateTimeOffset.UtcNow);
+            check("R34 both healthy links show 已收敛 with last observation",Badge(0).Text=="同步：已收敛"&&Badge(1).Text=="同步：已收敛"&&Badge(0).ToolTip!.ToString()!.Contains("上次观测"));
+            // 同步详情对话框：整体标签 + 逐链路 + 只读冲突清单（无处理按钮）。
+            var detailsSeen=false;Exception? detailsFailure=null;
+            var detailsInspect=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};
+            detailsInspect.Tick+=(_,_)=>{
+                if(detailsSeen)return;
+                var window=OwnedWindows.OfType<Window>().FirstOrDefault(w=>w.Title=="同步详情");
+                if(window is null)return;
+                detailsSeen=true;detailsInspect.Stop();
+                _=Dispatcher.InvokeAsync(async()=>{
+                    try
+                    {
+                        var overall=FindLogical<TextBlock>(window).Single(t=>AutomationProperties.GetName(t)=="同步整体标签");
+                        var links=FindLogical<ListBox>(window).Single(l=>AutomationProperties.GetName(l)=="同步链路列表");
+                        var conflicts=FindLogical<ListBox>(window).Single(l=>AutomationProperties.GetName(l)=="同步冲突清单");
+                        var remaining=FindLogical<TextBlock>(window).Single(t=>AutomationProperties.GetName(t)=="同步冲突剩余计数");
+                        check("R34 details dialog shows overall 全部已收敛 and per-link observation",overall.Text=="全部已收敛"&&links.Items.Count>=2&&links.Items.OfType<ListBoxItem>().Any(i=>(i.Content is TextBlock text?text.Text:i.Content.ToString()!).Contains("上次观测")));
+                        check("R36 conflict list is read-only with no action buttons",conflicts.IsEnabled&&FindLogical<Button>(window).All(b=>(string)b.Content=="关闭"));
+                        check("R36 empty conflict list shows zero remainder",remaining.Text.Contains("0"));
+                        check("R34 sync detail lists follow the current theme",Equals(links.Background,FindResource("Surface"))&&Equals(links.Foreground,FindResource("Ink"))&&Equals(conflicts.Background,FindResource("Surface")));
+                        await Dispatcher.InvokeAsync(window.UpdateLayout,DispatcherPriority.ApplicationIdle);
+                        CaptureQuickActions(window,System.IO.Path.Combine(folder,"sync-details-converged.png"));
+                        syncLinkObservedAt[config.Draft.Slots[0].Id]=DateTimeOffset.UtcNow.AddSeconds(-31);
+                        for(var i=0;i<65&&overall.Text!="未知";i++)await Task.Delay(100);
+                        check("R39 open sync details expire without a new network probe",overall.Text=="未知");
+                        syncLinkObservedAt[config.Draft.Slots[0].Id]=DateTimeOffset.UtcNow;
+                        var close=FindLogical<Button>(window).Single(b=>(string)b.Content=="关闭");
+                        close.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    }
+                    catch(Exception e){detailsFailure=e;window.Close();}
+                });
+            };
+            detailsInspect.Start();
+            try{ShowSyncDetails(config.Draft.Slots[0].Id);}finally{detailsInspect.Stop();}
+            if(detailsFailure!=null)throw detailsFailure;
+            check("R34 details dialog opened for inspection",detailsSeen);
+            check("R34 details dialog closes via DialogResult button",!OwnedWindows.OfType<Window>().Any(w=>w.Title=="同步详情"));
+            void CheckDetails(string expected,int expectedLinks,string? expectedConflict=null)
+            {
+                Exception? failure=null;var seen=false;
+                var inspectDetails=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(20)};
+                inspectDetails.Tick+=(_,_)=>{
+                    var window=OwnedWindows.OfType<Window>().FirstOrDefault(w=>w.Title=="同步详情");
+                    if(window==null)return;
+                    seen=true;inspectDetails.Stop();
+                    try
+                    {
+                        var overall=FindLogical<TextBlock>(window).Single(t=>AutomationProperties.GetName(t)=="同步整体标签");
+                        var links=FindLogical<ListBox>(window).Single(l=>AutomationProperties.GetName(l)=="同步链路列表");
+                        check($"R34 scoped details show {expected} with {expectedLinks} links",overall.Text==expected&&links.Items.Count==expectedLinks);
+                        if(expectedConflict!=null)
+                        {
+                            var conflicts=FindLogical<ListBox>(window).Single(l=>AutomationProperties.GetName(l)=="同步冲突清单");
+                            var remaining=FindLogical<TextBlock>(window).Single(t=>AutomationProperties.GetName(t)=="同步冲突剩余计数");
+                            check("R36 shared endpoint retains one conflict row per session",conflicts.Items.Count==1&&((string)((ListBoxItem)conflicts.Items[0]).Content).Contains(expectedConflict)&&remaining.Text.StartsWith("冲突清单：显示 1 行，剩余 0 条",StringComparison.Ordinal));
+                        }
+                    }
+                    catch(Exception e){failure=e;}
+                    finally{window.Close();}
+                };
+                inspectDetails.Start();
+                try{ShowSyncDetails(config.Draft.Slots[0].Id);}finally{inspectDetails.Stop();}
+                if(failure!=null)throw failure;
+                check("R34 scoped details opened",seen);
+            }
+            var savedStatus=status;
+            config.RemoteHosts=[jyHost,alyHost with{Address=jyHost.Address},sshfsHost,noneHost];
+            status=new(true,"duplicate endpoint fixture",[]);
+            await ApplySyncListToBadgesAsync(RelSession(jyName,"Two Way Safe","Watching for changes"),true,"",DateTimeOffset.UtcNow);
+            CheckDetails("单链路已收敛",1);
+            config.RemoteHosts=[jyHost,alyHost,sshfsHost,noneHost];
+            config.Edit(d=>d.Slots[1].RemoteHostId=jyHost.Id);
+            status=new(true,"shared endpoint sessions",[new ControlEntry{Plan=jyPlan,State="Started"},new ControlEntry{Plan=alyPlan with{RemoteExecution=jyPlan.RemoteExecution},State="Started"}]);
+            var sharedConflict="Conflicts:\n\t(alpha) shared.txt (<non-existent> -> File (aa))\n\t(beta) shared.txt (<non-existent> -> File (bb))\n";
+            await ApplySyncListToBadgesAsync(RelSession(jyName,"Two Way Safe","Watching for changes")+RelSession(alyName,"Two Way Safe","Watching for changes",conflicts:sharedConflict),true,"",DateTimeOffset.UtcNow);
+            check("R36 second session on a shared endpoint reports conflict",Badge(1).Text=="同步：冲突");
+            CheckDetails("冲突",1,"shared.txt");
+            var sharedStatus=status;status=new(true,"shared session aliases",[]);
+            await ApplySyncListToBadgesAsync(RelSession(jyName,"Two Way Safe","Watching for changes",conflicts:sharedConflict),true,"",DateTimeOffset.UtcNow);
+            CheckDetails("冲突",1,"shared.txt");
+            status=sharedStatus;
+            await ApplySyncListToBadgesAsync(RelSession(jyName,"Two Way Safe","Watching for changes")+RelSession(alyName,"Two Way Safe","Watching for changes"),true,"",DateTimeOffset.UtcNow);
+            CheckDetails("单链路已收敛",1);
+            syncLinkObservedAt[config.Draft.Slots[1].Id]=DateTimeOffset.UtcNow.AddSeconds(-31);
+            CheckDetails("未知",1);
+            await ApplySyncListToBadgesAsync(RelSession(jyName,"Two Way Safe","Watching for changes")+RelSession(alyName,"Two Way Safe","Halted due to root deletion"),true,"",DateTimeOffset.UtcNow);
+            CheckDetails("安全暂停",1);
+            config.Edit(d=>d.Slots[1].RemoteHostId=alyHost.Id);status=savedStatus;
+            await ApplySyncListToBadgesAsync(bothOk,true,"",DateTimeOffset.UtcNow);
+            config.Edit(d=>d.Slots[1].Directory=System.IO.Path.Combine(repo,"other-project"));
+            Render();CheckDetails("单链路已收敛",1);
+            check("R39 changed workspace never reuses an old healthy badge",Badge(1).Text!="同步：已收敛");
+            config.Edit(d=>{d.Slots[1].Directory=repo;d.Slots[1].RemoteHostId=jyHost.Id;});
+            Render();CheckDetails("未知",1);
+            await ApplySyncListToBadgesAsync(bothOk,true,"",DateTimeOffset.UtcNow);
+            CheckDetails("单链路已收敛",1);
+            config.Edit(d=>d.Slots[1].RemoteHostId=alyHost.Id);Render();
+            await ApplySyncListToBadgesAsync(bothOk.Replace("ssh://agent@jy.example.com:22/","ssh://other@jy.example.com:2222/"),true,"",DateTimeOffset.UtcNow);
+            check("R34 mismatched SSH user and port cannot claim convergence",Badge(0).Text=="同步：未知");
+            await ApplySyncListToBadgesAsync(bothOk,true,"",DateTimeOffset.UtcNow);
+            syncLinkObservedAt[config.Draft.Slots[0].Id]=DateTimeOffset.UtcNow.AddSeconds(-31);
+            check("R39 selecting a stale cached link immediately shows 未知",Badge(0).Text=="同步：未知");
+            // R39：观测超过 30 秒 → 未知并保留上次观测；探针失败 → 未知（非终态条目不回退 sync-final）。
+            await ApplySyncListToBadgesAsync(bothOk,true,"",DateTimeOffset.UtcNow.AddSeconds(-31));
+            check("R39 stale observation shows 未知 with last observation",Badge(0).Text=="同步：未知"&&Badge(0).ToolTip!.ToString()!.Contains("上次观测"));
+            await ApplySyncListToBadgesAsync(null,false,"mutagen sync list 超时（10 秒），已终止。",DateTimeOffset.UtcNow);
+            check("R39 probe failure shows 未知 not 未同步",Badge(0).Text=="同步：未知"&&Badge(1).Text=="同步：未知");
+            // R39：命名会话在输出里但无法匹配/解析 → fail-closed 未知，不回退成未同步。
+            await ApplySyncListToBadgesAsync($"Name: {jyName}\ngarbage\nName: {alyName}\ngarbage\n",true,"",DateTimeOffset.UtcNow);
+            check("R39 unparsable named sessions show 未知",Badge(0).Text=="同步：未知");
+            await ApplySyncListToBadgesAsync("",true,"",DateTimeOffset.UtcNow);
+            check("R39 empty successful output is still unknown",Badge(0).Text=="同步：未知");
+            await ApplySyncListToBadgesAsync("unexpected output",true,"",DateTimeOffset.UtcNow);
+            check("R39 unrecognized successful output is still unknown",Badge(0).Text=="同步：未知");
+            // R40：安全暂停徽章与原因文案。
+            var halted=RelSession(jyName,"Two Way Safe","Halted due to root deletion")+RelSession(alyName,"Two Way Safe","Watching for changes").Replace("jy.example.com","aly.example.com");
+            await ApplySyncListToBadgesAsync(halted,true,"",DateTimeOffset.UtcNow);
+            check("R40 root deletion shows 安全暂停 badge",Badge(0).Text=="同步：安全暂停"&&Badge(0).ToolTip!.ToString()!.Contains("根被删除"));
+            // R36：冲突徽章 + 详情清单 50 行截断与剩余计数（60 条冲突 → 50 行 + 剩余 10）。
+            var manyConflicts="Conflicts:\n"+string.Concat(Enumerable.Range(1,60).Select(i=>$"\t(alpha) f{i:D3}.txt (<non-existent> -> File (aa))\n\t(beta)  f{i:D3}.txt (<non-existent> -> File (bb))\n"));
+            var conflicted=RelSession(jyName,"Two Way Safe","Watching for changes",conflicts:manyConflicts)+RelSession(alyName,"Two Way Safe","Watching for changes").Replace("jy.example.com","aly.example.com");
+            await ApplySyncListToBadgesAsync(conflicted,true,"",DateTimeOffset.UtcNow);
+            check("R36 conflict shows 冲突 badge",Badge(0).Text=="同步：冲突");
+            var conflictSeen=false;
+            var conflictInspect=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};
+            conflictInspect.Tick+=(_,_)=>{
+                if(conflictSeen)return;
+                var window=OwnedWindows.OfType<Window>().FirstOrDefault(w=>w.Title=="同步详情");
+                if(window is null)return;
+                conflictSeen=true;conflictInspect.Stop();
+                _=Dispatcher.InvokeAsync(async()=>{
+                    try
+                    {
+                        var overall=FindLogical<TextBlock>(window).Single(t=>AutomationProperties.GetName(t)=="同步整体标签");
+                        var conflicts=FindLogical<ListBox>(window).Single(l=>AutomationProperties.GetName(l)=="同步冲突清单");
+                        var remaining=FindLogical<TextBlock>(window).Single(t=>AutomationProperties.GetName(t)=="同步冲突剩余计数");
+                        check("R36 conflict list caps at 50 rows with remaining 10 and overall 冲突",overall.Text=="冲突"&&conflicts.Items.Count==50&&remaining.Text.Contains("10"));
+                        check("R36 conflict rows carry relative path and link label",conflicts.Items.OfType<ListBoxItem>().All(i=>((string)i.Content).Contains("本机—京云")));
+                        await Dispatcher.InvokeAsync(window.UpdateLayout,DispatcherPriority.ApplicationIdle);
+                        CaptureQuickActions(window,System.IO.Path.Combine(folder,"sync-details-conflicts.png"));
+                        var close=FindLogical<Button>(window).Single(b=>(string)b.Content=="关闭");
+                        close.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    }
+                    catch(Exception e){check("R36 conflict dialog inspection failed: "+e.Message,false);try{window.Close();}catch{}}
+                });
+            };
+            conflictInspect.Start();
+            try{ShowSyncDetails(config.Draft.Slots[0].Id);}finally{conflictInspect.Stop();}
+            check("R36 conflict details dialog opened for inspection",conflictSeen);
+            // R41：启用 SSHFS/None 槽位后按最近尝试状态显示挂载提示与拒收文案（都不是已收敛）。
+            var sshfsAttempt=Guid.NewGuid();var noneAttempt=Guid.NewGuid();
+            var sshfsPlan=new LaunchItem(sshfsAttempt,Guid.NewGuid(),3,"r41-sshfs",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:config.Draft.Slots[2].Id,RemoteExecution:new RemoteExecutionSpec(sshfsHost.Address,22,"root","agent","pi","/home/agent/work",[],null,null,new(WorkspaceSyncMode.SshfsMount,repo,"/home/agent/work",null,null)));
+            var nonePlan=new LaunchItem(noneAttempt,Guid.NewGuid(),4,"r41-none",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:config.Draft.Slots[3].Id,RemoteExecution:new RemoteExecutionSpec(noneHost.Address,22,"root","agent","pi","/home/agent/work",[],null,null));
+            status=new(true,"sync reliability probe",[new ControlEntry{Plan=jyPlan,State="Started"},new ControlEntry{Plan=alyPlan,State="Started"},new ControlEntry{Plan=sshfsPlan,State="Started"},new ControlEntry{Plan=nonePlan,State="FailedBeforeStart"}]);
+            config.Edit(d=>{d.Slots[2].Enabled=true;d.Slots[3].Enabled=true;});
+            Render();
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+            check("R41 SSHFS alive shows 已挂载 not convergence",Badge(2).Text=="同步：已挂载"&&Badge(2).ToolTip!.ToString()!.Contains("不是已收敛"));
+            check("R41 None shows rejection copy",Badge(3).Text=="同步：未同步"&&Badge(3).ToolTip!.ToString()!.Contains("拒收"));
+            config.Edit(d=>d.Slots[0].RemoteHostId=sshfsHost.Id);
+            check("R41 old Mutagen attempt cannot certify a new SSHFS mount",Badge(0).Text!="同步：已挂载");
+            config.Edit(d=>d.Slots[0].RemoteHostId=jyHost.Id);
+            // A1 回归：会话已终止（list 无该会话）时终态条目仍回退 sync-final，新状态机不吞掉旧回退链。
+            Store.Save(Store.SyncFinalPath(jyAttempt),new SyncFinalRecord(1,SyncFinalRecord.Synced,"Mutagen flush 成功，会话已终止。",DateTimeOffset.UtcNow));
+            status=new(true,"sync reliability probe",[new ControlEntry{Plan=jyPlan,State="Settled"},new ControlEntry{Plan=alyPlan,State="Started"},new ControlEntry{Plan=sshfsPlan,State="Started"},new ControlEntry{Plan=nonePlan,State="FailedBeforeStart"}]);
+            await ApplySyncListToBadgesAsync(RelSession(alyName,"Two Way Safe","Watching for changes").Replace("jy.example.com","aly.example.com"),true,"",DateTimeOffset.UtcNow);
+            check("A1 terminal fallback preserved under link badges",Badge(0).Text=="同步：已同步"&&Badge(1).Text=="同步：已收敛");
         }
         finally
         {
             config=originalConfig;status=originalStatus;Render();RenderMonitorStatus();
             if(polling)timer.Start();
+            if(memoryPolling)memoryTimer.Start();
         }
     }
 }

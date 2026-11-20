@@ -69,4 +69,11 @@ public static class RemoteHostEditor
 
     public static string UpgradeOverridesText(Dictionary<string,string>? overrides)=>
         overrides is null?"":string.Join("\n",overrides.Select(pair=>$"{pair.Key}={pair.Value}"));
+
+    // 三台同权（2026-11-18 产品决定；2026-11-19 拒收实现见 IMPLEMENTATION §92）：None 保存拒收文案。
+    // 主机编辑器与测试共用同一条边界；启动准备层的拒收在 WorkspacePreparer（文案含「同权」）。
+    public static string? ValidateSyncMode(WorkspaceSyncMode mode) =>
+        mode == WorkspaceSyncMode.None
+            ? "同步模式不能选 none：不同步时各机只看见自己的目录，改动不落回本机，不构成三台同权。请选择 mutagen 或 sshfs。"
+            : null;
 }

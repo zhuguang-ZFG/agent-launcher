@@ -4,6 +4,8 @@ $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtime=[IO.Path]::GetFullPath($RuntimeDirectory)
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
+& dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release -- --sync-review-checks
+if($LASTEXITCODE -ne 0){throw 'Sync review checks failed'}
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.TerminalModel.Tests/AgentLauncher.TerminalModel.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Embedded terminal model tests failed'}
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.ManualRelay.Tests/AgentLauncher.ManualRelay.Tests.csproj') -c Release
@@ -23,9 +25,9 @@ try {
   & (Join-Path $runtime 'AgentLauncher.Tests.exe') --repair-checks
   if($LASTEXITCODE -ne 0){throw 'Repair checks failed'}
   Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'repair-results.json') (Join-Path $root 'artifacts/repair-results.json')
-  foreach($suite in @('admission-integration','startup-queue','parallel-batch','terminal-batch','integration','remote-execution-integration','remote-startup-e2e')){
+  foreach($suite in @('admission-integration','startup-queue','parallel-batch','terminal-batch','integration','remote-execution-integration','remote-startup-e2e','sync-reliability-integration')){
     $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-'+$suite+'-'+[guid]::NewGuid().ToString('N'))
-    $testArgument=if($suite -in @('integration','admission-integration','remote-execution-integration','remote-startup-e2e')){'--'+$suite}else{'--'+$suite+'-checks'}
+    $testArgument=if($suite -in @('integration','admission-integration','remote-execution-integration','remote-startup-e2e','sync-reliability-integration')){'--'+$suite}else{'--'+$suite+'-checks'}
     try { & (Join-Path $runtime 'AgentLauncher.Tests.exe') $testArgument }
     finally {
     $diagnostics=Join-Path $root ('artifacts/ci-diagnostics/'+$suite)

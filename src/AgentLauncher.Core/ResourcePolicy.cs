@@ -342,6 +342,7 @@ public static class ResourcePolicy
                 item.RemoteExecution.AgentType,
                 item.RemoteExecution.RemoteWorkingDirectory,
                 Arguments = item.RemoteExecution.Arguments,
+                item.RemoteExecution.MemoryLimitBytes,
                 item.RemoteExecution.SshKeyPath,
                 SyncMode = item.RemoteExecution.WorkspaceSync?.Mode,
                 SyncLocal = item.RemoteExecution.WorkspaceSync?.LocalPath,

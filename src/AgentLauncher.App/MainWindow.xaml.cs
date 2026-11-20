@@ -248,10 +248,10 @@ public partial class MainWindow : Window
             var selectedSlot=selectedSlotId.HasValue?slots.FirstOrDefault(s=>s.Id==selectedSlotId.Value):null;
             selectedSlot??=slots.FirstOrDefault(s=>s.Enabled)??slots.FirstOrDefault();
             selectedSlotId=selectedSlot?.Id;
-            SlotList.Children.Clear();commandLabels.Clear();
+            SlotList.Children.Clear();commandLabels.Clear();syncBadges.Clear();
             if(selectedSlot is {} detailSlot)AddSlot(detailSlot);
             if(selectedSlot is {} shown)DetailTitle.Text=$"{slots.IndexOf(shown)+1:00} · {shown.DisplayName}";else DetailTitle.Text="要一起启动的 Agent";
-            RailSlots.Children.Clear();railLabels.Clear();railNames.Clear();railDots.Clear();railSources.Clear();syncBadges.Clear();
+            RailSlots.Children.Clear();railLabels.Clear();railNames.Clear();railDots.Clear();railSources.Clear();
             for(var i=0;i<slots.Count;i++)AddRailSlot(slots[i],i+1);
             AddButton.IsEnabled=CanAddSlot;
             var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
@@ -430,6 +430,7 @@ public partial class MainWindow : Window
             menu.Items.Add(new Separator());
             Menu("查看改动",()=>_=Owner.GuardAsync(()=>Owner.ShowSlotChangesAsync(slot.Id)),()=>true);
             Menu("刷新同步状态",()=>_=Owner.GuardAsync(()=>Owner.RefreshSlotSyncHealthAsync(slot.Id)),Remote);
+            Menu("同步详情…",()=>Owner.ShowSyncDetails(slot.Id),Remote);
             button.Click+=(_,_)=>{foreach(var (item,enabled) in items)item.IsEnabled=Owner.CanEditSlot(slot.Id)&&enabled();menu.PlacementTarget=button;menu.IsOpen=true;};
             Content=button;
             void Menu(string text,Action action,Func<bool> enabled){var item=new MenuItem{Header=text};item.Click+=(_,_)=>action();menu.Items.Add(item);items.Add((item,enabled));}
@@ -1090,7 +1091,7 @@ public partial class MainWindow : Window
             }
             error??=memoryLimitError??RemoteHost.ValidateMemoryLimitMib(memoryLimitMib);
             // 三台同权（2026-11-18 产品决定）：不同步的远程主机不构成同权，保存时拒收并说明改法。
-            if(syncMode==WorkspaceSyncMode.None)error="同步模式不能选 none：不同步时各机只看见自己的目录，改动不落回本机，不构成三台同权。请选择 mutagen 或 sshfs。";
+            if(syncMode==WorkspaceSyncMode.None)error=RemoteHostEditor.ValidateSyncMode(syncMode)!;
             if(error is not null){MessageBox.Show(window,error,caption,MessageBoxButton.OK,MessageBoxImage.Warning);return;}
             var updated=new RemoteHost(
                 Id:host?.Id??Guid.NewGuid(),

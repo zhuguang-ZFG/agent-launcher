@@ -72,13 +72,13 @@ public static class SyncReviewChecks
             var watching=Block(name,"Status: Watching for changes");
             var output=watching+"--------------------------------------------------------------------------------\n"+Block("unrelated-session","Status: Watching for changes");
             // 持久化名字精确匹配（重启后 App 用 sync-session.json 的名字恢复核对）。
-            var named=WorkspaceInsights.EvaluateSync(output,local,"vps.example.com","/home/agent/work",name);
+            var named=WorkspaceInsights.EvaluateSync(output,local,"vps.example.com","/home/agent/work","agent",22,name);
             Assert(named.State==SyncHealthState.Ready&&named.SessionName==name,"持久化会话名未匹配到就绪会话");
-            Assert(WorkspaceInsights.EvaluateSync(output,local,"vps.example.com","/home/agent/work","agent-launcher-missing").State==SyncHealthState.NotSynced,"不存在的会话名被匹配");
-            var problems=WorkspaceInsights.EvaluateSync(Block(name,"Status: Watching for changes\nTransition problems:\n\tpermission denied"),local,"vps.example.com","/home/agent/work",name);
+            Assert(WorkspaceInsights.EvaluateSync(output,local,"vps.example.com","/home/agent/work","agent",22,"agent-launcher-missing").State==SyncHealthState.NotSynced,"不存在的会话名被匹配");
+            var problems=WorkspaceInsights.EvaluateSync(Block(name,"Status: Watching for changes\nTransition problems:\n\tpermission denied"),local,"vps.example.com","/home/agent/work","agent",22,name);
             Assert(problems.State==SyncHealthState.Problems,"带 Transition problems 的命名会话未判为有问题");
             // 终态后会话已终止：list 匹配不到 → 回退 A1 sync-final。
-            var gone=WorkspaceInsights.EvaluateSync("",local,"vps.example.com","/home/agent/work",name);
+            var gone=WorkspaceInsights.EvaluateSync("",local,"vps.example.com","/home/agent/work","agent",22,name);
             Assert(gone.State==SyncHealthState.NotSynced,"空 list 仍声称有会话");
             var badge=WorkspaceInsights.EvaluateSyncBadge(gone,new SyncFinalRecord(1,SyncFinalRecord.Synced,"flush 成功",DateTimeOffset.UtcNow));
             Assert(badge.State==SyncHealthState.Synced,"终止会话未回退到 sync-final");

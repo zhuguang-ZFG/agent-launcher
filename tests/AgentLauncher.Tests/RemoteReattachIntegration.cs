@@ -114,18 +114,24 @@ internal static partial class RemoteExecutionIntegration
             Directory.CreateDirectory(syncDir);
             var syncPlan = Make("reattach-sync", "reattach-alive.example.com", ["disconnect"], new WorkspaceSyncSpec(WorkspaceSyncMode.Mutagen, syncDir, "/home/agent/work", null, null));
             await ReserveAsync(syncPlan);
-            StartPane(syncPlan.Id, false, true);
+            var initialSyncPane=StartPane(syncPlan.Id, false, true);
             await WaitAsync(syncPlan.Id, "Disconnected");
+            // 账本可先根据 SSH 退出推断断线；pane 退出才保证 flush 与结束证据写入完成。
+            await initialSyncPane.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(12));
+            Assert(initialSyncPane.ExitCode==255,"initial sync pane did not exit with SSH disconnect");
             var oldSession = Store.Read<SyncSessionRecord>(Store.SyncSessionPath(syncPlan.Id));
-            Assert(oldSession is not null && File.Exists(Store.SyncFinalPath(syncPlan.Id)), "initial sync evidence missing");
+            Assert(oldSession is {SchemaVersion:1}, "initial sync session evidence missing");
+            Assert(Store.Read<SyncFinalRecord>(Store.SyncFinalPath(syncPlan.Id)) is {SchemaVersion:1,State:SyncFinalRecord.Synced}, "initial sync final evidence missing or not synced");
+            Assert(Store.Read<Receipt>(Store.ReceiptPath(syncPlan.Id)) is {Phase:"Disconnected",ExitCode:255}, "initial sync disconnect receipt missing");
             var syncOk = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: syncPlan.Id, Reattach: new OperatorReattach(true)));
             Assert(syncOk.Ok, "sync reattach was refused: " + syncOk.Message);
-            StartPane(syncPlan.Id, true, true);
+            var syncReattachPane=StartPane(syncPlan.Id, true, true);
             var synced = await WaitAsync(syncPlan.Id, "Started");
             var newSession = Store.Read<SyncSessionRecord>(Store.SyncSessionPath(syncPlan.Id));
             Assert(synced.Detail.Contains("双向同步") && newSession is not null && newSession.Name != oldSession!.Name && !File.Exists(Store.SyncFinalPath(syncPlan.Id)), "sync was not re-established, or a finished sync receipt was left in place");
             Assert(!File.Exists(Store.OperatorReleasePath(syncPlan.Id)) && !Store.IsTerminal(synced), "sync reattach settled the attempt");
             var syncEnded = await WaitAsync(syncPlan.Id, "Disconnected");
+            await syncReattachPane.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(12));
             Assert(!Store.IsTerminal(syncEnded) && !File.Exists(Store.SyncFinalPath(syncPlan.Id)) && !File.Exists(Store.OperatorReleasePath(syncPlan.Id)), "sync attachment exit pretended the session had converged or released the slot");
 
             var gone = Make("reattach-gone", "reattach-gone.example.com", ["disconnect"]);
