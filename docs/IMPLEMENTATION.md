@@ -1537,3 +1537,11 @@ powershell -NoProfile -File scripts/test.ps1
 - 第三轮完整门禁 `artifacts/gate-candidate-r3.log` / `gate-candidate-r3-result.json` 于 10:46:40Z–11:00:28Z 完成，退出 0，冻结树 `447281dccf607a9b69d9eee55a891dfa858e3eae`。原生 292/0、同步兼容 6/0、TerminalModel 13/0、ManualRelay 0 失败、修复 36/0、八个集成套件全过（含 R33、远程启动 E2E、同步模拟 11/0）；实际 WPF 456 项通过且无 failed 字段、embedded 中文 ACK/RestoredScreen/退出 0、prototype 5/0、Omp 6/0、浏览器 5 项 PASS。未使用 SkipUi/SkipBrowser，未执行 live 模式。门禁后仅补写本节结果，产品代码与测试保持冻结树不变。
 - 第三轮 `artifacts/ui/quick-session-navigation.png`、`sync-details-converged.png`、`sync-details-conflicts.png` 已目视核对：导航记录可见，模拟双端点收敛及 50 行/剩余 10 条冲突提示正确。该目录复用时留下的旧 `ui-exception.json` 属于第二轮失败；第三轮结论以本轮最终回执及新 `ui-checks.json` 为准，旧失败已另行归档，不能混读。
 - 交付边界：操作员已授权提交隔离候选分支并在全新目录构建独立便携技术预览；包的源提交、工作树状态及伴随文件哈希以 `distribution.json` 为准。主分支、原功能分支、现有发货包和快捷方式不改，不推送。§93–94 的三轮浸泡、R45/R33 活测及 §83–84 的双云 Pi 真实任务都是历史版本证据，不是新候选版双云或三机同步验收。R44 未授权、未执行；独立操作员与干净环境验收未代签。
+
+## 96. PlanDigest 绑定远程内存上限（2026-11-20，Asia/Shanghai）
+
+- 缺口：`PlanDigest` 的远程执行投影包含主机/端口/用户/目录/参数/密钥/同步端点，唯独缺少 `RemoteExecutionSpec.MemoryLimitBytes`。该值由 `WorkspacePreparer` 从主机 `MemoryLimitMib` 换算写入计划，并被 `SshRunnerBackend` 用作 `systemd-run --scope -p MemoryMax=` 的上限；只改内存上限时计划摘要不变，reserve/worker 的「计划或策略不一致」检查会放行旧计划，等于让 R45 的上限绕过冻结摘要。
+- 修复：`ResourcePolicy.PlanDigest` 的远程投影加入 `MemoryLimitBytes`。摘要仍只覆盖计划内容，`PolicyHash` 继续只绑定资源策略快照，二者语义不变；不改变 reserve/worker/UI 的任何调用签名。
+- 回归：`ACC-R01 PlanDigest is unambiguous and includes Shared and Workspace` 增加两条断言——纯本地计划与远程计划摘要必须不同；同一远程计划只改 `MemoryLimitBytes`（2 GiB→4 GiB）摘要必须不同。
+- 验证（修复树 `fix/remote-memory-plan-digest`，基于候选提交 `d052704`）：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误；原生套件 **292/0**。负向对照如实执行：临时撤掉该字段时 `FAIL ACC-R01 ... remote memory limit was omitted from digest`（291 passed / 1 failed，128 秒），恢复后 292/0。本轮只跑原生套件与 solution build，未重跑完整门禁，也不把候选版 §95 的第三轮全绿迁移成此修复的门禁结论。
+- 交付边界（沿用 §95）：本修补只在隔离分支验证；主分支、原功能分支、现有发货包与快捷方式不改，不推送；新便携包需另行按 `distribution.json` 构建并单独记录。

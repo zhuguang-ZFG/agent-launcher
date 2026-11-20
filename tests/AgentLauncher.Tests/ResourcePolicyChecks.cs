@@ -625,6 +625,11 @@ internal static class ResourcePolicyChecks
                 throw new Exception("AgentId was omitted from digest");
             if (ResourcePolicy.PlanDigest([bound]) == ResourcePolicy.PlanDigest([bound with { Position = 16 }]))
                 throw new Exception("slot position was omitted from digest");
+            var remote = shared with { RemoteExecution = new RemoteExecutionSpec("vps.example.com", 22, "root", "agent", "pi", "/home/agent/work", ["--y"], 2L * 1024 * 1024 * 1024, null) };
+            if (ResourcePolicy.PlanDigest([shared]) == ResourcePolicy.PlanDigest([remote]))
+                throw new Exception("remote execution identity was omitted from digest");
+            if (ResourcePolicy.PlanDigest([remote]) == ResourcePolicy.PlanDigest([remote with { RemoteExecution = remote.RemoteExecution! with { MemoryLimitBytes = 4L * 1024 * 1024 * 1024 } }]))
+                throw new Exception("remote memory limit was omitted from digest");
         });
 
         Test("ACC-C02 default floors on large machines are not capped by custom maxima", () =>
