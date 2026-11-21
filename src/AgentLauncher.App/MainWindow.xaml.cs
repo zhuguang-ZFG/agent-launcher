@@ -229,7 +229,7 @@ public partial class MainWindow : Window
             ProjectPath.Text=config.Draft.Project;var noProject=string.IsNullOrWhiteSpace(config.Draft.Project);ProjectTitle.Text=MiddleEllipsis(noProject?"还没有选择项目":System.IO.Path.GetFileName(config.Draft.Project.TrimEnd('\\','/')) is {Length:>0} title?title:config.Draft.Project);ProjectTitle.ToolTip=noProject?null:config.Draft.Project;
             ProjectSwitchText.Text=noProject?"选择项目…":ProjectName(config.Draft.Project);ProjectSwitchButton.ToolTip=noProject?"选择项目或最近项目":config.Draft.Project+"\n点击切换最近项目";
             var ownDirectories=config.Draft.Slots.Count(s=>s.Enabled&&!string.IsNullOrWhiteSpace(s.Directory));
-            ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用下方各自的工作目录；修改此处不会改变它们。":noProject?"选择项目，勾选 Agent，然后启动。":"未单独指定目录的 Agent 使用此项目";
+            ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用下方各自的工作目录；修改此处不会改变它们。":noProject?"选择项目，点「补齐本机 Agent」，然后启动。":"未单独指定目录的 Agent 使用此项目";
             ProjectGuide.Visibility=Visibility.Visible;
             RenderRecentProjects();
             DirectoryMode.SelectedIndex=config.Draft.DirectoryMode switch{"prepared"=>1,"shared"=>2,_=>0};Layout.SelectedIndex=config.Draft.Layout=="horizontal"?1:0;
@@ -253,7 +253,7 @@ public partial class MainWindow : Window
             if(selectedSlot is {} shown)DetailTitle.Text=$"{slots.IndexOf(shown)+1:00} · {shown.DisplayName}";else DetailTitle.Text="要一起启动的 Agent";
             RailSlots.Children.Clear();railLabels.Clear();railNames.Clear();railDots.Clear();railSources.Clear();
             for(var i=0;i<slots.Count;i++)AddRailSlot(slots[i],i+1);
-            AddButton.IsEnabled=CanAddSlot;
+            AddButton.IsEnabled=CanAddSlot;InstalledAgentsButton.IsEnabled=CanEditSlots;
             var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
             RenderMultipanePreview(active);Layout.IsEnabled=active.Length==2;
             PaneCount.Text=$"{active.Length} 个窗格";ArrangePanels();
@@ -674,7 +674,7 @@ public partial class MainWindow : Window
     {
         ProjectPath.IsEnabled=!locked;Recent.IsEnabled=!locked;Templates.IsEnabled=!locked;AgentSearch.IsEnabled=!locked;SlotList.IsEnabled=!locked;DirectoryMode.IsEnabled=!locked;
         foreach(var toggle in FindLogical(RailSlots).OfType<CheckBox>())toggle.IsEnabled=!locked&&CanEditSlots;
-        ChooseProjectButton.IsEnabled=!locked;SaveTemplateButton.IsEnabled=!locked;DiscoverButton.IsEnabled=!locked&&!discovering;AddButton.IsEnabled=!locked&&CanAddSlot;Layout.IsEnabled=!locked&&config.Draft.Slots.Count(s=>s.Enabled)==2;
+        ChooseProjectButton.IsEnabled=!locked;SaveTemplateButton.IsEnabled=!locked;DiscoverButton.IsEnabled=!locked&&!discovering;AddButton.IsEnabled=!locked&&CanAddSlot;InstalledAgentsButton.IsEnabled=!locked&&CanEditSlots;Layout.IsEnabled=!locked&&config.Draft.Slots.Count(s=>s.Enabled)==2;
     }
     private void SetBusy(bool value){busy=value;CancelButton.IsEnabled=value&&launchCancellation!=null;SetConfigLocked(value);UpdateLaunch();}
     private void UnlockForCleanup()
@@ -842,6 +842,7 @@ public partial class MainWindow : Window
     private void ChooseClick(object sender,RoutedEventArgs e){if(busy||readOnly)return;var picker=new OpenFolderDialog{Title="选择项目文件夹"};if(picker.ShowDialog(this)==true)SelectProject(picker.FolderName);}
     private async void RecentChanged(object sender,SelectionChangedEventArgs e){if(!rendering&&Recent.SelectedItem is string path)await (recentProjectTask=GuardAsync(()=>SwitchRecentProjectAsync(path)));}
     private void AddClick(object sender,RoutedEventArgs e)=>AddAgentSlot();
+    private async void InstalledAgentsClick(object sender,RoutedEventArgs e)=>await GuardAsync(()=>AddInstalledAgentsAsync());
     private void LayoutChanged(object sender,SelectionChangedEventArgs e){if(Layout.SelectedItem is ComboBoxItem {Tag:string value})Edit(d=>d.Layout=value);}
     private void DirectoryChanged(object sender,SelectionChangedEventArgs e){if(DirectoryMode.SelectedItem is ComboBoxItem {Tag:string value})Edit(d=>d.DirectoryMode=value);}
     private void TemplateChanged(object sender,SelectionChangedEventArgs e)

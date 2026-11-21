@@ -23,7 +23,7 @@
       <TextBox x:Name="ProjectPath" Margin="0,8,0,0" FontFamily="Consolas,Microsoft YaHei" FontSize="12" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" ToolTip="输入本地绝对目录，或拖入文件夹"/>
       <DockPanel Margin="0,6,0,0">
        <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" VerticalAlignment="Top"/>
-       <TextBlock x:Name="ProjectGuide" Text="选择项目，勾选 Agent，然后启动。" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+      <TextBlock x:Name="ProjectGuide" Text="选择项目，点「补齐本机 Agent」，然后启动。" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"/>
       </DockPanel>
       <ComboBox x:Name="Recent" Margin="0,6,0,0" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/>
      </StackPanel>
@@ -66,6 +66,7 @@
      <StackPanel>
       <StackPanel x:Name="RailSlots"/>
       <Button x:Name="AddButton" Content="＋ 添加 Agent" Style="{StaticResource QuietButton}" Click="AddClick" HorizontalAlignment="Left" Margin="0,6,0,0" AutomationProperties.Name="添加 Agent"/>
+      <Button x:Name="InstalledAgentsButton" Content="补齐本机 Agent" Style="{StaticResource QuietButton}" Click="InstalledAgentsClick" HorizontalAlignment="Left" Margin="0,6,0,0" AutomationProperties.Name="补齐本机 Agent"/>
      </StackPanel>
     </ScrollViewer>
    </DockPanel>
