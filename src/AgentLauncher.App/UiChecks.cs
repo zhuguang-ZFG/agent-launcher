@@ -37,6 +37,7 @@ public partial class MainWindow
             var savedPlacement=System.IO.File.Exists(path)?System.IO.File.ReadAllBytes(path):null;
             var savedBackup=System.IO.File.Exists(backupPath)?System.IO.File.ReadAllBytes(backupPath):null;
             var originalState=WindowState;var originalStartup=WindowStartupLocation;var originalLeft=Left;var originalTop=Top;var originalWidth=Width;var originalHeight=Height;
+            var originalMinWidth=MinWidth;var originalMinHeight=MinHeight;
             var originalWindowedBounds=windowedBounds;var originalLastNonMinimizedState=lastNonMinimizedState;
             try
             {
@@ -52,11 +53,39 @@ public partial class MainWindow
                 SaveWindowPlacement();
                 var actual=Store.Read<WindowPlacement>(path);
                 Check("UX16 minimized placement retains normal position size and max state",actual is {Maximized:true}&&Math.Abs(actual.Left-expected.Left)<0.5&&Math.Abs(actual.Top-expected.Top)<0.5&&Math.Abs(actual.Width-expected.Width)<0.5&&Math.Abs(actual.Height-expected.Height)<0.5);
+                RestoreBackground();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                Check("UX16 restoring a minimized maximized window keeps its max state",WindowState==WindowState.Maximized);
+                EnterBackground();
+                Check("UX16 backgrounding a maximized window keeps it maximized",!IsVisible&&WindowState==WindowState.Maximized);
+                RestoreBackground();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
+                Check("UX16 background restore and tray exit preserve maximized placement",IsVisible&&WindowState==WindowState.Maximized&&Store.Read<WindowPlacement>(path) is {Maximized:true});
+                WindowState=WindowState.Normal;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                EnterBackground();RestoreBackground();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
+                Check("UX16 background restore keeps a normal window normal",IsVisible&&WindowState==WindowState.Normal&&Store.Read<WindowPlacement>(path) is {Maximized:false});
+                if(!TryGetWindowWorkArea(out var work))throw new InvalidOperationException("无法读取测试窗口工作区。");
+                Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,false));
+                ApplyWindowPlacement();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                Check("UX16 restored normal bounds fit the selected monitor work area",Left>=work.Left-0.5&&Top>=work.Top-0.5&&Left+Width<=work.Right+0.5&&Top+Height<=work.Bottom+0.5);
+                Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,true));
+                ApplyWindowPlacement();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
+                var maxPlacement=Store.Read<WindowPlacement>(path);
+                Check("UX16 maximized restore retains work-area-safe windowed bounds",WindowState==WindowState.Maximized&&maxPlacement is {Maximized:true}&&maxPlacement.Left>=work.Left-0.5&&maxPlacement.Top>=work.Top-0.5&&maxPlacement.Left+maxPlacement.Width<=work.Right+0.5&&maxPlacement.Top+maxPlacement.Height<=work.Bottom+0.5);
+                Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,false));
+                var beforeShow=new MainWindow([]);
+                try
+                {
+                    new System.Windows.Interop.WindowInteropHelper(beforeShow).EnsureHandle();
+                    if(!beforeShow.TryGetWindowWorkArea(out var sourceWork))throw new InvalidOperationException("无法读取未显示窗口工作区。");
+                    Check("UX16 source initialization fits saved bounds before first show",!beforeShow.IsVisible&&beforeShow.Left>=sourceWork.Left-0.5&&beforeShow.Top>=sourceWork.Top-0.5&&beforeShow.Left+beforeShow.Width<=sourceWork.Right+0.5&&beforeShow.Top+beforeShow.Height<=sourceWork.Bottom+0.5);
+                }
+                finally{beforeShow.closing=true;beforeShow.Close();}
             }
             finally
             {
                 static void RestoreFile(string file,byte[]? bytes){if(bytes is null){if(System.IO.File.Exists(file))System.IO.File.Delete(file);}else System.IO.File.WriteAllBytes(file,bytes);}
                 RestoreFile(path,savedPlacement);RestoreFile(backupPath,savedBackup);
+                if(!IsVisible)RestoreBackground();
+                MinWidth=originalMinWidth;MinHeight=originalMinHeight;
                 WindowState=WindowState.Normal;WindowStartupLocation=originalStartup;Left=originalLeft;Top=originalTop;Width=originalWidth;Height=originalHeight;WindowState=originalState;
                 await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
                 windowedBounds=originalWindowedBounds;lastNonMinimizedState=originalLastNonMinimizedState;

@@ -23,7 +23,11 @@ public partial class MainWindow
         LocationChanged+=WindowPlacementLocationChanged;
         SourceInitialized+=WindowPlacementSourceInitialized;
     }
-    private void WindowPlacementSourceInitialized(object? sender,EventArgs e)=>windowHandle=new System.Windows.Interop.WindowInteropHelper(this).Handle;
+    private void WindowPlacementSourceInitialized(object? sender,EventArgs e)
+    {
+        windowHandle=new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        FitWindowPlacementToWorkArea();
+    }
 
     private void WindowPlacementStateChanged(object? sender,EventArgs e)
     {
@@ -45,6 +49,34 @@ public partial class MainWindow
 
 
     private bool IsUsableWindowedBounds(Rect bounds)=>!bounds.IsEmpty&&IsFinite(bounds.Left)&&IsFinite(bounds.Top)&&IsFinite(bounds.Width)&&IsFinite(bounds.Height)&&bounds.Width>=MinWidth&&bounds.Height>=MinHeight;
+    private bool TryGetWindowWorkArea(out Rect workArea)
+    {
+        workArea=Rect.Empty;
+        if(windowHandle==IntPtr.Zero)return false;
+        var target=System.Windows.Interop.HwndSource.FromHwnd(windowHandle)?.CompositionTarget;
+        if(target is null)return false;
+        var monitor=WindowPlacementNative.MonitorFromWindow(windowHandle,2);
+        var info=new WindowPlacementNative.MonitorInfo{Size=System.Runtime.InteropServices.Marshal.SizeOf<WindowPlacementNative.MonitorInfo>()};
+        if(monitor==IntPtr.Zero||!WindowPlacementNative.GetMonitorInfo(monitor,ref info))return false;
+        var fromDevice=target.TransformFromDevice;
+        workArea=new Rect(fromDevice.Transform(new Point(info.Work.Left,info.Work.Top)),fromDevice.Transform(new Point(info.Work.Right,info.Work.Bottom)));
+        return !workArea.IsEmpty&&workArea.Width>0&&workArea.Height>0;
+    }
+    private void FitWindowPlacementToWorkArea()
+    {
+        if(!TryGetWindowWorkArea(out var work))return;
+        var bounds=RestoreBounds;
+        if(!IsUsableWindowedBounds(bounds))bounds=windowedBounds;
+        if(!IsUsableWindowedBounds(bounds))return;
+        MinWidth=Math.Min(MinWidth,work.Width);MinHeight=Math.Min(MinHeight,work.Height);
+        var width=Math.Min(bounds.Width,work.Width);var height=Math.Min(bounds.Height,work.Height);
+        var left=Math.Clamp(bounds.Left,work.Left,work.Right-width);var top=Math.Clamp(bounds.Top,work.Top,work.Bottom-height);
+        WindowStartupLocation=WindowStartupLocation.Manual;
+        Width=width;Height=height;Left=left;Top=top;
+        windowedBounds=new Rect(left,top,width,height);
+    }
+
+
 
     private void ApplyWindowPlacement()
     {
@@ -67,6 +99,7 @@ public partial class MainWindow
             Height=height;
             RememberWindowedBounds();
             if(saved.Maximized)WindowState=WindowState.Maximized;
+            if(windowHandle!=IntPtr.Zero)FitWindowPlacementToWorkArea();
         }
         catch(Exception e)when(e is not OutOfMemoryException){/* 单个 UI 记录损坏时保留默认窗口，不阻止启动。 */}
     }
@@ -88,6 +121,12 @@ public partial class MainWindow
     {
         [System.Runtime.InteropServices.DllImport("user32.dll")] internal static extern bool IsZoomed(IntPtr handle);
         [System.Runtime.InteropServices.DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr handle);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] internal static extern IntPtr MonitorFromWindow(IntPtr handle,uint flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] internal static extern bool GetMonitorInfo(IntPtr monitor,ref MonitorInfo info);
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        internal struct NativeRect{internal int Left,Top,Right,Bottom;}
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        internal struct MonitorInfo{internal int Size;internal NativeRect Monitor,Work;internal uint Flags;}
     }
     private static bool IsFinite(double value)=>double.IsFinite(value);
 }

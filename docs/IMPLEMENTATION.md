@@ -1581,3 +1581,14 @@ powershell -NoProfile -File scripts/test.ps1
 - 回归：`src/AgentLauncher.App/UiChecks.cs` 新增 UX16，隔离保存并恢复 `window-placement.json`、`.bak`、原窗口几何/状态及内部 bounds 缓存；最大化→最小化后断言位置、尺寸和最大化标志。固定版 `--ui-check` **476/476 通过、退出 0**。旧版相同原生探针写出 `Left/Top=-7.2`，重开 native normal rect 为 `0,0 1400x950`；修复版写出 `(200,120,1120,760,Maximized=true)`，重开 native normal rect 正确为 `250,150 1400x950`，进程退出 0。
 - 验证限制：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误；固定版 `--ui-check` 476/476 通过，UX16 已获用户评审通过。旧版 UI 检查在 `fake-sample monitor healthy` 提前失败，未运行到 UX16；旧行为的失败证据来自同场景原生矩形探针，不声称已对旧二进制运行 UX16。`task_verify` 仍为 `unverified`（项目/Git 基线不可用、无已配置检查）；完整 `scripts/test.ps1` 全量门禁未运行。
 - 交付：`artifacts/preview` 已基于本修复重新发布，`distribution.json` 为 `SourceDirty=false`、20 个文件，`Launch.ps1 -CheckOnly` 通过；桌面快捷方式继续指向该目录。构建前一包保留在 `artifacts/preview.before-*`。
+
+## 100. 托盘状态与显示器工作区修复（2026-11-21，Asia/Shanghai）
+
+- 行为：`RestoreBackground()` 在 `Show()` 前取得原状态；普通窗口仍为普通，最大化窗口仍为最大化，最小化窗口按最后非最小化状态恢复。托盘的「退出并暂停队列」继续走原关闭流程，不再因恢复窗口而把 `Maximized` 写成 false。
+- 工作区：构造阶段仍校验保存记录；`SourceInitialized` 在 HWND 和其 DPI 已确定、首次显示之前，使用目标显示器的 `rcWork` 约束普通 bounds。坐标转换使用该 `HwndSource.CompositionTarget.TransformFromDevice`，不混用主屏 DPI 与目标显示器像素；实时重新应用记录也走同一裁剪路径。小工作区同时收紧最小窗口尺寸，离屏/损坏记录仍安全回退；JSON 格式不变。
+- 根因：两项均是跨层契约/隐含假设。后台入口只隐藏窗口，旧恢复入口却无条件改 Normal；虚拟桌面外包矩形包含任务栏区域，不能作为可用工作区。窗口记忆必须在真实 HWND 初始化后核对工作区，不能只在构造函数中查询尚不存在的 HWND。
+- 旧失败/新通过：新增的同一 UX16 断言先在旧恢复逻辑上失败于 `background restore and tray exit preserve maximized placement`；只修复托盘后，该断言通过，随后失败于 `restored normal bounds fit the selected monitor work area`。两项修复后，真实 WPF `--ui-check` **483/483 通过，退出 0**，含新增 7 条 UX16 及原有窗口记忆回归；未弱化旧断言。
+- 独立端到端：实际新进程启动探针覆盖超高普通、超高最大化、部分离屏、完全离屏和损坏 JSON，五项均正常退出。当前 120 DPI 显示器工作区为 `0,0 1920x1140`；超高普通窗口被还原为 `125,0 1250x1140`，启动按钮底边 1109，在工作区内。实际托盘菜单退出探针对普通/最大化分别保存 false/true，普通 bounds 均保留 `120,80 1000x700`。
+- 测试评审：`UiChecks.cs` 的 7 条新增检查及夹具清理已获用户批准；夹具还会恢复原最小尺寸，并关闭仅创建 HWND、未显示的检查窗口。未修改测试运行器或验证策略。
+- 验证边界：Release solution build 0 警告/0 错误；`task_verify` 为 **unverified**（项目/Git 基线不可用，无已配置检查），不是通过。未运行完整 `scripts/test.ps1`；实际多显示器/混合 DPI 硬件未覆盖，当前真机 DPI 为 125%。
+- 交付入口：仓库 `Start-AgentLauncher.cmd` 与桌面快捷方式使用 `artifacts/preview`；配套 App/Worker 经 `scripts/build.ps1` 一起发布，源码提交与 `SourceDirty` 以最终 `distribution.json` 为准。
