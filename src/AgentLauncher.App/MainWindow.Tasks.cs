@@ -568,8 +568,7 @@ public partial class MainWindow
         string terminal;
         try
         {
-            var terminalPath = config.TerminalPath;
-            terminal = await Task.Run(() => Commands.Terminal(terminalPath), cancellationToken);
+            terminal = await ResolveLaunchTerminalAsync(cancellationToken);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
         {
@@ -659,7 +658,7 @@ public partial class MainWindow
             cancellationToken.ThrowIfCancellationRequested();
             QueueStatusText.Text = $"正在提交任务：{task.Name}";
             cancellationToken.ThrowIfCancellationRequested();
-            await Task.Run(() => Commands.SubmitTerminal(terminal, [plan], "vertical"));
+            await SubmitPanesAsync(terminal,[plan],"vertical");
             submitted = true;
             QueueStatusText.Text = $"已提交任务：{task.Name}。进程出现不代表 Agent 已就绪。";
             if (!closeRequested && config.MinimizeAfterLaunch) WindowState = WindowState.Minimized;

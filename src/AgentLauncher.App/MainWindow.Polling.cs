@@ -162,6 +162,13 @@ public partial class MainWindow
 
     private async Task<string> ResolveCommandLabelAsync(Slot slot)
     {
+        if(slot.RemoteHostId is not null)
+        {
+            var host=RemoteHostForSlot(slot)??throw new IOException("远程主机已移除，请重新选择。");
+            if(!host.Supports(slot.AgentId))throw new IOException($"远程主机「{host.Name}」未配置此 Agent。");
+            if(!RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(slot.RemoteDirectory??""))throw new IOException("请先填写远程工作目录。");
+            return $"{host.Name} · {RemoteAgentMaintenance.AgentCommand(slot.AgentId)} · {slot.RemoteDirectory}";
+        }
         var key = (slot.AgentId, slot.Current.Executable);
         if (commandLabelCache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromSeconds(60)) return cached.Path;
         var command = await Task.Run(() => Commands.Resolve(slot.AgentId, slot.Current));

@@ -3,6 +3,11 @@ namespace AgentLauncher.Core;
 // 工作区映射：本地 Windows 路径 → 远程 Linux 路径推导
 public static class RemoteWorkspaceMappingHelper
 {
+    public static string QuoteShellArgument(string value)=>"'" + value.Replace("'", "'\\''") + "'";
+
+    public static string ShellDirectory(string path)=>path.StartsWith("~/",StringComparison.Ordinal)
+        ? "~/"+QuoteShellArgument(path[2..]) : QuoteShellArgument(path);
+
     // 自动推导远程工作目录（基于本地路径）
     // 策略：
     //   1. 提取项目名（路径最后一段）

@@ -20,6 +20,8 @@ public partial class MainWindow
         var originalSlot = selectedSlotId; var originalWidth = Width; var originalHeight = Height;
         var originalReadOnly = readOnly; var originalQueue = queueEnabled; var originalScope = queueScopeTaskIds;
         var originalSessionExpanded = SessionExpander.IsExpanded; var originalTaskExpanded = TaskExpander.IsExpanded;
+        var originalEmbeddedVisibility = EmbeddedPanel.Visibility; var originalEmbeddedTab = EmbeddedTabs.SelectedItem;
+        var terminalId = Guid.NewGuid();
         var wasPolling = timer.IsEnabled; var wasPumping = taskTimer.IsEnabled;
         timer.Stop(); taskTimer.Stop();
         await saveTask;
@@ -43,15 +45,37 @@ public partial class MainWindow
             check("UX10 switching Agent preserves pending project input and selection flags", selectedSlotId == config.Draft.Slots[1].Id && ProjectPath.Text.EndsWith("unconfirmed-path") && config.Draft.Project == configuredProject && !config.Draft.Slots[1].Enabled);
             rendering = true; ProjectPath.Text = configuredProject; rendering = false;
             var revision = config.Draft.Revision;
+            var terminalCard = new TerminalCard();
+            var terminalTab = new TabItem { Tag = terminalId, Header = "导航焦点检查", Content = terminalCard };
+            embeddedViews.Add(terminalId, new PaneView { Tab = terminalTab, Card = terminalCard, Status = new TextBlock() });
+            EmbeddedPanel.Visibility = Visibility.Visible;
+            EmbeddedTabs.Items.Add(terminalTab); EmbeddedTabs.SelectedItem = terminalTab;
             var sessionButton = RailSessions.Children.OfType<Button>().Single(b => AutomationProperties.GetName(b) == "查看会话 接口服务");
             sessionButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
-            check("UX10 rail session opens and focuses the exact record", ActiveNow.Visibility == Visibility.Visible && Keyboard.FocusedElement is FrameworkElement { Tag: Guid focusedId } && focusedId == attemptId);
+var focusedElement = Keyboard.FocusedElement as FrameworkElement;
+            var sessionFocused = (ActiveNow.Visibility == Visibility.Visible || SessionExpander.IsExpanded) && focusedElement?.Tag is Guid focusedId && focusedId == attemptId;
+            Store.Save(Path.Combine(folder, "quick-session-focus.json"), new { IsActive, IsVisible, WindowState, Expanded = SessionExpander.IsExpanded, ActiveNow = ActiveNow.Visibility, ExpectedId = attemptId, FocusedType = focusedElement?.GetType().Name, FocusedName = focusedElement?.Name, FocusedId = focusedElement?.Tag is Guid tag ? (Guid?)tag : null, FocusedLoaded = focusedElement?.IsLoaded, FocusedVisible = focusedElement?.IsVisible, LogicalFocusType = FocusManager.GetFocusedElement(this)?.GetType().Name });
+            if (!sessionFocused) CaptureQuickActions(this, Path.Combine(folder, "quick-session-focus-failure.png"));
+            check("UX10 rail session opens and focuses the exact record", sessionFocused);
+            check("UX10 session navigation reveals the record without closing the terminal", EmbeddedPanel.Visibility == Visibility.Collapsed && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);
+            CaptureQuickActions(this, Path.Combine(folder, "quick-session-navigation.png"));
             var queueButton = RailQueue.Children.OfType<Button>().Single(b => AutomationProperties.GetName(b) == "查看等待项 界面检查");
             check("UX10 paused queue rail does not claim a resource shortage", queueButton.Content is TextBlock text && text.Text.Contains("已暂停") && !text.Text.Contains("等待资源"));
+            ShowEmbeddedClick(this, new());
+            EmbeddedTabs.SelectedItem = null; EmbeddedTabs.SelectedItem = terminalTab;
             queueButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
             check("UX10 rail queue navigation never dispatches or edits the queue", TaskExpander.IsExpanded && Keyboard.FocusedElement is FrameworkElement { Tag: Guid focusedQueue } && focusedQueue == queueId && !queueEnabled && taskBook.Queue.Count == 1 && config.Draft.Revision == revision);
+            check("UX10 queue navigation reveals the record without closing the terminal", EmbeddedPanel.Visibility == Visibility.Collapsed && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);
+            ShowEmbeddedClick(this, new());
+            NavigateToSlot(config.Draft.Slots[1].Id);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
+            check("UX10 Agent navigation returns from the terminal without closing it", EmbeddedPanel.Visibility == Visibility.Collapsed && selectedSlotId == config.Draft.Slots[1].Id && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);
+            ShowEmbeddedClick(this, new());
+            JumpTo(SessionExpander);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
+            check("UX10 section navigation returns from the terminal without closing it", EmbeddedPanel.Visibility == Visibility.Collapsed && SessionExpander.IsExpanded && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);
             readOnly = true;
             check("UX10 command availability rechecks read-only state after snapshot", !actions.Single(a => a.Id == "project").Enabled && !actions.Single(a => a.Id.StartsWith("recent:", StringComparison.Ordinal)).Enabled);
             readOnly = false;
@@ -126,6 +150,8 @@ public partial class MainWindow
         }
         finally
         {
+            RemoveEmbedded(terminalId);
+            EmbeddedTabs.SelectedItem = originalEmbeddedTab; EmbeddedPanel.Visibility = originalEmbeddedVisibility;
             await saveTask;
             config = originalConfig; status = originalStatus; taskBook = originalBook; selectedSlotId = originalSlot;
             readOnly = originalReadOnly; queueEnabled = originalQueue; queueScopeTaskIds = originalScope;

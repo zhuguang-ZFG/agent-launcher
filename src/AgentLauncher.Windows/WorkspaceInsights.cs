@@ -121,16 +121,26 @@ public static class WorkspaceInsights
         return path;
     }
 
+    /// <summary>诊断探针参数：一次只读 list。--long 必需——默认输出不含同步模式，冲突只有计数（mutagen 0.18.1 实测）。</summary>
+    internal static string[] BuildListArguments(string? sessionName) =>
+        sessionName is null ? ["sync", "list", "--long"] : ["sync", "list", "--long", sessionName];
+
     /// <summary>运行 mutagen sync list（可指定会话名）；mutagen 缺失/失败/超时返回 Ok=false 与可读原因，不抛出。</summary>
     public static async Task<(bool Ok,string Output,string Error)> ListMutagenSessionsAsync(CancellationToken cancellation,string? sessionName=null)
     {
         try
         {
-            var args=sessionName is null?new[]{"sync","list"}:new[]{"sync","list",sessionName};
+            var args = BuildListArguments(sessionName);
             var capture=await ReviewProcess.CaptureAsync("mutagen",Environment.CurrentDirectory,args,cancellation,TimeoutSeconds,512*1024);
             if(capture.TimedOut)return(false,"",$"mutagen sync list 超时（{TimeoutSeconds} 秒），已终止；同步状态未知。");
+            if(capture.Truncated)return(false,"","mutagen sync list 输出超出读取边界，已截断；同步状态未知。");
             var output=Encoding.UTF8.GetString(capture.Output);
             if(capture.Code!=0)return(false,output,"mutagen sync list 失败（会话可能不存在）："+ReviewGit.Clean(capture.Error));
+            var blocks=SyncReliability.SplitSessionBlocks(output);
+            var noSessions=blocks.Length==1&&blocks[0].Trim()=="No sessions found";
+            // ParseSession 仅凭 Name 即可返回；探针成功还需完整的端点与状态，不能只信任可解析前缀。
+            if(!noSessions&&(blocks.Length==0||blocks.Any(block=>SyncReliability.ParseSession(block) is not { AlphaUrl.Length: >0, BetaUrl.Length: >0, Status.Length: >0 })))
+                return(false,"","mutagen sync list 输出为空或无法完整解析；同步状态未知。");
             return(true,output,"");
         }
         catch(OperationCanceledException){throw;}
@@ -138,29 +148,56 @@ public static class WorkspaceInsights
         {return(false,"","未找到 mutagen 或无法运行："+e.Message);}
     }
 
-    /// <summary>从 sync list 输出中按本地目录 + 远程主机/目录匹配会话并判定健康。会话名由 WorkspaceSync 自动生成（agent-launcher- 前缀 + 随机 GUID），无法从配置反推，因此按端点匹配、优先启动器前缀的会话。</summary>
-    public static SyncHealth EvaluateSync(string listOutput,string localPath,string remoteHost,string remotePath,string? sessionName=null)
+    // 同名会话也必须验证完整端点；未指定名字时只接受唯一匹配。
+    public static SyncHealth EvaluateSync(string listOutput,string localPath,string remoteHost,string remotePath,string remoteUser,int remotePort,string? sessionName=null)
     {
         if(string.IsNullOrWhiteSpace(localPath)||string.IsNullOrWhiteSpace(remotePath))
             return new(SyncHealthState.NotSynced,"","缺少本地或远程工作目录，无法核对同步会话；请先在「详情」中填写远程工作目录。");
         string local;
         try{local=Path.GetFullPath(localPath).TrimEnd('\\','/');}
         catch(Exception e)when(e is ArgumentException or NotSupportedException or PathTooLongException){return new(SyncHealthState.NotSynced,"","本地工作目录路径无效。");}
+        var matched=MatchSessionBlock(listOutput,local,remoteHost,remotePath,remoteUser,remotePort,sessionName);
+        if(matched is not {} m)return new(SyncHealthState.NotSynced,"","未找到匹配的 Mutagen 同步会话（可能尚未启动或已终止）；远端改动不会落回本机。");
+        return EvaluateBlock(m.Name,m.Block);
+    }
+
+    /// <summary>同步可靠性入口：按名字（优先）或端点匹配会话块并交给 Core 解析。无匹配/无法解析返回 null，由调用方决定回退或未知。</summary>
+    public static (string Name,ParsedMutagenSession Session)? FindSyncSession(string listOutput,string localPath,string remoteHost,string remotePath,string remoteUser,int remotePort,string? sessionName=null)
+    {
+        if(string.IsNullOrWhiteSpace(localPath)||string.IsNullOrWhiteSpace(remotePath))return null;
+        string local;
+        try{local=Path.GetFullPath(localPath).TrimEnd('\\','/');}
+        catch(Exception e)when(e is ArgumentException or NotSupportedException or PathTooLongException){return null;}
+        if(MatchSessionBlock(listOutput,local,remoteHost,remotePath,remoteUser,remotePort,sessionName) is not {} m)return null;
+        var parsed=SyncReliability.ParseSession(m.Block);
+        return parsed is null?null:(m.Name,parsed);
+    }
+
+    private static (string Name,string Block)? MatchSessionBlock(string listOutput,string local,string remoteHost,string remotePath,string remoteUser,int remotePort,string? sessionName)
+    {
         var remote=remotePath.TrimEnd('/');
-        var remoteTail=remote.StartsWith("~/",StringComparison.Ordinal)?remote[2..]:null;
-        string? fallbackName=null,fallbackBlock=null;
+        (string Name,string Block)? match=null;
         foreach(var block in SplitSessions(listOutput))
         {
-            var name=Field(block,"Name:");
-            if(sessionName is not null){if(!string.Equals(name,sessionName,StringComparison.Ordinal))continue;}
-            if(!block.Contains(local,StringComparison.OrdinalIgnoreCase))continue;
-            if(!block.Contains(remoteHost,StringComparison.OrdinalIgnoreCase))continue;
-            if(!block.Contains(remote,StringComparison.Ordinal)&&(remoteTail is null||!block.Contains(remoteTail,StringComparison.Ordinal)))continue;
-            if(sessionName is not null||name.StartsWith(WorkspaceSync.SessionNamePrefix,StringComparison.Ordinal))return EvaluateBlock(name,block);
-            fallbackName??=name;fallbackBlock??=block;
+            var parsed=SyncReliability.ParseSession(block);
+            if(parsed is null||(sessionName is not null&&parsed.Name!=sessionName))continue;
+            string alpha;
+            try{alpha=Path.GetFullPath(parsed.AlphaUrl).TrimEnd('\\','/');}
+            catch(Exception e)when(e is ArgumentException or NotSupportedException or PathTooLongException){continue;}
+            if(!string.Equals(alpha,local,StringComparison.OrdinalIgnoreCase))continue;
+            var endpointPattern=parsed.BetaUrl.StartsWith("ssh://",StringComparison.Ordinal)
+                ? @"^ssh://(?:(?<user>[^@/]+)@)?(?<host>\[[^\]]+\]|[^:/]+)(?::(?<port>[0-9]+))?(?<path>/.*)$"
+                : @"^(?:(?<user>[^@/:]+)@)?(?<host>\[[^\]]+\]|[^:/]+):(?:(?<port>[0-9]+):)?(?<path>.+)$";
+            var endpoint=System.Text.RegularExpressions.Regex.Match(parsed.BetaUrl,endpointPattern);
+            if(!endpoint.Success||!string.Equals(endpoint.Groups["host"].Value.Trim('[',']'),remoteHost.Trim('[',']'),StringComparison.OrdinalIgnoreCase))continue;
+            if(!string.Equals(endpoint.Groups["user"].Value,remoteUser,StringComparison.Ordinal))continue;
+            var portText=endpoint.Groups["port"].Value;
+            if(portText.Length==0?remotePort!=22:!int.TryParse(portText,out var port)||port!=remotePort)continue;
+            if(!string.Equals(endpoint.Groups["path"].Value.TrimEnd('/'),remote,StringComparison.Ordinal))continue;
+            if(match is not null)return null;
+            match=(parsed.Name,block);
         }
-        if(fallbackBlock is not null)return EvaluateBlock(fallbackName!,fallbackBlock);
-        return new(SyncHealthState.NotSynced,"","未找到匹配的 Mutagen 同步会话（可能尚未启动或已终止）；远端改动不会落回本机。");
+        return match;
     }
 
     /// <summary>A1 徽章状态机（纯函数）：有活会话（Ready/Syncing/Problems）原样沿用；无活会话（NotSynced）时回退
@@ -194,18 +231,8 @@ public static class WorkspaceInsights
         return new(SyncHealthState.Syncing,name,"同步会话存在但尚未就绪（连接/扫描/冲突处理中）；请稍后刷新。");
     }
 
-    // mutagen sync list 用整行短横线分隔会话；单会话时可能没有分隔线。
-    private static List<string> SplitSessions(string output)
-    {
-        var blocks=new List<string>();var current=new StringBuilder();
-        foreach(var line in output.Replace("\r\n","\n").Split('\n'))
-        {
-            if(line.Length>=10&&line.All(c=>c=='-')){if(current.Length>0)blocks.Add(current.ToString());current.Clear();continue;}
-            current.AppendLine(line);
-        }
-        if(current.Length>0)blocks.Add(current.ToString());
-        return blocks;
-    }
+    // mutagen sync list 用整行短横线分隔会话；单会话时可能没有分隔线。规则在 Core（SyncReliability）共用。
+    private static List<string> SplitSessions(string output)=>SyncReliability.SplitSessionBlocks(output).ToList();
 
     private static string Field(string block,string prefix)
     {

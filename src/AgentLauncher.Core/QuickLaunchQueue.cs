@@ -44,6 +44,7 @@ internal static class QuickLaunchQueue
         if (worktreeRoot is null || worktreeRoot.Contains('\0')) throw new InvalidDataException("快捷启动工作目录根无效。");
         draft.Validate();
         var active = draft.Slots.Where(slot => slot.Enabled).ToArray();
+        if (active.Any(slot => slot.RemoteHostId.HasValue)) throw new InvalidDataException("队列只支持本机任务。含 VPS 的批次请使用「启动」。");
         if (active.Length == 0) throw new InvalidDataException("先勾选本次启动项。");
         if (items.Count != active.Length) throw new InvalidDataException("快捷启动项与已勾选启动项数量不一致。");
         var bySlot = new Dictionary<Guid, QuickLaunchItem>(active.Length);

@@ -40,7 +40,7 @@ internal static partial class RemoteExecutionIntegration
                 var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [plan], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([plan]), DraftRevision: 3));
                 Assert(reserved.Ok, "reserve failed: " + reserved.Message);
             }
-            Process StartPane(Guid id, bool reattach, bool fakeSync)
+            Process StartPane(Guid id, bool reattach, bool fakeSync,string? input=null)
             {
                 var start = new ProcessStartInfo(Store.WorkerPath) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
                 start.ArgumentList.Add("pane");
@@ -50,12 +50,18 @@ internal static partial class RemoteExecutionIntegration
                 start.Environment["PATH"] = fakeSshDir + Path.PathSeparator + originalPath;
                 if (fakeSync) start.Environment["AGENT_LAUNCHER_FAKE_SYNC"] = "1";
                 var process = Process.Start(start)!;
+                if(input!=null)process.StandardInput.WriteLine(input);
                 process.StandardInput.Close();
                 workerProcesses.Add(process);
                 return process;
             }
 
-            var plan = Make("reattach-none", "reattach-alive.example.com", ["disconnect"]);
+            var stdinPlan=Make("interactive-input","verify-stdin.example.com",[]);
+            await ReserveAsync(stdinPlan);
+            var pane=StartPane(stdinPlan.Id,false,false,"input test");
+            await pane.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(12));
+            Assert(pane.ExitCode==0,"first remote pane did not forward stdin");
+            var plan = Make("reattach-none", "slow-probe.example.com", ["disconnect"]);
             await ReserveAsync(plan);
             var pending = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: plan.Id, Reattach: new OperatorReattach(true)));
             Assert(!pending.Ok, "Pending entry was reattached");
@@ -78,16 +84,23 @@ internal static partial class RemoteExecutionIntegration
 
             var before = await Ipc.SendAsync(new("status", Guid.NewGuid()));
             var beforeCount = LiveAgents(before);
-            var authorized = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: plan.Id, Reattach: new OperatorReattach(true)));
+            var probing=Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: plan.Id, Reattach: new OperatorReattach(true)));
+            await Task.Delay(500);
+            Assert((await EntryAsync(plan.Id).WaitAsync(TimeSpan.FromSeconds(5)))?.State=="Disconnected"&&!probing.IsCompleted,"slow SSH blocked status or prematurely granted reattach");
+            var authorized=await probing;
             Assert(authorized.Ok, "confirmed reattach failed: " + authorized.Message);
             Assert(authorized.Entries is { Length: 1 } && authorized.Entries[0].State == "Reattaching" && !Store.IsTerminal(authorized.Entries[0]), "reattach settled or added entries");
             var evidence = Store.Read<OperatorReattachRecord>(Store.OperatorReattachPath(plan.Id));
-            Assert(evidence is { SchemaVersion: 1, Confirmed: true, Probe: "ALIVE", SyncMode: "None" } && evidence.AttemptId == plan.Id && evidence.Host == "reattach-alive.example.com" && evidence.RemoteDirectory == "/home/agent/work", "operator-reattach.json invalid");
+            Assert(evidence is { SchemaVersion: 1, Confirmed: true, Probe: "ALIVE", SyncMode: "None" } && evidence.AttemptId == plan.Id && evidence.Host == plan.RemoteExecution!.Host && evidence.RemoteDirectory == "/home/agent/work", "operator-reattach.json invalid");
             Assert(!File.Exists(Store.OperatorReleasePath(plan.Id)), "reattach wrote operator-release.json");
             Assert(Store.Read<Ledger>(Store.FilePath("control.json"))!.Entries.Count(e => e.Plan.Id == plan.Id) == 1, "reattach created a second ledger entry");
 
             StartPane(plan.Id, true, false);
             var attached = await WaitAsync(plan.Id, "Started");
+            var receipt=Store.Read<Receipt>(Store.ReceiptPath(plan.Id));
+            var duplicate=StartPane(plan.Id,true,false);
+            await duplicate.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(duplicate.ExitCode!=0&&Store.Read<Receipt>(Store.ReceiptPath(plan.Id))==receipt,"duplicate pane overwrote live SSH receipt");
             Assert(attached.Detail.Contains("不视为已同步") && !attached.Detail.Contains("双向同步"), "None sync was described as synced");
             Assert(!File.Exists(Store.SyncSessionPath(plan.Id)) && !File.Exists(Store.SyncFinalPath(plan.Id)), "None reattach wrote sync evidence");
             var during = await Ipc.SendAsync(new("status", Guid.NewGuid()));
@@ -101,18 +114,24 @@ internal static partial class RemoteExecutionIntegration
             Directory.CreateDirectory(syncDir);
             var syncPlan = Make("reattach-sync", "reattach-alive.example.com", ["disconnect"], new WorkspaceSyncSpec(WorkspaceSyncMode.Mutagen, syncDir, "/home/agent/work", null, null));
             await ReserveAsync(syncPlan);
-            StartPane(syncPlan.Id, false, true);
+            var initialSyncPane=StartPane(syncPlan.Id, false, true);
             await WaitAsync(syncPlan.Id, "Disconnected");
+            // 账本可先根据 SSH 退出推断断线；pane 退出才保证 flush 与结束证据写入完成。
+            await initialSyncPane.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(12));
+            Assert(initialSyncPane.ExitCode==255,"initial sync pane did not exit with SSH disconnect");
             var oldSession = Store.Read<SyncSessionRecord>(Store.SyncSessionPath(syncPlan.Id));
-            Assert(oldSession is not null && File.Exists(Store.SyncFinalPath(syncPlan.Id)), "initial sync evidence missing");
+            Assert(oldSession is {SchemaVersion:1}, "initial sync session evidence missing");
+            Assert(Store.Read<SyncFinalRecord>(Store.SyncFinalPath(syncPlan.Id)) is {SchemaVersion:1,State:SyncFinalRecord.Synced}, "initial sync final evidence missing or not synced");
+            Assert(Store.Read<Receipt>(Store.ReceiptPath(syncPlan.Id)) is {Phase:"Disconnected",ExitCode:255}, "initial sync disconnect receipt missing");
             var syncOk = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: syncPlan.Id, Reattach: new OperatorReattach(true)));
             Assert(syncOk.Ok, "sync reattach was refused: " + syncOk.Message);
-            StartPane(syncPlan.Id, true, true);
+            var syncReattachPane=StartPane(syncPlan.Id, true, true);
             var synced = await WaitAsync(syncPlan.Id, "Started");
             var newSession = Store.Read<SyncSessionRecord>(Store.SyncSessionPath(syncPlan.Id));
             Assert(synced.Detail.Contains("双向同步") && newSession is not null && newSession.Name != oldSession!.Name && !File.Exists(Store.SyncFinalPath(syncPlan.Id)), "sync was not re-established, or a finished sync receipt was left in place");
             Assert(!File.Exists(Store.OperatorReleasePath(syncPlan.Id)) && !Store.IsTerminal(synced), "sync reattach settled the attempt");
             var syncEnded = await WaitAsync(syncPlan.Id, "Disconnected");
+            await syncReattachPane.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(12));
             Assert(!Store.IsTerminal(syncEnded) && !File.Exists(Store.SyncFinalPath(syncPlan.Id)) && !File.Exists(Store.OperatorReleasePath(syncPlan.Id)), "sync attachment exit pretended the session had converged or released the slot");
 
             var gone = Make("reattach-gone", "reattach-gone.example.com", ["disconnect"]);

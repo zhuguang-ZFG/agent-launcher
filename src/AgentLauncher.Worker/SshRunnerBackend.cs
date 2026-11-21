@@ -16,6 +16,7 @@ public sealed class SshRunnerBackend : IDisposable
     private Process? _process;  // 本地 SSH 客户端进程（Start 后才有值）
     private bool _disposed;
     private bool _started;
+    private Task? _consoleInput;
     private long _creationTime;  // Start 后才有值
 
     public Process Process => _process ?? throw new InvalidOperationException("Process not started yet");
@@ -27,28 +28,35 @@ public sealed class SshRunnerBackend : IDisposable
     public static SshRunnerBackend Create(RemoteExecutionSpec spec, Guid? attemptId = null)
     {
         // 构建远程命令：su - agent -c 'cd <workdir> && <agent> <args>'
-        var agentCmd = spec.AgentType switch
-        {
-            "pi" => $"pi {string.Join(" ", spec.Arguments.Select(EscapeShellArg))}",
-            "kimi" => $"kimi {string.Join(" ", spec.Arguments.Select(EscapeShellArg))}",
-            "qodercli" => $"qodercli {string.Join(" ", spec.Arguments.Select(EscapeShellArg))}",
-            "omp" => $"omp {string.Join(" ", spec.Arguments.Select(EscapeShellArg))}",
-            "codex" => $"codex {string.Join(" ", spec.Arguments.Select(EscapeShellArg))}",
-            _ => throw new ArgumentException($"Unknown agent type: {spec.AgentType}")
-        };
+        var command = RemoteAgentMaintenance.AgentCommand(spec.AgentType) ?? throw new ArgumentException($"Unknown agent type: {spec.AgentType}");
+        var agentCmd = string.Join(" ", new[] { command }.Concat(spec.Arguments.Select(SshRemoteCommand.QuoteArg)));
 
         // V8 默认堆上限随物理内存增长（4 GiB 机器约 2 GiB），小 VPS 会被 agent 吃满触发 OOM。
         // 注入 Node 堆上限（非 Node 进程忽略 NODE_OPTIONS）；1024 MiB 适配 2–4 GiB 级 VPS。
         // trap '' HUP 让远程前台在本地 SSH 断开后仍可留存（SIG_IGN 会随 exec 继承）。断开仍不能当作进程已退出的证明。
         var attemptPrefix = attemptId is Guid attempt ? $"export {RemoteReattach.AttemptToken(attempt)}; " : "";
-        var remoteCmd = $"{attemptPrefix}trap '' HUP; export NODE_OPTIONS=--max-old-space-size=1024; cd {EscapeShellArg(spec.RemoteWorkingDirectory)} && {agentCmd}";
+        var innerCmd = $"{attemptPrefix}trap '' HUP; export NODE_OPTIONS=--max-old-space-size=1024; cd {RemoteWorkspaceMappingHelper.ShellDirectory(spec.RemoteWorkingDirectory)} && {agentCmd}";
+        // 远程内存上限（规格 2026-11-19）：systemd transient scope 包裹内层命令，agent 及其后代落入同一 cgroup。
+        // 守卫先确认远程有 systemd-run，缺失即以可读错误退出（fail-closed）；无上限时与从前完全一致。
+        // 关键：scope 内不能用 su -——pam_systemd 会把进程迁到独立 session scope，使 MemoryMax 失效（实测 agent cgroup memory.max=max）。
+        // 改用 systemd-run --uid/--gid 直接以 agent 身份在 scope 内执行 sh：systemd 正确设置 HOME/USER/LOGNAME，pi 在系统 PATH，cgroup 覆盖整个 agent 进程树。
+        // 同用户（非 root）场景不带 --uid/--gid：systemd-run --scope 本身被 polkit 拒收（R45 nonroot 判据）。
+        // MemorySwapMax=0：仅 MemoryMax 时匿名内存可溢出到 swap，超限进程不被 OOM 杀（实测 4GiB swap 主机 700MiB 分配 exit 0、oom_kill=0、memory.peak 恰为上限）；置 0 才使上限成为硬顶。
+        // OOMPolicy=continue：默认 stop 会在任一成员被 OOM 杀后停掉整个 scope（连带杀死 agent，ssh 255 断连）；continue 只杀超限子进程，agent 留存（实测 oom_kill=1 且 agent SURVIVED）。
+        var shLayer = $"sh -c {SshRemoteCommand.QuoteDouble(innerCmd)}";
+        var scopeUser = spec.AgentUser==spec.SshUser ? "" : $"--uid={spec.AgentUser} --gid={spec.AgentUser} ";
+        var remoteCmd = spec.MemoryLimitBytes is { } maxBytes
+            ? $"if ! command -v systemd-run >/dev/null 2>&1; then echo '远程内存上限需要 systemd（systemd-run）；当前远程主机不可用，未启动 agent。' >&2; exit 97; fi; systemd-run --scope -p MemoryMax={maxBytes} -p MemorySwapMax=0 -p OOMPolicy=continue {scopeUser}-- {shLayer}"
+            : (spec.AgentUser==spec.SshUser ? innerCmd : SshRemoteCommand.WrapSu(spec.AgentUser, innerCmd));
         return new SshRunnerBackend { Spec = spec, StartInfo = CreateStartInfo(spec, remoteCmd) };
     }
 
     // 重新挂接：同一主机、同一远程目录的新本地 SSH。远程命令只检查本次尝试是否仍在，然后进入该目录，不重新启动 Agent。
+    // 内存上限不参与重新挂接：存活进程保持启动时的限制，交互 shell 不新建 cgroup。
     public static SshRunnerBackend CreateAttachment(RemoteExecutionSpec spec, Guid attemptId)
     {
-        var remoteCmd = RemoteReattach.AttachShell(attemptId, spec.RemoteWorkingDirectory);
+        var attachCmd = RemoteReattach.AttachShell(attemptId, spec.RemoteWorkingDirectory);
+        var remoteCmd = spec.AgentUser==spec.SshUser ? attachCmd : SshRemoteCommand.WrapSu(spec.AgentUser, attachCmd);
         return new SshRunnerBackend { Spec = spec, StartInfo = CreateStartInfo(spec, remoteCmd) };
     }
 
@@ -81,8 +89,8 @@ public sealed class SshRunnerBackend : IDisposable
         psi.ArgumentList.Add("-o");
         psi.ArgumentList.Add("ConnectTimeout=10");
         psi.ArgumentList.Add($"{spec.SshUser}@{spec.Host}");
-        // 远程命令：su - agent -c "<remote-command>"（双引号，因为内部已有单引号 quoting；共享 SshRemoteCommand 的包装逻辑）
-        psi.ArgumentList.Add(SshRemoteCommand.WrapSu(spec.AgentUser, remoteCmd));
+        // 远程命令由调用方完成 su/systemd 组装（Create 决定层次），这里按原样作为最后一个参数传给 ssh。
+        psi.ArgumentList.Add(remoteCmd);
         return psi;
     }
 
@@ -107,7 +115,12 @@ public sealed class SshRunnerBackend : IDisposable
             // 避免它等待一个永远不会来的输入（与手工 `ssh ... <&-` 的已验证行为一致）。
             try { _process.StandardInput.Close(); } catch { }
         }
-        else PumpConsoleInput(_process);
+        else
+        {
+            var redirected=Console.IsInputRedirected;
+            var forwarding=PumpConsoleInput(_process,redirected);
+            if(!redirected)_consoleInput=forwarding;
+        }
         _started = true;
         // 从 Process.StartTime 计算 CreationTime（与 ProtectedProcess.CreationTime 相同的 long 格式）
         _creationTime = _process.StartTime.ToFileTimeUtc();
@@ -219,24 +232,47 @@ public sealed class SshRunnerBackend : IDisposable
     }
 
     // 重新挂接的 shell 需要键盘。stdout 仍继承窗格；stdin 保持管道，由本进程把控制台字节写进去，避免 -tt 直接抢占控制台。
-    private static void PumpConsoleInput(Process process)
+    public void WaitForConsoleInput()=>_consoleInput?.GetAwaiter().GetResult();
+
+    private static Task PumpConsoleInput(Process process,bool redirected)
     {
         var writer = process.StandardInput;
-        _ = Task.Run(() =>
+        return Task.Run(() =>
         {
+            var handle=Native.GetStdHandle(-10);
+            uint originalMode=0;
+            var restoreMode=false;
+            System.Text.Encoding? originalEncoding=null;
             try
             {
+                if(!redirected)
+                {
+                    Native.Check(Native.GetConsoleMode(handle,out originalMode));
+                    // VT input, with local line buffering, echo and Ctrl+C handling disabled.
+                    Native.Check(Native.SetConsoleMode(handle,(originalMode & ~7u) | 0x200u));
+                    restoreMode=true;
+                    originalEncoding=Console.InputEncoding;
+                    Console.InputEncoding=new System.Text.UTF8Encoding(false);
+                }
                 using var reader = Console.OpenStandardInput();
                 var buffer = new byte[256];
-                int read;
-                while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
+                while (!process.HasExited)
+                {
+                    if(!redirected&&!Console.KeyAvailable){if(process.WaitForExit(20))break;continue;}
+                    var read=reader.Read(buffer,0,buffer.Length);
+                    if(read==0)break;
                     writer.BaseStream.Write(buffer, 0, read);
+                    writer.BaseStream.Flush();
+                }
             }
-            catch (Exception ex) when (ex is not OutOfMemoryException) { }
-            try { writer.Close(); } catch { }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { if(!process.HasExited)Console.Error.WriteLine("SSH 输入中断："+ex.Message); }
+            finally
+            {
+                if(restoreMode)Native.SetConsoleMode(handle,originalMode);
+                if(originalEncoding!=null)Console.InputEncoding=originalEncoding;
+                try { writer.Close(); } catch(IOException) { }
+            }
         });
     }
 
-    // 单层 shell quoting：只转义单引号，不嵌套双引号（共享助手，维护命令用同一实现）
-    private static string EscapeShellArg(string arg) => SshRemoteCommand.QuoteArg(arg);
 }

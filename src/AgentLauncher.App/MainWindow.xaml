@@ -28,6 +28,7 @@
       <ComboBox x:Name="Recent" Margin="0,6,0,0" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/>
      </StackPanel>
     </Border>
+    <Button x:Name="ShowTerminalsButton" DockPanel.Dock="Top" Content="Agent 终端" Visibility="Collapsed" Click="ShowEmbeddedClick" Margin="0,0,0,6"/>
     <DockPanel DockPanel.Dock="Top" Margin="2,0,2,4">
      <TextBlock DockPanel.Dock="Right" x:Name="SelectionSummary" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
      <TextBlock x:Name="AgentHeader" Text="Agent" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource Muted}" VerticalAlignment="Center"/>
@@ -198,5 +199,13 @@
     </StackPanel>
    </Border>
   </Grid>
+  <DockPanel Grid.Column="1" x:Name="EmbeddedPanel" Visibility="Collapsed" Background="{DynamicResource Surface}" Margin="0">
+   <DockPanel DockPanel.Dock="Top" Margin="16,10,16,8">
+    <Button DockPanel.Dock="Right" Content="返回配置" Click="HideEmbeddedClick" Padding="12,4"/>
+    <Button DockPanel.Dock="Right" Content="关闭视图" ToolTip="运行中的 Agent 可从会话记录重新打开" Click="CloseEmbeddedClick" Margin="0,0,8,0" Padding="12,4"/>
+    <TextBlock Text="Agent 终端" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+   </DockPanel>
+   <TabControl x:Name="EmbeddedTabs" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" Padding="1" SelectionChanged="EmbeddedTabChanged" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+  </DockPanel>
  </Grid>
 </Window>

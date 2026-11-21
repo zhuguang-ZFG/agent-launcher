@@ -112,6 +112,23 @@ public partial class MainWindow : Window
             catch(Exception e)when(e is not OutOfMemoryException){Store.Save(System.IO.Path.Combine(usabilityFolder,"ui-exception.json"),new{Error=e.ToString()});Application.Current.Shutdown(1);}
             return;
         }
+        if(arguments is ["--embedded-check",var report])
+        {
+            try{await CheckEmbeddedAsync(report);Application.Current.Shutdown(0);}
+            catch(Exception e){Store.Save(report,new{Passed=false,Error=e.ToString()});Application.Current.Shutdown(1);}
+            return;
+        }
+        if(arguments is ["--embedded-stage",var stage,var statePath])
+        {
+            try
+            {
+                var mode=await RunEmbeddedStageAsync(stage,statePath);
+                if(mode=="exit")Application.Current.Shutdown(0);
+                else if(mode=="keep-alive"){var safety=new System.Windows.Threading.DispatcherTimer{Interval=TimeSpan.FromMinutes(5)};safety.Tick+=(_,_)=>Application.Current.Shutdown(3);safety.Start();}
+            }
+            catch(Exception e){Store.Save(statePath+".error.json",new{Stage=stage,Error=e.ToString()});Application.Current.Shutdown(1);}
+            return;
+        }
         if(arguments is ["--ui-check",var folder]&&!uiChecksStarted)
         {
             uiChecksStarted=true;
@@ -235,10 +252,10 @@ public partial class MainWindow : Window
             var selectedSlot=selectedSlotId.HasValue?slots.FirstOrDefault(s=>s.Id==selectedSlotId.Value):null;
             selectedSlot??=slots.FirstOrDefault(s=>s.Enabled)??slots.FirstOrDefault();
             selectedSlotId=selectedSlot?.Id;
-            SlotList.Children.Clear();commandLabels.Clear();
+            SlotList.Children.Clear();commandLabels.Clear();syncBadges.Clear();
             if(selectedSlot is {} detailSlot)AddSlot(detailSlot);
             if(selectedSlot is {} shown)DetailTitle.Text=$"{slots.IndexOf(shown)+1:00} · {shown.DisplayName}";else DetailTitle.Text="要一起启动的 Agent";
-            RailSlots.Children.Clear();railLabels.Clear();railNames.Clear();railDots.Clear();railSources.Clear();syncBadges.Clear();
+            RailSlots.Children.Clear();railLabels.Clear();railNames.Clear();railDots.Clear();railSources.Clear();
             for(var i=0;i<slots.Count;i++)AddRailSlot(slots[i],i+1);
             AddButton.IsEnabled=CanAddSlot;
             var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
@@ -308,7 +325,7 @@ public partial class MainWindow : Window
         // 运行位置单独选择。Agent 下拉只列当前位置的程序，避免把云端主机混进 CLI 名称。
         if(slot.RemoteHostId is Guid hostId&&config.RemoteHosts.FirstOrDefault(h=>h.Id==hostId) is {} host)
         {
-            var ids=host.AvailableAgents.Any()?host.AvailableAgents.ToList():new List<string>{"pi"};
+var ids=host.AvailableAgents.Any()?host.AvailableAgents.ToList():new List<string>{"pi"};
             if(!ids.Contains(slot.AgentId))ids.Insert(0,slot.AgentId);
             return ids.Select(id=>{var name=Agents.All.FirstOrDefault(a=>a.Id==id)?.Name??id;return new AgentChoice(id,name,name,host.Id);}).ToArray();
         }
@@ -424,6 +441,7 @@ public partial class MainWindow : Window
             menu.Items.Add(new Separator());
             Menu("查看改动",()=>_=Owner.GuardAsync(()=>Owner.ShowSlotChangesAsync(slot.Id)),()=>true);
             Menu("刷新同步状态",()=>_=Owner.GuardAsync(()=>Owner.RefreshSlotSyncHealthAsync(slot.Id)),Remote);
+            Menu("同步详情…",()=>Owner.ShowSyncDetails(slot.Id),Remote);
             button.Click+=(_,_)=>{foreach(var (item,enabled) in items)item.IsEnabled=Owner.CanEditSlot(slot.Id)&&enabled();menu.PlacementTarget=button;menu.IsOpen=true;};
             Content=button;
             void Menu(string text,Action action,Func<bool> enabled){var item=new MenuItem{Header=text};item.Click+=(_,_)=>action();menu.Items.Add(item);items.Add((item,enabled));}
@@ -777,14 +795,14 @@ public partial class MainWindow : Window
             var retryBook=await Task.Run(taskStore.Load);
             if(!AttemptIdentity.CanRetryOutsideQueue(previous.Plan,current.Entries!.Select(entry=>entry.Plan),retryBook))
                 throw new IOException("该记录来自任务队列或来源尚待核对，请从任务卡重新入队，保留并发限制与尝试记录。");
-            var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));
+            var terminal=await ResolveLaunchTerminalAsync();
             var retry=previous.Plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=previous.Plan.Id};
             await AuthorizePlansAsync([retry]);
             var retryBindings=ReservationBindings([retry]);
             var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token,UnlockForCleanup,retryBindings.Policy,retryBindings.Revision,retryBindings.Hash,retryBindings.Digest,retryBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=config.Draft.Revision;submittedAttempts=[retry.Id];submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
-            try{await Task.Run(()=>Commands.SubmitTerminal(terminal,[retry],"vertical"));}
+            try{await SubmitPanesAsync(terminal,[retry],"vertical");}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
             if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="只提交了这一项的新尝试；已有会话保持不变，正在等待回执。";
@@ -806,7 +824,7 @@ public partial class MainWindow : Window
             await CheckFreshCommandsAsync();if(validationError.Length>0)throw new IOException(validationError);
             await saveTask;if(!SaveHealthy)throw new IOException(saveError!=null?"先解决配置保存失败，再启动。":"正在保存配置，请稍候。");
             var draft=config.Draft.Copy();
-            var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));await RefreshAsync();
+            var terminal=await ResolveLaunchTerminalAsync();await RefreshAsync();
             if(status?.Ok!=true)throw new IOException(status?.Message??"监控状态不可用");
             var admissionBlocked=status?.AdmissionHardBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
             // A pressure latch only stops a conservative launch; practical/custom launches stay advisory and are re-authorized by the monitor.
@@ -823,15 +841,14 @@ public partial class MainWindow : Window
             var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
-            var profileHint="";
-            try{var paneProfile=TerminalProfile.TryPrepare(out var profileDeferred);await Task.Run(()=>Commands.SubmitTerminal(terminal,plans,draft.Layout,launchCancellation.Token,paneProfile));if(profileDeferred)profileHint="（窗格美化将在 Windows Terminal 重启后生效）";}
+            try{await SubmitPanesAsync(terminal,plans,draft.Layout,launchCancellation.Token);}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
             if(launchCancellation.Token.IsCancellationRequested)return;
-            ProgressText.Text="已交给 Windows Terminal 打开，正在等每个窗口确认。进程出现不代表 Agent 已就绪。"+profileHint;
+            ProgressText.Text="已提交启动，正在等待各 Agent 的进程回执。";
             for(var i=0;i<10;i++)
             {
                 if(launchCancellation.Token.IsCancellationRequested)break;
-                await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true)){if(config.MinimizeAfterLaunch)WindowState=WindowState.Minimized;break;}
+                await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true)){if(config.MinimizeAfterLaunch&&!config.EmbeddedTerminal)WindowState=WindowState.Minimized;break;}
             }
         }
         finally{await FinishLaunchAsync();}
@@ -962,7 +979,7 @@ public partial class MainWindow : Window
         catch(InvalidDataException e){MessageBox.Show(owner,e.Message,"参数预设",MessageBoxButton.OK,MessageBoxImage.Warning);}
     }
     private async void ResourceClick(object sender,RoutedEventArgs e)=>await GuardAsync(ShowResourceSettingsAsync);
-    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates,["管理远程主机"]=ManageRemoteHosts});
+    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("host","Agent 窗口",config.EmbeddedTerminal?"internal":"external",false),("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["host"]=[("internal","启动器内"),("external","外置 Windows Terminal")],["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates,["管理远程主机"]=ManageRemoteHosts});
     private async void SettingsClick(object sender,RoutedEventArgs e)=>await GuardAsync(async()=>
     {
         if(applyingSettings)return;applyingSettings=true;
@@ -971,7 +988,7 @@ public partial class MainWindow : Window
             var dialog=CreateSettingsDialog();if(dialog.ShowDialog()!=true)return;if(readOnly||busy){ErrorText.Text="当前配置不可编辑，设置未保存。";return;}
             if(!new[]{"system","light","dark"}.Contains(dialog.Values["theme"])||!bool.TryParse(dialog.Values["minimize"],out var minimize)||!bool.TryParse(dialog.Values["notify"],out var notify)||!int.TryParse(dialog.Values["scale"],out var scale)||scale is not (100 or 125 or 150)){ErrorText.Text="设置值无效，未应用。";return;}
             var destination=dialog.Values["worktree"].Trim();if(destination.Length>0)destination=await Task.Run(()=>PhysicalDirectory.Resolve(destination).Path);
-            if(readOnly||busy)return;config.WorktreeDirectory=destination;config.TerminalPath=dialog.Values["terminal"].Trim();config.Theme=dialog.Values["theme"];config.TextScalePercent=scale;config.MinimizeAfterLaunch=minimize;config.NotifyOnSessionEvents=notify;QueueSave();ApplyTheme();Render();
+            if(readOnly||busy)return;config.EmbeddedTerminal=dialog.Values["host"]=="internal";config.WorktreeDirectory=destination;config.TerminalPath=dialog.Values["terminal"].Trim();config.Theme=dialog.Values["theme"];config.TextScalePercent=scale;config.MinimizeAfterLaunch=minimize;config.NotifyOnSessionEvents=notify;QueueSave();ApplyTheme();Render();
         }
         finally{applyingSettings=false;}
     });
@@ -1080,17 +1097,29 @@ public partial class MainWindow : Window
                 ("agents","可用 agent 类型（逗号分隔，如：pi,kimi,qodercli）",isNew?"pi":string.Join(",",host!.AvailableAgents),false),
                 ("keyPath","SSH 私钥路径（可选，留空用 ssh-agent/SSH config，全程免密）",host?.SshKeyPath??"",false),
                 ("syncMode","工作区同步模式",RemoteHostEditor.SyncModeText(host?.WorkspaceSyncMode??WorkspaceSyncMode.Mutagen),false),
+                ("memoryLimit","远程内存上限 MiB（留空 = 不限制）",host?.MemoryLimitMib?.ToString()??"",false),
                 ("upgradeOverrides","Agent 升级命令覆盖（每行 agent=命令，留空用默认）",RemoteHostEditor.UpgradeOverridesText(host?.AgentUpgradeCommands),true)
             };
             var caption=isNew?"添加远程主机":"编辑远程主机";
-            var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的槽位会应用新配置。\n同步在远程启动时生效。mutagen 使用 "+MutagenCreateMode.SyncMode+"：冲突时本机一侧会赢得修改，这不是已收敛，文件也不是实时一致。none 这次不是同权，仍可启动。云端终端通过 SSH 可以实时输入和看到输出。",choices:syncChoices);
+var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的槽位会应用新配置。\n同步在远程启动时生效：mutagen 为实时双向同步；同步模式不能选 none（三台同权）。\n内存上限在启动时经 systemd 生效：远程主机需有 systemd-run（root 登录）；缺失时该次启动拒绝。",choices:syncChoices);
             if(dialog.ShowDialog()!=true)return;
             var name=dialog.Values["name"].Trim();
             var address=dialog.Values["address"].Trim();
+            var syncMode=RemoteHostEditor.ParseSyncMode(dialog.Values["syncMode"],host?.WorkspaceSyncMode??WorkspaceSyncMode.Mutagen);
             var error=RemoteHostEditor.Validate(name,address,dialog.Values["port"],dialog.Values["agents"]);
             error??=RemoteHostEditor.Duplicate(snapshot,name,address,host?.Id);
             var overrides=RemoteHostEditor.ParseUpgradeOverrides(dialog.Values["upgradeOverrides"],out var overrideError);
             error??=overrideError;
+            var memoryLimitText=dialog.Values["memoryLimit"].Trim();
+            int? memoryLimitMib=null;string? memoryLimitError=null;
+            if(memoryLimitText.Length>0)
+            {
+                if(int.TryParse(memoryLimitText,out var parsedMib))memoryLimitMib=parsedMib;
+                else memoryLimitError="远程内存上限必须是整数 MiB；留空表示不限制。";
+            }
+            error??=memoryLimitError??RemoteHost.ValidateMemoryLimitMib(memoryLimitMib);
+            // 三台同权（2026-11-18 产品决定）：不同步的远程主机不构成同权，保存时拒收并说明改法。
+            if(syncMode==WorkspaceSyncMode.None)error=RemoteHostEditor.ValidateSyncMode(syncMode)!;
             if(error is not null){MessageBox.Show(window,error,caption,MessageBoxButton.OK,MessageBoxImage.Warning);return;}
             var updated=new RemoteHost(
                 Id:host?.Id??Guid.NewGuid(),
@@ -1101,7 +1130,8 @@ public partial class MainWindow : Window
                 AgentUser:dialog.Values["agentUser"].Trim(),
                 AvailableAgents:RemoteHostEditor.ParseAgents(dialog.Values["agents"]),
                 SshKeyPath:string.IsNullOrWhiteSpace(dialog.Values["keyPath"])?null:dialog.Values["keyPath"].Trim(),
-                WorkspaceSyncMode:RemoteHostEditor.ParseSyncMode(dialog.Values["syncMode"],host?.WorkspaceSyncMode??WorkspaceSyncMode.Mutagen),
+                WorkspaceSyncMode:syncMode,
+                MemoryLimitMib:memoryLimitMib,
                 AgentUpgradeCommands:overrides);
             if(isNew)snapshot.Add(updated);
             else snapshot[snapshot.FindIndex(h=>h.Id==host!.Id)]=updated;

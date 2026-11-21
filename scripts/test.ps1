@@ -4,6 +4,12 @@ $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtime=[IO.Path]::GetFullPath($RuntimeDirectory)
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
+& dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release -- --sync-review-checks
+if($LASTEXITCODE -ne 0){throw 'Sync review checks failed'}
+& dotnet run --project (Join-Path $root 'tests/AgentLauncher.TerminalModel.Tests/AgentLauncher.TerminalModel.Tests.csproj') -c Release
+if($LASTEXITCODE -ne 0){throw 'Embedded terminal model tests failed'}
+& dotnet run --project (Join-Path $root 'tests/AgentLauncher.ManualRelay.Tests/AgentLauncher.ManualRelay.Tests.csproj') -c Release
+if($LASTEXITCODE -ne 0){throw 'Manual relay tests failed'}
 foreach($project in @('tests/AgentLauncher.Soak','tests/AgentLauncher.Tests','src/AgentLauncher.Worker','src/AgentLauncher.App')){
   $name=Split-Path $project -Leaf
   & dotnet publish (Join-Path $root "$project/$name.csproj") -c Release -p:DefineConstants=INTEGRATION_TESTS -o $runtime --nologo -m:1
@@ -19,9 +25,9 @@ try {
   & (Join-Path $runtime 'AgentLauncher.Tests.exe') --repair-checks
   if($LASTEXITCODE -ne 0){throw 'Repair checks failed'}
   Copy-Item (Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'repair-results.json') (Join-Path $root 'artifacts/repair-results.json')
-  foreach($suite in @('admission-integration','startup-queue','parallel-batch','terminal-batch','integration','remote-execution-integration','remote-startup-e2e')){
+  foreach($suite in @('admission-integration','startup-queue','parallel-batch','terminal-batch','integration','remote-execution-integration','remote-startup-e2e','sync-reliability-integration')){
     $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-'+$suite+'-'+[guid]::NewGuid().ToString('N'))
-    $testArgument=if($suite -in @('integration','admission-integration','remote-execution-integration','remote-startup-e2e')){'--'+$suite}else{'--'+$suite+'-checks'}
+    $testArgument=if($suite -in @('integration','admission-integration','remote-execution-integration','remote-startup-e2e','sync-reliability-integration')){'--'+$suite}else{'--'+$suite+'-checks'}
     try { & (Join-Path $runtime 'AgentLauncher.Tests.exe') $testArgument }
     finally {
     $diagnostics=Join-Path $root ('artifacts/ci-diagnostics/'+$suite)
@@ -47,6 +53,12 @@ try {
       if($now -ge $hardDeadline -or ($now-$lastProgressAt).TotalSeconds -ge 30){try{$p.Kill()}catch{};if(-not $p.WaitForExit(5000)){throw "UI check could not stop after timeout; last progress: $lastProgress"};throw "UI check stalled or exceeded 90-second hard timeout; last progress: $lastProgress"}
     }
     if($p.ExitCode -ne 0 -or -not(Test-Path (Join-Path $report 'ui-checks.json'))){throw 'UI checks failed'}
+    $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-embedded-'+[guid]::NewGuid().ToString('N'))
+    $env:AGENT_LAUNCHER_FAKE_SAMPLE='1'
+    $embeddedReport=Join-Path $root 'artifacts/embedded-ui.json'
+    $p=Start-Process (Join-Path $runtime 'AgentLauncher.App.exe') -WindowStyle Hidden -ArgumentList '--embedded-check',('"'+$embeddedReport+'"') -PassThru
+    if(-not $p.WaitForExit(60000)){$p.Kill();throw 'Embedded terminal UI check timed out'}
+    if($p.ExitCode -ne 0 -or -not (Get-Content $embeddedReport -Raw | ConvertFrom-Json).Passed){throw 'Embedded terminal UI check failed'}
   }
   & node --test (Join-Path $root 'tests/prototype.test.cjs')
   if($LASTEXITCODE -ne 0){throw 'Prototype model tests failed'}
@@ -57,4 +69,12 @@ try {
   $env:PI_CODING_AGENT_DIR=$previousPiAgentDir
   Remove-Item Env:AGENT_LAUNCHER_FAKE_SAMPLE -ErrorAction SilentlyContinue
   Remove-Item Env:AGENT_LAUNCHER_TEST_ROOT -ErrorAction SilentlyContinue
+  # 测试卫生：清理超过 2 小时的历史测试根。本机多次门禁会遗留上千个 AgentLauncher-tests-* 根目录，
+  # 是环境瞬态（中途文件消失）的嫌疑来源。只匹配该前缀且只删过期根，正在使用的运行不受影响。
+  try{
+    $cutoff=(Get-Date).AddHours(-2)
+    Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'AgentLauncher-tests-*' -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -lt $cutoff } |
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  }catch{}
 }

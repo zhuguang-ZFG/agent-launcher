@@ -79,7 +79,12 @@ public static class SshAgent
         var stdoutTask=process.StandardOutput.ReadToEndAsync(cancellation);
         var stderrTask=process.StandardError.ReadToEndAsync(cancellation);
 
-        await process.WaitForExitAsync(cancellation);
+        try{await process.WaitForExitAsync(cancellation);}
+        catch(OperationCanceledException)
+        {
+            try{process.Kill(entireProcessTree:true);}catch(InvalidOperationException){}
+            throw;
+        }
 
         var stdout=await stdoutTask;
         var stderr=await stderrTask;

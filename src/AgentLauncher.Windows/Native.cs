@@ -19,6 +19,8 @@ public static class Native
     [StructLayout(LayoutKind.Sequential)] public struct ProcessInfo { public IntPtr Process, Thread; public uint Pid, Tid; }
     [StructLayout(LayoutKind.Sequential)] public struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int InheritHandle; }
     [StructLayout(LayoutKind.Sequential)] public struct FileInfo { public uint Attributes; public System.Runtime.InteropServices.ComTypes.FILETIME Created, Accessed, Written; public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow; }
+    [StructLayout(LayoutKind.Sequential)] public struct Coord { public short X, Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct Overlapped { public UIntPtr Internal, InternalHigh; public uint Offset, OffsetHigh; public IntPtr Event; }
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
     [DllImport("kernel32.dll")] public static extern ulong GetTickCount64();
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
@@ -42,10 +44,34 @@ public static class Native
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInfo info);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
     [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int which);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
+    // R30 同类防漏（2026-11-19）：.NET Process.Start 无法阻止子进程继承本进程 std 管道写端（实测 redirect/plain 两态都继承），
+    // 长命守护（job-custody/monitor）派生瞬间清继承位、CreateProcess 同步返回后立即恢复——窗口只有一次调用，无竞态。
+    public static void ClearStdInherit(){foreach(var handle in new[]{GetStdHandle(-11),GetStdHandle(-12)})SetHandleInformation(handle,1,0);}
+    public static void RestoreStdInherit(){foreach(var handle in new[]{GetStdHandle(-11),GetStdHandle(-12)})SetHandleInformation(handle,1,1);}
+    // 只用于诊断：有无控制台窗口决定 ConPTY 场景该在哪启动，不参与产品逻辑。
+    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+    [DllImport("kernel32.dll",SetLastError=true)] public static extern bool GetConsoleMode(IntPtr handle,out uint mode);
+    [DllImport("kernel32.dll",SetLastError=true)] public static extern bool SetConsoleMode(IntPtr handle,uint mode);
     [DllImport("kernel32.dll")] public static extern void SetLastError(uint error);
-    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref SecurityAttributes attributes, uint size);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool TerminateJobObject(SafeFileHandle job, uint code);
+    // 已在本机 Windows SDK 10.0.26100 的 WinBase.h 核对：ProcThreadAttributePseudoConsole = 22，
+    // 且该属性是 input 属性（PROC_THREAD_ATTRIBUTE_INPUT = 0x00020000），所以数值是 0x00020016。
+    public const uint PseudoConsoleAttribute = 0x00020016;
+    public const uint ExtendedStartupInfoPresent = 0x00080000;
+    public const uint CreateSuspended = 0x00000004;
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern int CreatePseudoConsole(Coord size, IntPtr input, IntPtr output, uint flags, out IntPtr pseudoConsole);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern int ResizePseudoConsole(IntPtr pseudoConsole, Coord size);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern void ClosePseudoConsole(IntPtr pseudoConsole);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr CreateEvent(IntPtr attributes, bool manualReset, bool initialState, string name);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool ReadFile(SafeFileHandle file, IntPtr buffer, uint length, out uint read, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool WriteFile(SafeFileHandle file, IntPtr buffer, uint length, out uint written, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool GetOverlappedResult(SafeFileHandle file, IntPtr overlapped, out uint transferred, bool wait);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool CancelIoEx(SafeFileHandle file, IntPtr overlapped);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern SafeFileHandle CreateNamedPipe(string name, uint openMode, uint pipeMode, uint instances, uint outSize, uint inSize, uint timeout, IntPtr security);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool ConnectNamedPipe(SafeFileHandle pipe, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool ResetEvent(IntPtr handle);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
     [DllImport("kernel32.dll", SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool GetExitCodeProcess(IntPtr process, out uint code);
     public static void Check(bool value) { if (!value) throw new Win32Exception(Marshal.GetLastWin32Error()); }
@@ -213,17 +239,22 @@ public sealed class ProtectedProcess : IDisposable
     public Process Process { get; }
     public long CreationTime { get; }
     public ProtectedProcess(CommandSpec command,string cwd,Job root,Job child,bool redirected=false,bool createNoWindow=false,IReadOnlyDictionary<string,string>? environment=null):this(command,cwd,[root,child],redirected,createNoWindow,environment){}
-    public ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,bool redirected=false,bool createNoWindow=false,IReadOnlyDictionary<string,string>? environment=null)
+    public ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,bool redirected=false,bool createNoWindow=false,IReadOnlyDictionary<string,string>? environment=null):this(command,cwd,chain,redirected,createNoWindow,environment,IntPtr.Zero){}
+    // 伪控制台构造：子进程的标准句柄由 ConPTY 接上，不再继承父进程句柄，也不写 0x00020002。
+    // 空 Job 链只允许这种调用，并且只给 ssh.exe 用：本地 Agent 仍必须有 Job 列表。
+    public ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,IntPtr pseudoConsole,IReadOnlyDictionary<string,string>? environment=null):this(command,cwd,chain,false,false,environment,pseudoConsole){}
+    private ProtectedProcess(CommandSpec command,string cwd,IReadOnlyList<Job> chain,bool redirected,bool createNoWindow,IReadOnlyDictionary<string,string>? environment,IntPtr pseudoConsole)
     {
-        if(chain.Count<1)throw new ArgumentException("启动链至少需要一个任务组。",nameof(chain));
-        var attributeCount=redirected?2:1;
+        if(pseudoConsole==IntPtr.Zero&&chain.Count<1)throw new ArgumentException("启动链至少需要一个任务组。",nameof(chain));
+        if(pseudoConsole!=IntPtr.Zero&&redirected)throw new ArgumentException("伪控制台不能与父进程标准句柄重定向同时使用。",nameof(redirected));
+        var attributeCount=(chain.Count>0?1:0)+(redirected?1:0)+(pseudoConsole!=IntPtr.Zero?1:0);
         UIntPtr size=UIntPtr.Zero;Native.InitializeProcThreadAttributeList(IntPtr.Zero,attributeCount,0,ref size);
-        var attrs=Marshal.AllocHGlobal(checked((int)size));var jobs=Marshal.AllocHGlobal(chain.Count*IntPtr.Size);var handles=Marshal.AllocHGlobal(3*IntPtr.Size);var initialized=false;var environmentBlock=IntPtr.Zero;
+        var attrs=Marshal.AllocHGlobal(checked((int)size));var jobs=Marshal.AllocHGlobal(Math.Max(1,chain.Count*IntPtr.Size));var handles=Marshal.AllocHGlobal(3*IntPtr.Size);var initialized=false;var environmentBlock=IntPtr.Zero;
         try
         {
             Native.Check(Native.InitializeProcThreadAttributeList(attrs,attributeCount,0,ref size));initialized=true;
             for(var i=0;i<chain.Count;i++)Marshal.WriteIntPtr(jobs,i*IntPtr.Size,chain[i].Handle.DangerousGetHandle());
-            Native.Check(Native.UpdateProcThreadAttribute(attrs,0,(UIntPtr)0x0002000D,jobs,(UIntPtr)(chain.Count*IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
+            if(chain.Count>0)Native.Check(Native.UpdateProcThreadAttribute(attrs,0,(UIntPtr)0x0002000D,jobs,(UIntPtr)(chain.Count*IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
             var startup=new Native.StartupInfoEx{Info=new(){Size=Marshal.SizeOf<Native.StartupInfoEx>()},Attributes=attrs};
             if(redirected)
             {
@@ -231,6 +262,12 @@ public sealed class ProtectedProcess : IDisposable
                 for(var i=0;i<3;i++){Native.Check(Native.SetHandleInformation(std[i],1,1));Marshal.WriteIntPtr(handles,i*IntPtr.Size,std[i]);}
                 Native.Check(Native.UpdateProcThreadAttribute(attrs,0,(UIntPtr)0x00020002,handles,(UIntPtr)(3*IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
                 startup.Info.Flags=0x100;startup.Info.StdInput=std[0];startup.Info.StdOutput=std[1];startup.Info.StdError=std[2];
+            }
+            if(pseudoConsole!=IntPtr.Zero)
+            {
+                // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 的 lpValue 就是 HPCON 值本身，不是「指向 HPCON 的指针」；
+                // 传缓冲区地址会让子进程拿不到伪控制台，并在 DLL 初始化阶段以 0xC0000142 退出。
+                Native.Check(Native.UpdateProcThreadAttribute(attrs,0,(UIntPtr)Native.PseudoConsoleAttribute,pseudoConsole,(UIntPtr)IntPtr.Size,IntPtr.Zero,IntPtr.Zero));
             }
             var line=new StringBuilder(string.Join(" ",new[]{command.Executable}.Concat(command.Arguments).Select(Quote)));
             if(environment is not null)

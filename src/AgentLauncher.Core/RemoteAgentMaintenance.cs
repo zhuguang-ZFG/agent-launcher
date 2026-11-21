@@ -19,10 +19,8 @@ public static class RemoteAgentMaintenance
     };
 
     // 远程主机上的 agent CLI 命令名（与 SshRunnerBackend.Create 的 AgentType 键一致）。
-    public static string? AgentCommand(string agentType)=>agentType switch
-    {
-        "pi"=>"pi","kimi"=>"kimi","qodercli"=>"qodercli","qoder"=>"qodercli","omp"=>"omp","codex"=>"codex",_=>null
-    };
+    public static string CatalogId(string id)=>id=="qodercli"?"qoder":id;
+    public static string? AgentCommand(string agentType)=>Agents.All.FirstOrDefault(agent=>agent.Id==CatalogId(agentType)&&agent.Id!="custom")?.Command;
 
     public static string? VersionCommandFor(string agentType)=>AgentCommand(agentType) is {} command?command+" --version":null;
 
@@ -32,6 +30,7 @@ public static class RemoteAgentMaintenance
     public static string? UpgradeCommandFor(RemoteHost host,string agentType)
     {
         if(host.AgentUpgradeCommands?.GetValueOrDefault(agentType) is {Length:>0} overrideCommand)return overrideCommand;
+        if(AgentCommand(agentType) is {} command&&host.AgentUpgradeCommands?.GetValueOrDefault(command) is {Length:>0} aliasCommand)return aliasCommand;
         return DefaultUpgradeCommands.GetValueOrDefault(agentType);
     }
 

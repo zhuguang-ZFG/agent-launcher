@@ -27,6 +27,24 @@ public static class WorkspaceSync
             _ => throw new ArgumentException($"未知的同步模式：{spec.Mode}")
         };
     }
+
+    // 创建参数（纯函数，便于回归）：三台同权新建会话用 two-way-safe——双方修改同一路径时保留冲突，
+    // 不自动选边（规格 2026-11-18 §5/§7）。已存在的 two-way-resolved 会话不批量迁移；
+    // 解析到该模式时当前状态最高未收敛（SyncReliability 状态机）。忽略列表保持现状，不扩大。
+    internal static string[] BuildCreateArguments(WorkspaceSyncSpec spec, RemoteExecutionSpec remote, string sessionName) =>
+    [
+        "sync", "create",
+        "--name", sessionName,
+        "--sync-mode", "two-way-safe",
+        "--ignore-vcs",  // 忽略 .git 目录
+        "--ignore", "node_modules/",
+        "--ignore", "bin/",
+        "--ignore", "obj/",
+        "--default-file-mode", "0664",
+        "--default-directory-mode", "0775",
+        spec.LocalPath,
+        MutagenSyncSession.MutagenEndpoint(remote, spec.RemotePath)
+    ];
 }
 
 // 工作区同步会话（生命周期管理）
@@ -84,27 +102,15 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         var daemonProcess = await EnsureMutagenDaemonAsync(cancellation,agentNewlyStarted);
         
         // 创建同步会话；Mutagen 以 AgentUser 连接并创建文件，与远程 agent 使用同一身份。
-        var createArgs = new[]
-        {
-            "sync", "create",
-            "--name", sessionName,
-            "--sync-mode", MutagenCreateMode.SyncMode,  // 本机一侧赢得冲突；界面不得把这种会话说成已收敛
-            "--ignore-vcs",  // 忽略 .git 目录（避免冲突）
-            "--ignore", "node_modules/",  // 忽略 node_modules
-            "--ignore", "bin/",
-            "--ignore", "obj/",
-            "--default-file-mode", "0664",  // 文件权限：owner/group 可读写，other 可读
-            "--default-directory-mode", "0775",  // 目录权限：owner/group 可读写执行，other 可读执行
-            spec.LocalPath,
-            $"{remote.AgentUser}@{remote.Host}:{spec.RemotePath}"  // 用 AgentUser（agent 可写）
-        };
-        
-        await RunMutagenCommandAsync(createArgs, cancellation);
+        await RunMutagenCommandAsync(WorkspaceSync.BuildCreateArguments(spec, remote, sessionName), cancellation);
         
         // Mutagen 已切到 AgentUser，不需要 root 权限修复。
         return new MutagenSyncSession(sessionName, spec.RemotePath, daemonProcess);
     }
     
+    internal static string MutagenEndpoint(RemoteExecutionSpec remote,string path)=>
+        $"{remote.AgentUser}@{remote.Host}:{remote.SshPort.ToString(System.Globalization.CultureInfo.InvariantCulture)}:{path}";
+
     public string? SessionName => _sessionName;
 
     public async Task WaitReadyAsync(CancellationToken cancellation)
@@ -170,7 +176,7 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         {
             await RunMutagenCommandAsync(new[] { "sync", "terminate", _sessionName }, CancellationToken.None);
         }
-        catch { /* 忽略终止失败。终止失败不改写已经写入的结束记录。 */ }
+        catch { /* 忽略终止失败（会话已收敛，终止失败不影响数据） */ }
         
         return null;  // 成功
     }
@@ -240,6 +246,8 @@ internal sealed class SshfsMountSession : IWorkspaceSyncSession
         
         startInfo.ArgumentList.Add($"{remote.SshUser}@{remote.Host}:{spec.RemotePath}");
         startInfo.ArgumentList.Add(mountPoint);
+        startInfo.ArgumentList.Add("-p");
+        startInfo.ArgumentList.Add(remote.SshPort.ToString(System.Globalization.CultureInfo.InvariantCulture));
         startInfo.ArgumentList.Add("-o");
         startInfo.ArgumentList.Add("reconnect,ServerAliveInterval=15,ServerAliveCountMax=3");
         
@@ -347,16 +355,20 @@ internal sealed class FakeSyncSession : IWorkspaceSyncSession
 {
     private readonly string? _name;
     private readonly string _remotePath;
+    private readonly bool _simulated;
     public FakeSyncSession(WorkspaceSyncSpec spec)
     {
         _name = spec.Mode == WorkspaceSyncMode.Mutagen ? spec.MutagenSessionName ?? $"{WorkspaceSync.SessionNamePrefix}fake{Guid.NewGuid():N}" : null;
         _remotePath = spec.RemotePath;
+        // 未设场景变量时保持原有即时成功行为（R33/E2E 回归不受影响）；设了则路由到传播模拟器。
+        _simulated = _name is not null && Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SYNC_SCENARIO") is { Length: > 0 };
+        if (_simulated) FakeSyncSimulator.Register(_name!, spec.LocalPath, spec.RemotePath);
     }
     public string? SessionName => _name;
-    public Task WaitReadyAsync(CancellationToken cancellation) => Task.CompletedTask;
+    public Task WaitReadyAsync(CancellationToken cancellation) => _simulated ? FakeSyncSimulator.WaitReadyAsync(_name!, cancellation) : Task.CompletedTask;
     public string GetRemoteWorkingDirectory() => _remotePath;
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-    public Task<string?> TryDisposeAsync() => Task.FromResult<string?>(null);
+    public async ValueTask DisposeAsync() { if (_simulated) await TryDisposeAsync(); }
+    public Task<string?> TryDisposeAsync() => _simulated ? Task.FromResult(FakeSyncSimulator.Flush(_name!)) : Task.FromResult<string?>(null);
 }
 #endif
 

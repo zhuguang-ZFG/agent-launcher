@@ -143,6 +143,7 @@ public partial class MainWindow
     }
     private void JumpToRecord(FrameworkElement section, Panel list, Guid id, string missing)
     {
+        EmbeddedPanel.Visibility = Visibility.Collapsed;
         if (section is Expander expander) expander.IsExpanded = true;
         Dispatcher.BeginInvoke(new Action(() =>
         {
@@ -153,6 +154,7 @@ public partial class MainWindow
     }
     private void MainKeyDown(object sender, KeyEventArgs e)
     {
+        if(Keyboard.FocusedElement is TerminalCard)return;
         if (loading || closeRequested || !IsEnabled || quickActionsOpen) return;
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         var modifiers = Keyboard.Modifiers;

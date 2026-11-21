@@ -51,8 +51,8 @@ public partial class MainWindow
         ProgressText.Text = result.Message;
         try
         {
-            var terminal = await Task.Run(() => Commands.Terminal(config.TerminalPath));
-            await Task.Run(() => Commands.SubmitReattachPane(terminal, entry.Plan));
+            var terminal = await ResolveLaunchTerminalAsync();
+            await SubmitPanesAsync(terminal,[entry.Plan],"vertical",reattach:true);
             ProgressText.Text = result.Message + " 已提交本地 SSH 窗格。";
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or FileNotFoundException)

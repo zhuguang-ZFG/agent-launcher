@@ -4,7 +4,7 @@
 
 本轮修订：按 `main` `6daa7de` 与 IMPLEMENTATION §83–§84，把已经落地、已经有活测记录、以及仍然不承诺的边界写清楚。不宣称 G4。SSH 远程 Linux 主机仍在正式范围（见 3.4 与[远程执行规格](superpowers/specs/2026-11-17-remote-execution-spec.md)）；WSL 仍暂不实现。产品目标、本地 Job 保护与发布门槛不变。
 
-2026-11-18 产品决定「三台同权」（见 3.4，记录于 IMPLEMENTATION §88）：本机、京云、阿里云对共享项目工作区同权。同权要求双向工作区同步，推荐 Mutagen；同步模式 `None` 不是同权。当前实现仍允许选择 `None`，本文不把「拒绝 `None`」写成已实现。SSH 断开后的操作员确认重新挂接已实现（R33，IMPLEMENTATION §89，fake-ssh，不打开真实 VPS）。自动重连仍未实现。不改 8 窗格名额，不把远端主机纳入本地内存/CPU 准入，不新增活测，不宣称 G4 或浸泡。
+2026-11-18 产品决定「三台同权」（见 3.4，记录于 IMPLEMENTATION §88）：本机、京云、阿里云对共享项目工作区同权。同权要求双向工作区同步，推荐 Mutagen；同步模式 `None` 不是同权。自 2026-11-19 起，主机编辑器保存与启动准备两层拒收 `None`（既有 `None` 主机在下次启动被拒）；本文按该实现改写。SSH 断开后的操作员确认重新挂接已实现（R33，IMPLEMENTATION §89，fake-ssh，不打开真实 VPS）。远程内存上限已实现为 systemd scope（[规格](superpowers/specs/2026-11-19-remote-memory-limit-spec.md)，R45；真实 VPS 活测待办）；自动重连仍未实现。不改 8 窗格名额，不把远端主机纳入本地内存/CPU 准入，不新增活测，不宣称 G4 或浸泡。
 
 ## 1. 阅读入口与状态
 
@@ -80,7 +80,7 @@
 
 认证使用 `ssh-agent` 或配置中的私钥路径，并以 `BatchMode=yes` 禁止交互输入密码。本机可以对已登记主机做免密连接自检、版本检查，以及显示确切命令并二次确认后的 Agent 升级（IMPLEMENTATION §83）。配置只保存主机地址、端口、用户名和可选密钥路径，不保存密码或私钥内容。每个槽位的 Agent 选择都包含已登记主机的云候选（UX14，§84）；选中后绑定该主机，远程目录为空时按 `~/work/<项目名>` 派生，改选本机候选则解除绑定。删除远程多余文件必须显式确认。同步会话名写入 `attempts/<id>/sync-session.json`，供同步徽章在配置窗口重启后继续匹配（§84）。槽位可以只读查看同步回本机的改动；详情可以只读查看远端资源。
 
-`RemoteExecutionSpec.Validate()` 仍拒绝 `MemoryLimitBytes`。远程 cgroup 与远程内存上限尚未实现，界面不得宣称已限制远程内存。远程启动命令另注入固定的 `NODE_OPTIONS=--max-old-space-size=1024`（1024 MiB，只作用于 Node 老生代堆，非 Node 进程忽略该变量）。这项注入不实现 `MemoryLimitBytes`，也不实现远程 cgroup 限额。
+远程内存上限已实现（2026-11-19 [规格](superpowers/specs/2026-11-19-remote-memory-limit-spec.md)，R45）：主机级 `MemoryLimitMib`（256–65536 MiB，留空不限制）在准备层换算为 `RemoteExecutionSpec.MemoryLimitBytes`，启动命令以 `systemd-run --scope -p MemoryMax=<bytes>` 包裹并先守卫 systemd-run 可用性（缺失即 fail-closed）；出界值拒收。界面可以宣称该限制，但必须连同「远程主机需有 systemd-run」一并说明。远程启动命令另注入固定的 `NODE_OPTIONS=--max-old-space-size=1024`（1024 MiB，只作用于 Node 老生代堆，非 Node 进程忽略该变量）；该注入仍是护栏，不是内存上限合同本身。真实 VPS 上的 scope 生效、超限终止与非 root 拒绝路径仍是 opt-in 活测待办。
 
 `Disconnected` 保持非终止，直到操作员在「核对并确认释放」中判断远程进程已不在、填写原因并二次确认（协议 `release-remote`，回执 `operator-release.json`，R28，§83）。判断为仍在或无法判断时不释放。这条回归使用 fake-ssh，不依赖真实 VPS。为在实际使用中维持同权，操作员可以另用「核对并确认重新挂接」（协议 `reattach-remote`，回执 `operator-reattach.json`，R33，§89）：只有确认后才核对远程进程；仍在则把同一条账本挂回同一主机、同一目录的本地 SSH，原来启用了 Mutagen 或 SSHFS 的会重新建立同步，同步模式为 `None` 时不会写成已同步，这次启动也不是同权；已不在、尚未启动或无法判断则拒绝，账本不变，不自动释放。确认释放不发起重新挂接，重新挂接也不代替确认释放。重新挂接不释放预算，也不把尝试标成已结束。自动重连不在这项要求内，也未实现。确认释放只结束本地账本占用，不承诺结束远程主机上的进程。
 
@@ -191,7 +191,7 @@ WPF 配置窗口（可关闭）
 
 用户已要求推进实现，因此 v0.6 / v0.6.1 是有明确验证边界的技术预览。G1～G3 有可运行证据，但尚未完成全部门禁；不以此宣称 G4 稳定发布通过。代码已自审，没有独立 reviewer。已记录实现见 IMPLEMENTATION §83–§84；仍开放项见[缺口收口计划](superpowers/plans/2026-11-17-gap-close-plan.md)。
 
-远程执行是 v0.6.1 的范围增补。原 G1～G3 的本地证据仍然单独有效。R28 操作员确认释放和 R29 活测记录已经写入 IMPLEMENTATION。三台同权是 2026-11-18 的产品决定；操作员确认的重新挂接已写入 IMPLEMENTATION §89（R33，fake-ssh）。自动重连仍未实现。远程执行仍然是技术预览；远端 CI、§11 浸泡和 G4 仍待单独评估。
+远程执行是 v0.6.1 的范围增补。原 G1～G3 的本地证据仍然单独有效。R28 操作员确认释放和 R29 活测记录已经写入 IMPLEMENTATION。三台同权是 2026-11-18 的产品决定；操作员确认的重新挂接已写入 IMPLEMENTATION §89（R33，fake-ssh）。远程内存上限已实现为 systemd scope（[规格](superpowers/specs/2026-11-19-remote-memory-limit-spec.md)，R45；真实 VPS 活测待办）；自动重连仍未实现。远程执行仍然是技术预览；远端 CI、§11 浸泡和 G4 仍待单独评估。
 
 ## 10. 参考和来源
 

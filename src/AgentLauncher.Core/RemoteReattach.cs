@@ -28,7 +28,7 @@ public static class RemoteReattach
     public static string AttachShell(Guid attemptId, string remoteDirectory)
     {
         var token = AttemptToken(attemptId);
-        var dir = "'" + remoteDirectory.Replace("'", "'\\''") + "'";
+        var dir = RemoteWorkspaceMappingHelper.ShellDirectory(remoteDirectory);
         return "echo " + AttachMarker + "; "
             + "found=0; "
             + "for envf in /proc/[0-9]*/environ; do "

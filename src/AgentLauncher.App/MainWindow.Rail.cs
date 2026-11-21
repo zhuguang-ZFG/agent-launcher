@@ -56,6 +56,7 @@ public partial class MainWindow
     // Expanding alone leaves the section below the fold; scroll it into view once the new content has been arranged.
     private void JumpTo(FrameworkElement section)
     {
+        EmbeddedPanel.Visibility = Visibility.Collapsed;
         if (section is Expander expander) expander.IsExpanded = true;
         Dispatcher.BeginInvoke(new Action(() => section.BringIntoView()), System.Windows.Threading.DispatcherPriority.Loaded);
     }

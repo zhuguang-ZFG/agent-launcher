@@ -79,7 +79,18 @@ public static class Store
 }
 public static class Ipc
 {
-    public static Task<Response> SendAsync(Request request,CancellationToken ct=default)=>SendCoreAsync(request,ct,false);
+    public static async Task<Response> SendAsync(Request request,CancellationToken ct=default)
+    {
+        var response=await SendCoreAsync(request,ct,false);
+        if(request.Operation!="reattach-remote")return response;
+        var poll=request with{Operation="reattach-poll",Epoch=response.Epoch};
+        while(response.ReattachProbePending)
+        {
+            await Task.Delay(250,ct);
+            response=await SendCoreAsync(poll,ct,false);
+        }
+        return response;
+    }
     public static Task<Response> EnsureAsync(Request request,CancellationToken ct=default)=>SendCoreAsync(request,ct,true);
     private static async Task<Response> SendCoreAsync(Request request,CancellationToken ct,bool ensureMonitor)
     {
@@ -229,7 +240,10 @@ public static class Ipc
         var log=Environment.GetEnvironmentVariable("AGENT_LAUNCHER_MONITOR_SPAWN_LOG");
         if(!string.IsNullOrEmpty(log))File.AppendAllText(log,"monitor\n");
 #endif
-        using var p=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});
+        // 监视器活得比派生者久：派生瞬间清 std 继承位（R30 同类），防监视器握住派生者的管道让日志泵等不到 EOF。
+        Native.ClearStdInherit();
+        try{using var p=Process.Start(new ProcessStartInfo(Store.WorkerPath,"monitor"){UseShellExecute=false,CreateNoWindow=true});}
+        finally{Native.RestoreStdInherit();}
     }
 }
 public static partial class Commands

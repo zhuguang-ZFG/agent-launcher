@@ -342,6 +342,7 @@ public static class ResourcePolicy
                 item.RemoteExecution.AgentType,
                 item.RemoteExecution.RemoteWorkingDirectory,
                 Arguments = item.RemoteExecution.Arguments,
+                item.RemoteExecution.MemoryLimitBytes,
                 item.RemoteExecution.SshKeyPath,
                 SyncMode = item.RemoteExecution.WorkspaceSync?.Mode,
                 SyncLocal = item.RemoteExecution.WorkspaceSync?.LocalPath,
@@ -441,6 +442,9 @@ public static class ResourcePolicy
         if (item.RemoteExecution is {} remote)
         {
             remote.Validate();
+            if(remote.WorkspaceSync is {Mode:not WorkspaceSyncMode.None} sync&&
+                !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(sync.LocalPath)),Path.TrimEndingDirectorySeparator(Path.GetFullPath(item.Cwd)),StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("远程同步的本地目录必须与本次启动的工作目录一致。");
             if (item.Kind != "agent" || item.Budget != 0 || item.PoolId is not null || item.PlanningBytes is not null || item.ResourceMode is not null)
                 throw new InvalidDataException("远程执行不接受本地 Job、资源池或内存预算。");
             return;
