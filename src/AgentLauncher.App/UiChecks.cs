@@ -20,6 +20,10 @@ public partial class MainWindow
         // monitor state there, so create it before the first configuration write (a missing root surfaces as a silent UI-only error).
         System.IO.Directory.CreateDirectory(Store.Root);
         SessionNotifier.For(this).TestMode = true;
+        // The harness may be launched from a non-interactive/background process whose startup show state is minimized;
+        // focus and hit-testing assertions require a normal, active window (production starts visible and normal).
+        if (WindowState != WindowState.Normal) { Show(); WindowState = WindowState.Normal; }
+        Activate();
         void Check(string name,bool value)
         {
             if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}
@@ -457,6 +461,7 @@ public partial class MainWindow
         await RunQuickActionsChecksAsync(folder,Check,ResizeForCheckAsync);
         await RunSlotConvenienceChecksAsync(folder,Check,ResizeForCheckAsync);
         await RunPracticalFixChecksAsync(folder,Check);
+        await RunInstalledAgentsChecksAsync(folder, Check);
         await RunSyncReviewUiChecksAsync(folder,Check);
         // P1 session notifications: runtime transitions only, deduped, rate-limited and path-safe.
         var notifier = SessionNotifier.For(this);

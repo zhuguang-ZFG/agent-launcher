@@ -53,7 +53,7 @@ public partial class MainWindow
             var sessionButton = RailSessions.Children.OfType<Button>().Single(b => AutomationProperties.GetName(b) == "查看会话 接口服务");
             sessionButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
-var focusedElement = Keyboard.FocusedElement as FrameworkElement;
+            var focusedElement = Keyboard.FocusedElement as FrameworkElement;
             var sessionFocused = (ActiveNow.Visibility == Visibility.Visible || SessionExpander.IsExpanded) && focusedElement?.Tag is Guid focusedId && focusedId == attemptId;
             Store.Save(Path.Combine(folder, "quick-session-focus.json"), new { IsActive, IsVisible, WindowState, Expanded = SessionExpander.IsExpanded, ActiveNow = ActiveNow.Visibility, ExpectedId = attemptId, FocusedType = focusedElement?.GetType().Name, FocusedName = focusedElement?.Name, FocusedId = focusedElement?.Tag is Guid tag ? (Guid?)tag : null, FocusedLoaded = focusedElement?.IsLoaded, FocusedVisible = focusedElement?.IsVisible, LogicalFocusType = FocusManager.GetFocusedElement(this)?.GetType().Name });
             if (!sessionFocused) CaptureQuickActions(this, Path.Combine(folder, "quick-session-focus-failure.png"));

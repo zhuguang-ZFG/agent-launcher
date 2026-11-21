@@ -53,6 +53,7 @@ public partial class MainWindow
         Add("resources", "资源设置", "准入模式、并发资源与单项上限", () => ResourceClick(this, new()), () => !busy);
         Add("combinations", "组合与批量设置", "恢复组合、保存模板、规模预设和 Agent 筛选", () => JumpTo(ConfigurationToolsExpander));
         Add("add-agent", "添加 Agent", "添加后直接编辑新项；勾选后加入本次启动", AddAgentSlot, () => CanAddSlot);
+        actions.Add(new("installed-agents", "补齐本机 Agent", "扫描已安装 CLI，按任务使用频率填入空白槽位；不覆盖已有配置", () => AddInstalledAgentsAsync(), () => CanEditSlots));
         if (selectedSlotId is { } selected && config.Draft.Slots.FirstOrDefault(s => s.Id == selected) is { } current)
         {
             Add("duplicate-agent", "复制当前 Agent 配置", current.DisplayName + " · 保留程序、参数、目录和备注，副本不勾选", () => DuplicateSlot(selected), () => CanAddSlot && CanEditSlot(selected));
