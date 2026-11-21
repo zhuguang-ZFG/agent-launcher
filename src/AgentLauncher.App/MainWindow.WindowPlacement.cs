@@ -12,6 +12,7 @@ public partial class MainWindow
     // WPF may not expose usable RestoreBounds while a minimized window is closing.
     private Rect windowedBounds=Rect.Empty;
     private WindowState lastNonMinimizedState=WindowState.Normal;
+    private IntPtr windowHandle;
 
     private void InitializeWindowPlacementTracking()
     {
@@ -20,7 +21,9 @@ public partial class MainWindow
         StateChanged+=WindowPlacementStateChanged;
         SizeChanged+=WindowPlacementSizeChanged;
         LocationChanged+=WindowPlacementLocationChanged;
+        SourceInitialized+=WindowPlacementSourceInitialized;
     }
+    private void WindowPlacementSourceInitialized(object? sender,EventArgs e)=>windowHandle=new System.Windows.Interop.WindowInteropHelper(this).Handle;
 
     private void WindowPlacementStateChanged(object? sender,EventArgs e)
     {
@@ -33,10 +36,13 @@ public partial class MainWindow
 
     private void RememberWindowedBounds()
     {
-        if(WindowState!=WindowState.Normal||!IsFinite(Left)||!IsFinite(Top)||!IsFinite(Width)||!IsFinite(Height))return;
+        if(!IsActuallyWindowed()||!IsFinite(Left)||!IsFinite(Top)||!IsFinite(Width)||!IsFinite(Height))return;
         if(Width<MinWidth||Height<MinHeight)return;
         windowedBounds=new Rect(Left,Top,Width,Height);
     }
+    // Native caption state changes before WPF's StateChanged event during maximize/restore.
+    private bool IsActuallyWindowed()=>WindowState==WindowState.Normal&&(windowHandle==IntPtr.Zero||(!WindowPlacementNative.IsZoomed(windowHandle)&&!WindowPlacementNative.IsIconic(windowHandle)));
+
 
     private bool IsUsableWindowedBounds(Rect bounds)=>!bounds.IsEmpty&&IsFinite(bounds.Left)&&IsFinite(bounds.Top)&&IsFinite(bounds.Width)&&IsFinite(bounds.Height)&&bounds.Width>=MinWidth&&bounds.Height>=MinHeight;
 
@@ -78,5 +84,10 @@ public partial class MainWindow
         catch(Exception e)when(e is not OutOfMemoryException){/* 位置记录是便利信息，写入失败不能影响退出。 */}
     }
 
+    private static class WindowPlacementNative
+    {
+        [System.Runtime.InteropServices.DllImport("user32.dll")] internal static extern bool IsZoomed(IntPtr handle);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr handle);
+    }
     private static bool IsFinite(double value)=>double.IsFinite(value);
 }

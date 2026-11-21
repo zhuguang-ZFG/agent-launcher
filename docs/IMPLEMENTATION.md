@@ -1576,8 +1576,8 @@ powershell -NoProfile -File scripts/test.ps1
 ## 99. 窗口位置与大小记忆（2026-11-21，Asia/Shanghai）
 
 - 行为：主窗口关闭时把正常状态下的 `Left/Top/Width/Height` 和是否最大化写入 `%LOCALAPPDATA%\AgentLauncher\window-placement.json`，下次启动在 `Show()` 前恢复。该文件与业务配置分离，不改变 `Configuration` schema，也不影响只读配置启动。
-- 边界：记录损坏、非有限数值、小于最小窗口尺寸或与当前虚拟桌面完全不相交时回退到原有居中默认尺寸；恢复尺寸不超过当前虚拟桌面，左上角夹到可见区域。新增窗口状态跟踪：仅在普通状态缓存可用 bounds，最小化时保留最后非最小化状态；关闭时优先用缓存值，必要时才回退到 `RestoreBounds`。
-- 实现位置：`src/AgentLauncher.App/MainWindow.WindowPlacement.cs`，构造函数设置默认尺寸后初始化 `StateChanged`、`SizeChanged`、`LocationChanged` 跟踪，再调用 `ApplyWindowPlacement()`；`Closed` 事件调用 `SaveWindowPlacement()`。未改 XAML 默认值、配置 schema 或启动协议。
-- 验证：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误。临时隔离回归探针在旧实现上失败：先改变普通窗口尺寸，再最大化→最小化→关闭，旧 placement 仍是种子 `1002x702` 且无 `.bak`；普通状态关闭控制组会正确写入新尺寸。修复后同一探针写入新 bounds `1120x760`、`Maximized=true` 并生成 `.bak`，第二次启动通过 UI Automation 确认恢复最大化；进程均退出 0。另有真实截图探针覆盖正常还原 `1000x700`、完全离屏回退 `920x760`。探针均用临时隔离根，未接触用户配置，临时脚本位于系统临时目录，未改仓库测试文件。
-- 验证限制：`task_verify` 返回 `unverified`（项目/Git 基线不可用，当前无配置检查）；本次未运行 `scripts/test.ps1` 全量门禁。`--ui-check` 定向运行未通过：两次停在 UX10 窗口最小化/焦点断言，一次停在窄布局 resize settle；基线工作树也在更早的 fake-sample monitor 检查失败。因此不把 UI 检查记为通过，也不据此归因本功能。
-- 交付：`artifacts/preview` 已用本功能重新发布，最终 `distribution.json` 记录 `SourceDirty=false`、20 个文件，`Launch.ps1 -CheckOnly` 通过；桌面快捷方式指向该目录。旧包由 `scripts/build.ps1` 保留为 `artifacts/preview.before-*`；`scripts/use-validated-preview.ps1 -CheckOnly` 已通过。
+- 边界：记录损坏、非有限数值、小于最小窗口尺寸或与当前虚拟桌面完全不相交时回退到原有居中默认尺寸；恢复尺寸不超过当前虚拟桌面，左上角夹到可见区域。普通 bounds 只在 WPF 状态与原生 HWND 均确认是 normal 时更新；minimize 时保留最后非最小化状态。
+- 实现位置：`src/AgentLauncher.App/MainWindow.WindowPlacement.cs`，`SourceInitialized` 缓存 HWND，`SizeChanged` / `LocationChanged` 通过 `IsZoomed`、`IsIconic` 排除最大化转换窗口边框；构造函数在 `Show()` 前恢复，`Closed` 保存。根因已由集成版事件追踪确认：native maximize 已生效但 WPF `WindowState` 尚为 Normal 时触发 `LocationChanged`，旧缓存把 `(200,120)` 覆盖成 `(-7.2,-7.2)`。
+- 回归：`src/AgentLauncher.App/UiChecks.cs` 新增 UX16，隔离保存并恢复 `window-placement.json`、`.bak`、原窗口几何/状态及内部 bounds 缓存；最大化→最小化后断言位置、尺寸和最大化标志。固定版 `--ui-check` **476/476 通过、退出 0**。旧版相同原生探针写出 `Left/Top=-7.2`，重开 native normal rect 为 `0,0 1400x950`；修复版写出 `(200,120,1120,760,Maximized=true)`，重开 native normal rect 正确为 `250,150 1400x950`，进程退出 0。
+- 验证限制：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误。`task_verify` 为 `unverified`（项目/Git 基线不可用、无已配置检查）；`scripts/test.ps1` 全量门禁未运行。UX16 已加入测试文件且本地定向 UI 检查通过，但按固定策略仍需独立 review；未把 task_verify 状态改写为通过。旧版 UI 检查未到达 UX16，先在 `fake-sample monitor healthy` 失败；旧版失败证据来自独立原生矩形探针。
+- 交付：`artifacts/preview` 将在本次修复提交后重新发布；发布清单需确认 `SourceDirty=false` 并通过 `Launch.ps1 -CheckOnly`，桌面快捷方式仍应指向该目录。

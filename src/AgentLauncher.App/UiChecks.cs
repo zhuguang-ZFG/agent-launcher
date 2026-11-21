@@ -31,6 +31,37 @@ public partial class MainWindow
             // Record every boundary so a later layout stall is attributed to the actual last completed check.
             System.IO.File.WriteAllText(System.IO.Path.Combine(folder,"ui-progress.json"),System.Text.Json.JsonSerializer.Serialize(new{LastPassed=name,Count=checks.Count,At=DateTimeOffset.UtcNow}));
         }
+        async Task CheckWindowPlacementRoundTripAsync()
+        {
+            var path=Store.FilePath("window-placement.json");var backupPath=path+".bak";
+            var savedPlacement=System.IO.File.Exists(path)?System.IO.File.ReadAllBytes(path):null;
+            var savedBackup=System.IO.File.Exists(backupPath)?System.IO.File.ReadAllBytes(backupPath):null;
+            var originalState=WindowState;var originalStartup=WindowStartupLocation;var originalLeft=Left;var originalTop=Top;var originalWidth=Width;var originalHeight=Height;
+            var originalWindowedBounds=windowedBounds;var originalLastNonMinimizedState=lastNonMinimizedState;
+            try
+            {
+                var screen=new Rect(SystemParameters.VirtualScreenLeft,SystemParameters.VirtualScreenTop,SystemParameters.VirtualScreenWidth,SystemParameters.VirtualScreenHeight);
+                var testWidth=Math.Min(960,screen.Width-64);var testHeight=Math.Min(700,screen.Height-64);
+                if(testWidth<MinWidth||testHeight<MinHeight)throw new InvalidOperationException("屏幕尺寸不足以验证窗口位置记忆。");
+                WindowState=WindowState.Normal;WindowStartupLocation=WindowStartupLocation.Manual;
+                Left=Math.Clamp(screen.Left+24,screen.Left,screen.Right-testWidth);Top=Math.Clamp(screen.Top+24,screen.Top,screen.Bottom-testHeight);Width=testWidth;Height=testHeight;
+                await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
+                var expected=new Rect(Left,Top,Width,Height);
+                WindowState=WindowState.Maximized;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
+                WindowState=WindowState.Minimized;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
+                SaveWindowPlacement();
+                var actual=Store.Read<WindowPlacement>(path);
+                Check("UX16 minimized placement retains normal position size and max state",actual is {Maximized:true}&&Math.Abs(actual.Left-expected.Left)<0.5&&Math.Abs(actual.Top-expected.Top)<0.5&&Math.Abs(actual.Width-expected.Width)<0.5&&Math.Abs(actual.Height-expected.Height)<0.5);
+            }
+            finally
+            {
+                static void RestoreFile(string file,byte[]? bytes){if(bytes is null){if(System.IO.File.Exists(file))System.IO.File.Delete(file);}else System.IO.File.WriteAllBytes(file,bytes);}
+                RestoreFile(path,savedPlacement);RestoreFile(backupPath,savedBackup);
+                WindowState=WindowState.Normal;WindowStartupLocation=originalStartup;Left=originalLeft;Top=originalTop;Width=originalWidth;Height=originalHeight;WindowState=originalState;
+                await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                windowedBounds=originalWindowedBounds;lastNonMinimizedState=originalLastNonMinimizedState;
+            }
+        }
         IEnumerable<T> Find<T>(DependencyObject root) where T:DependencyObject
         {
             for(var i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);if(child is T target)yield return target;foreach(var nested in Find<T>(child))yield return nested;}
@@ -47,6 +78,7 @@ public partial class MainWindow
             await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
         }
         Check("config load is writable",!readOnly);
+        await CheckWindowPlacementRoundTripAsync();
         // F6/F8 regressions: null template values and unsupported LastEdited must fail closed. Both use the real configPath in the isolated test root.
         await saveTask;
         var healthyConfig=System.IO.File.Exists(configPath)?System.IO.File.ReadAllBytes(configPath):null;
