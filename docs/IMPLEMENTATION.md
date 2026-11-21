@@ -1576,8 +1576,8 @@ powershell -NoProfile -File scripts/test.ps1
 ## 99. 窗口位置与大小记忆（2026-11-21，Asia/Shanghai）
 
 - 行为：主窗口关闭时把正常状态下的 `Left/Top/Width/Height` 和是否最大化写入 `%LOCALAPPDATA%\AgentLauncher\window-placement.json`，下次启动在 `Show()` 前恢复。该文件与业务配置分离，不改变 `Configuration` schema，也不影响只读配置启动。
-- 边界：记录损坏、非有限数值、小于最小窗口尺寸或与当前虚拟桌面完全不相交时回退到原有居中默认尺寸；恢复尺寸不超过当前虚拟桌面，左上角夹到可见区域。最大化时保存 `RestoreBounds`，下次恢复最大化并保留还原后的普通尺寸。
-- 实现位置：`src/AgentLauncher.App/MainWindow.WindowPlacement.cs`，构造函数在 `InitializeComponent()` 和默认尺寸之后调用 `ApplyWindowPlacement()`，`Closed` 事件调用 `SaveWindowPlacement()`；未改 XAML 默认值、配置文件或启动协议。
-- 验证：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误。隔离测试构建的真实截图探针：写入 `1000x700 @ (100,80)` 后启动得到 `ActualWidth=1000`、`ActualHeight=700`；写入完全移出虚拟桌面的 `Left=-5000` 后启动回退到 `920x760`；写入最大化记录后截图窗口为 `1550.4x926.4`，关闭时保存的普通尺寸仍为 `1000x700` 且 `Maximized=true`。探针使用独立临时测试根，不接触用户配置。
-- 未完成：本机工具会话下 `--ui-check` 被既有窗口最小化/焦点时序夹具阻断（同一非交互会话的基线也会在更早的 `fake-sample monitor healthy` 失败），因此不把该轮 UI 结果记作本功能失败或通过；窗口几何的端到端验证以三项真实截图探针为准。
-- 交付：`artifacts/preview` 已用该功能重新发布，`distribution.json` 记录 `SourceDirty=false`、20 个文件，`Launch.ps1 -CheckOnly` 通过；桌面快捷方式已指向该目录。原包保留在 `artifacts/preview.before-*`，`scripts/use-validated-preview.ps1 -CheckOnly` 也已通过。
+- 边界：记录损坏、非有限数值、小于最小窗口尺寸或与当前虚拟桌面完全不相交时回退到原有居中默认尺寸；恢复尺寸不超过当前虚拟桌面，左上角夹到可见区域。新增窗口状态跟踪：仅在普通状态缓存可用 bounds，最小化时保留最后非最小化状态；关闭时优先用缓存值，必要时才回退到 `RestoreBounds`。
+- 实现位置：`src/AgentLauncher.App/MainWindow.WindowPlacement.cs`，构造函数设置默认尺寸后初始化 `StateChanged`、`SizeChanged`、`LocationChanged` 跟踪，再调用 `ApplyWindowPlacement()`；`Closed` 事件调用 `SaveWindowPlacement()`。未改 XAML 默认值、配置 schema 或启动协议。
+- 验证：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误。临时隔离回归探针在旧实现上失败：先改变普通窗口尺寸，再最大化→最小化→关闭，旧 placement 仍是种子 `1002x702` 且无 `.bak`；普通状态关闭控制组会正确写入新尺寸。修复后同一探针写入新 bounds `1120x760`、`Maximized=true` 并生成 `.bak`，第二次启动通过 UI Automation 确认恢复最大化；进程均退出 0。另有真实截图探针覆盖正常还原 `1000x700`、完全离屏回退 `920x760`。探针均用临时隔离根，未接触用户配置，临时脚本位于系统临时目录，未改仓库测试文件。
+- 验证限制：`task_verify` 返回 `unverified`（项目/Git 基线不可用，当前无配置检查）；本次未运行 `scripts/test.ps1` 全量门禁。`--ui-check` 定向运行未通过：两次停在 UX10 窗口最小化/焦点断言，一次停在窄布局 resize settle；基线工作树也在更早的 fake-sample monitor 检查失败。因此不把 UI 检查记为通过，也不据此归因本功能。
+- 交付：`artifacts/preview` 已用本功能重新发布，最终 `distribution.json` 记录 `SourceDirty=false`、20 个文件，`Launch.ps1 -CheckOnly` 通过；桌面快捷方式指向该目录。旧包由 `scripts/build.ps1` 保留为 `artifacts/preview.before-*`；`scripts/use-validated-preview.ps1 -CheckOnly` 已通过。

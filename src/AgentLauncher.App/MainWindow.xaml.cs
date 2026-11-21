@@ -71,6 +71,7 @@ public partial class MainWindow : Window
         ProjectPath.TextChanged+=(_,_)=>{if(!rendering){projectInputRevision++;if(!loading)UpdateLaunch();}};
         ProjectPath.KeyDown+=ProjectKeyDown;
         var work=SystemParameters.WorkArea;Width=Math.Min(920,work.Width-32);Height=Math.Min(760,work.Height-32);MinWidth=Math.Min(560,work.Width-32);MinHeight=Math.Min(460,work.Height-32);
+        InitializeWindowPlacementTracking();
         ApplyWindowPlacement();
         SizeChanged+=(_,_)=>ArrangePanels();
         Loaded+=async (_,_)=>await GuardAsync(LoadAsync);

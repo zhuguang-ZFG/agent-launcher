@@ -1,4 +1,3 @@
-using System.IO;
 using System.Windows;
 using AgentLauncher.Windows;
 
@@ -10,6 +9,36 @@ public partial class MainWindow
 {
     private sealed record WindowPlacement(double Left,double Top,double Width,double Height,bool Maximized);
     private const string WindowPlacementFile="window-placement.json";
+    // WPF may not expose usable RestoreBounds while a minimized window is closing.
+    private Rect windowedBounds=Rect.Empty;
+    private WindowState lastNonMinimizedState=WindowState.Normal;
+
+    private void InitializeWindowPlacementTracking()
+    {
+        lastNonMinimizedState=WindowState;
+        RememberWindowedBounds();
+        StateChanged+=WindowPlacementStateChanged;
+        SizeChanged+=WindowPlacementSizeChanged;
+        LocationChanged+=WindowPlacementLocationChanged;
+    }
+
+    private void WindowPlacementStateChanged(object? sender,EventArgs e)
+    {
+        if(WindowState!=WindowState.Minimized)lastNonMinimizedState=WindowState;
+        RememberWindowedBounds();
+    }
+
+    private void WindowPlacementSizeChanged(object sender,SizeChangedEventArgs e)=>RememberWindowedBounds();
+    private void WindowPlacementLocationChanged(object? sender,EventArgs e)=>RememberWindowedBounds();
+
+    private void RememberWindowedBounds()
+    {
+        if(WindowState!=WindowState.Normal||!IsFinite(Left)||!IsFinite(Top)||!IsFinite(Width)||!IsFinite(Height))return;
+        if(Width<MinWidth||Height<MinHeight)return;
+        windowedBounds=new Rect(Left,Top,Width,Height);
+    }
+
+    private bool IsUsableWindowedBounds(Rect bounds)=>!bounds.IsEmpty&&IsFinite(bounds.Left)&&IsFinite(bounds.Top)&&IsFinite(bounds.Width)&&IsFinite(bounds.Height)&&bounds.Width>=MinWidth&&bounds.Height>=MinHeight;
 
     private void ApplyWindowPlacement()
     {
@@ -30,6 +59,7 @@ public partial class MainWindow
             Top=Math.Clamp(saved.Top,screen.Top,screen.Bottom-height);
             Width=width;
             Height=height;
+            RememberWindowedBounds();
             if(saved.Maximized)WindowState=WindowState.Maximized;
         }
         catch(Exception e)when(e is not OutOfMemoryException){/* 单个 UI 记录损坏时保留默认窗口，不阻止启动。 */}
@@ -39,10 +69,11 @@ public partial class MainWindow
     {
         try
         {
-            var bounds=WindowState==WindowState.Normal?new Rect(Left,Top,Width,Height):RestoreBounds;
-            if(bounds.IsEmpty||!IsFinite(bounds.Left)||!IsFinite(bounds.Top)||!IsFinite(bounds.Width)||!IsFinite(bounds.Height))return;
-            if(bounds.Width<MinWidth||bounds.Height<MinHeight)return;
-            Store.Save(Store.FilePath(WindowPlacementFile),new WindowPlacement(bounds.Left,bounds.Top,bounds.Width,bounds.Height,WindowState==WindowState.Maximized));
+            if(WindowState==WindowState.Normal)RememberWindowedBounds();
+            var bounds=IsUsableWindowedBounds(windowedBounds)?windowedBounds:RestoreBounds;
+            if(!IsUsableWindowedBounds(bounds))return;
+            var state=WindowState==WindowState.Minimized?lastNonMinimizedState:WindowState;
+            Store.Save(Store.FilePath(WindowPlacementFile),new WindowPlacement(bounds.Left,bounds.Top,bounds.Width,bounds.Height,state==WindowState.Maximized));
         }
         catch(Exception e)when(e is not OutOfMemoryException){/* 位置记录是便利信息，写入失败不能影响退出。 */}
     }
