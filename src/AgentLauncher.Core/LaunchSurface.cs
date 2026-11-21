@@ -12,7 +12,7 @@ public static class LaunchSurface
 {
     public const string LocalPlace = "本机";
     public const string ManyPlaces = "多个目标";
-    public const string NotPeer = "这次不是同权。各机只看自己的目录。仍可启动。";
+    public const string NotPeer = "这次不是同权。各机只看自己的目录。保存与启动会被拒收。";
     public const string RemoteConnection = "云端通过 SSH 连接，终端里可以实时输入和看到输出。文件同步不是实时一致。";
     public const string ReattachIsNewPane = "重新挂接打开的是新的 SSH 窗格，不是原来的交互终端。";
     public const string ReattachEffect = "恢复到同一远程目录，打开新的 SSH 窗格，名额继续占用。不会自动重连，也不会释放名额。";

@@ -132,7 +132,7 @@ public partial class MainWindow
         Check("UX15 mixed hosts do not collapse to one target",mixedLabel.Contains("多个目标")&&!mixedLabel.Contains(cloudHost.Name)&&!mixedLabel.Contains(otherHost.Name));
         await SelectRailSlot(2);
         var noneNote=Find<TextBlock>(SlotList).FirstOrDefault(t=>AutomationProperties.GetName(t)=="同步说明 "+config.Draft.Slots[1].DisplayName);
-        Check("UX15 none says this run is not peer",noneNote!=null&&noneNote.Text.Contains("这次不是同权")&&!noneNote.Text.Contains("拒绝"));
+        Check("UX15 none says this run is not peer and is refused",noneNote!=null&&noneNote.Text.Contains("这次不是同权")&&noneNote.Text.Contains("拒收")&&!noneNote.Text.Contains("仍可启动"));
         config.RemoteHosts=[];Edit(d=>{foreach(var s in d.Slots){s.RemoteHostId=null;s.RemoteDirectory=null;s.Enabled=s==d.Slots[0];}});
         await SelectRailSlot(1);
         config.Edit(d=>{d.Slots[0].Profiles.Clear();d.Slots.ForEach(s=>s.Enabled=true);});Render();

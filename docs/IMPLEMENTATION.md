@@ -1556,9 +1556,10 @@ powershell -NoProfile -File scripts/test.ps1
 ## 97. 启动主路径分组（2026-11-18）
 
 - 计划：`docs/superpowers/plans/2026-11-18-ui-launch-flow.md`。只改分组和文案。8 名额、16 槽位、reserve/begin、远程不进本机内存/CPU 准入都没有改。
-- 可见项目入口只留顶栏。运行位置和 Agent 分成两个下拉。非终态放到预览上方的「现在」。重新挂接和释放名额仍是原来的按钮名，旁边写明效果。`None` 写「这次不是同权」且不拒绝启动。Mutagen 文案只引用 `MutagenCreateMode.SyncMode`。没有新增自动重连、空闲关闭确认、通知、终端召回、Grok 配置，也没有实现 PR9 的已收敛状态机。没有重建桌面预览。
+- 可见项目入口只留顶栏。运行位置和 Agent 分成两个下拉。非终态放到预览上方的「现在」。重新挂接和释放名额仍是原来的按钮名，旁边写明效果。`None` 写「这次不是同权」；合并 main 后按 2026-11-19 的更晚决定，保存与启动会拒收（§92）。Mutagen 文案只引用 `MutagenCreateMode.SyncMode`。没有新增自动重连、空闲关闭确认、通知、终端召回、Grok 配置，也没有实现 PR9 的已收敛状态机。没有重建桌面预览。
 - 本环境是 Linux，SDK 8.0.428。`dotnet build AgentLauncher.sln -c Release -m:1 -p:EnableWindowsTargeting=true` 为 0 警告、0 错误。带 `DefineConstants=INTEGRATION_TESTS` 的 App 编译同样是 0 警告、0 错误。`dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release -- --launch-surface-checks` 为 **7/7 通过、退出 0**。这 7 项不碰 `Store`。审查后又改了三处：成功 flush 的退出说明不再写「已收敛」；主按钮在回到单一目标时恢复 `Ctrl+Enter` 提示；侧栏「全部…」和已有通知点击改到「现在」里的非终态行。这三处同样只做了编译，没有 Windows 界面运行。
 - 没有跑 `--ui-check`，也没有跑 `scripts/test.ps1`。这台机器没有 Windows 桌面，不能启动 WPF，也没有新的窗口截图。UX14/UX15、ACC-U04、ACC-U06、CR05、R28/R33 的界面断言留给 Windows CI。在那次结果出来之前，不把这些断言写成通过。
+- 2026-11-21 合并后在 Windows 测试运行时复跑：`dotnet publish src/AgentLauncher.App/AgentLauncher.App.csproj -c Release -p:DefineConstants=INTEGRATION_TESTS -o artifacts/test-runtime --nologo -m:1` 退出 0；`scripts/run-ui-check-once.ps1` 退出 0；`artifacts/ui-rerun/ui-checks.json` 为 **475/475**，通过项含 `UX15 none says this run is not peer and is refused`。上一条保留为 PR 分支当时的 Linux 记录；本次合并验证以本条为准。
 ## 98. 本机已安装 Agent 一键补齐与 UI 回归（2026-11-20，Asia/Shanghai）
 
 - 行为：快捷动作「补齐本机 Agent」扫描 agent catalog 中的 CLI 命令，把发现结果按任务使用次数（其次最近使用、catalog 顺序）填入完全空白且未勾选的默认槽位；已有备注、目录、程序配置、远程主机或已启用槽位一律保留。空白槽位不足时在 `ResourcePolicy.MaxSlots` 内新增槽位；加载中、忙碌、只读时拒绝修改。状态栏列出发现的 Agent，并明确版本与登录状态未验证。

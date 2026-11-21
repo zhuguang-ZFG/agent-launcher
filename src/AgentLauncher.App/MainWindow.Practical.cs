@@ -159,8 +159,11 @@ public partial class MainWindow
             ApplyLinkBadge(sync,link,parsed?.Name??"");
         }
         else ApplySyncBadge(slot.Id,sync,syncHealthCache.GetValueOrDefault(slot.Id)??new(SyncHealthState.NotSynced,"","尚未检查；点菜单「刷新同步状态」或等待自动刷新（约 15 秒一次）。"),cache:false);
-        var panel=new StackPanel{Orientation=Orientation.Horizontal};
-        panel.Children.Add(badge);panel.Children.Add(sync);
+        var badges=new StackPanel{Orientation=Orientation.Horizontal};
+        badges.Children.Add(badge);badges.Children.Add(sync);
+        var honesty=new TextBlock{Text=LaunchSurface.SyncHonesty(host.WorkspaceSyncMode),FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new(0,4,0,0)};
+        AutomationProperties.SetName(honesty,"同步说明 "+slot.DisplayName);
+        var panel=new StackPanel();panel.Children.Add(badges);panel.Children.Add(honesty);
         return panel;
     }
     private void ApplySyncBadge(Guid slotId,TextBlock badge,SyncHealth health,bool cache=true)

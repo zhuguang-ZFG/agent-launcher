@@ -35,11 +35,12 @@ internal static class LaunchSurfaceChecks
             Assert(mixed == "启动 3 个 · 多个目标", mixed);
             Assert(LaunchSurface.TargetTooltip(new string?[] { null, "京云" }) == "本次同时包含：本机、京云", LaunchSurface.TargetTooltip(new string?[] { null, "京云" }));
         });
-        Test("UX15 none says this run is not peer and does not refuse launch", () =>
+        Test("UX15 none says this run is not peer and is refused", () =>
         {
             var text = LaunchSurface.SyncHonesty(WorkspaceSyncMode.None);
             Assert(text.Contains("这次不是同权"), text);
-            Assert(!text.Contains("拒绝"), text);
+            Assert(text.Contains("拒收"), text);
+            Assert(!text.Contains("仍可启动"), text);
             Assert(text.Contains("实时输入"), text);
             Assert(text.Contains("不是实时一致"), text);
         });
