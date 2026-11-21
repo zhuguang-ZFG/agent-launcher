@@ -1572,3 +1572,11 @@ powershell -NoProfile -File scripts/test.ps1
 - 补充可见入口（2026-11-21）：侧栏在「＋ 添加 Agent」下新增常驻按钮 `InstalledAgentsButton`（文案「补齐本机 Agent」），空项目时的引导文案同步改为「选择项目，点「补齐本机 Agent」，然后启动。」；按钮仍走同一条 `AddInstalledAgentsAsync`，不会自动启动任何 Agent。`Render`/`SetConfigLocked` 同步维护其启用态，只读或忙碌时禁用。UX13 增加第 9 项断言该按钮在侧栏可见且 AutomationId 一致；上一轮集成版真实 WPF `--ui-check` **465 项通过、0 失败、退出 0**（`artifacts/ui-installed-button/ui-checks.json`），九项 UX13 全部通过。
 - 默认槽位防重（2026-11-21）：`InstalledAgentsUiChecks.cs` 增加默认配置回归，断言安装 codex/hermes 后各自仍只有一个槽位、原空白槽位被复用并启用；补齐实现同步改为先匹配同名 Agent 的空白默认槽位，再分配其余空槽位。另在 `UiChecks.cs` 增加测试夹具窗口规范化：后台/非交互启动若把窗口置为最小化，焦点断言前恢复 `WindowState.Normal` 并 `Activate()`；不修改生产启动路径或断言条件。
 - 完整门禁（2026-11-21）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test.ps1` 全量执行，未使用 SkipUi/SkipBrowser，**762.04 秒**且各阶段 0 失败。原生/模型 **292/0**、同步评审 **6/0**、TerminalModel **13/0**、ManualRelay 通过、修复 **36/0**、admission **0 失败**、integration **138 条记录 / 129 项测试，0 失败**（9 条环境/能力元数据不计为测试）、sync-reliability **11/0**；WPF `--ui-check` **466 项通过、0 失败**（`artifacts/ui/ui-checks.json`，含 10 条 UX13 前缀检查）、embedded `Passed=true`、原型 **5/5**、Omp **6/6**、浏览器 **5 项 PASS**。日志 `artifacts/gate-installed-agents-fill.log`。新增测试与 `UiChecks` 夹具改动仍待评审，不把本机门禁冒充独立评审。
+
+## 99. 窗口位置与大小记忆（2026-11-21，Asia/Shanghai）
+
+- 行为：主窗口关闭时把正常状态下的 `Left/Top/Width/Height` 和是否最大化写入 `%LOCALAPPDATA%\AgentLauncher\window-placement.json`，下次启动在 `Show()` 前恢复。该文件与业务配置分离，不改变 `Configuration` schema，也不影响只读配置启动。
+- 边界：记录损坏、非有限数值、小于最小窗口尺寸或与当前虚拟桌面完全不相交时回退到原有居中默认尺寸；恢复尺寸不超过当前虚拟桌面，左上角夹到可见区域。最大化时保存 `RestoreBounds`，下次恢复最大化并保留还原后的普通尺寸。
+- 实现位置：`src/AgentLauncher.App/MainWindow.WindowPlacement.cs`，构造函数在 `InitializeComponent()` 和默认尺寸之后调用 `ApplyWindowPlacement()`，`Closed` 事件调用 `SaveWindowPlacement()`；未改 XAML 默认值、配置文件或启动协议。
+- 验证：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误。隔离测试构建的真实截图探针：写入 `1000x700 @ (100,80)` 后启动得到 `ActualWidth=1000`、`ActualHeight=700`；写入完全移出虚拟桌面的 `Left=-5000` 后启动回退到 `920x760`；写入最大化记录后截图窗口为 `1550.4x926.4`，关闭时保存的普通尺寸仍为 `1000x700` 且 `Maximized=true`。探针使用独立临时测试根，不接触用户配置。
+- 未完成：本机工具会话下 `--ui-check` 被既有窗口最小化/焦点时序夹具阻断（同一非交互会话的基线也会在更早的 `fake-sample monitor healthy` 失败），因此不把该轮 UI 结果记作本功能失败或通过；窗口几何的端到端验证以三项真实截图探针为准。

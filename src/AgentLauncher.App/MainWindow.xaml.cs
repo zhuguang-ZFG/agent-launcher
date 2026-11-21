@@ -71,6 +71,7 @@ public partial class MainWindow : Window
         ProjectPath.TextChanged+=(_,_)=>{if(!rendering){projectInputRevision++;if(!loading)UpdateLaunch();}};
         ProjectPath.KeyDown+=ProjectKeyDown;
         var work=SystemParameters.WorkArea;Width=Math.Min(920,work.Width-32);Height=Math.Min(760,work.Height-32);MinWidth=Math.Min(560,work.Width-32);MinHeight=Math.Min(460,work.Height-32);
+        ApplyWindowPlacement();
         SizeChanged+=(_,_)=>ArrangePanels();
         Loaded+=async (_,_)=>await GuardAsync(LoadAsync);
         timer.Tick+=async (_,_)=>await GuardAsync(PollResourcesAsync);
@@ -78,7 +79,7 @@ public partial class MainWindow : Window
         PreviewKeyDown+=MainKeyDown;
         LaunchButton.ToolTip="Ctrl+Enter · 启动已勾选项";RefreshLaunchButton.ToolTip="F5 · 重新检查启动条件";
         Closing+=ClosingWindow;
-        SystemParameters.StaticPropertyChanged+=SystemAppearanceChanged;Closed+=(_,_)=>SystemParameters.StaticPropertyChanged-=SystemAppearanceChanged;
+        SystemParameters.StaticPropertyChanged+=SystemAppearanceChanged;Closed+=(_,_)=>{SystemParameters.StaticPropertyChanged-=SystemAppearanceChanged;SaveWindowPlacement();};
     }
     private void SystemAppearanceChanged(object? sender,PropertyChangedEventArgs e){if(!loading)Dispatcher.BeginInvoke(new Action(ApplyTheme));}
     private async Task GuardAsync(Func<Task> action)
