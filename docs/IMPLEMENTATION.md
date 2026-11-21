@@ -1580,4 +1580,4 @@ powershell -NoProfile -File scripts/test.ps1
 - 实现位置：`src/AgentLauncher.App/MainWindow.WindowPlacement.cs`，构造函数在 `InitializeComponent()` 和默认尺寸之后调用 `ApplyWindowPlacement()`，`Closed` 事件调用 `SaveWindowPlacement()`；未改 XAML 默认值、配置文件或启动协议。
 - 验证：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误。隔离测试构建的真实截图探针：写入 `1000x700 @ (100,80)` 后启动得到 `ActualWidth=1000`、`ActualHeight=700`；写入完全移出虚拟桌面的 `Left=-5000` 后启动回退到 `920x760`；写入最大化记录后截图窗口为 `1550.4x926.4`，关闭时保存的普通尺寸仍为 `1000x700` 且 `Maximized=true`。探针使用独立临时测试根，不接触用户配置。
 - 未完成：本机工具会话下 `--ui-check` 被既有窗口最小化/焦点时序夹具阻断（同一非交互会话的基线也会在更早的 `fake-sample monitor healthy` 失败），因此不把该轮 UI 结果记作本功能失败或通过；窗口几何的端到端验证以三项真实截图探针为准。
-- 交付：`artifacts/preview` 已用该功能重新发布（`SourceCommit=552bd39240b0523a5d6e25e2b83e45e1c78a08ef`，`SourceDirty=false`，20 个文件，`Launch.ps1 -CheckOnly` 通过），桌面快捷方式已指向该目录；原包保留在 `artifacts/preview.before-8269d53fbc36425aa9804a5b3a070b8f`。`scripts/use-validated-preview.ps1 -CheckOnly` 也已通过。
+- 交付：`artifacts/preview` 已用该功能重新发布，`distribution.json` 记录 `SourceDirty=false`、20 个文件，`Launch.ps1 -CheckOnly` 通过；桌面快捷方式已指向该目录。原包保留在 `artifacts/preview.before-*`，`scripts/use-validated-preview.ps1 -CheckOnly` 也已通过。
