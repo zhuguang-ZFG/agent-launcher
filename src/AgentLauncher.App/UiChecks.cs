@@ -20,6 +20,10 @@ public partial class MainWindow
         // monitor state there, so create it before the first configuration write (a missing root surfaces as a silent UI-only error).
         System.IO.Directory.CreateDirectory(Store.Root);
         SessionNotifier.For(this).TestMode = true;
+        // The harness may be launched from a non-interactive/background process whose startup show state is minimized;
+        // focus and hit-testing assertions require a normal, active window (production starts visible and normal).
+        if (WindowState != WindowState.Normal) { Show(); WindowState = WindowState.Normal; }
+        Activate();
         void Check(string name,bool value)
         {
             if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}
@@ -31,6 +35,8 @@ public partial class MainWindow
         {
             for(var i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);if(child is T target)yield return target;foreach(var nested in Find<T>(child))yield return nested;}
         }
+        ComboBox AgentCombo()=>Find<ComboBox>(SlotList).First(c=>AutomationProperties.GetName(c).Contains("项 Agent"));
+        ComboBox PlaceCombo()=>Find<ComboBox>(SlotList).First(c=>AutomationProperties.GetName(c).Contains("运行位置"));
         IEnumerable<T> FindLogical<T>(DependencyObject root) where T:DependencyObject
         {
             foreach(var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>()){if(child is T target)yield return target;foreach(var nested in FindLogical<T>(child))yield return nested;}
@@ -102,19 +108,32 @@ public partial class MainWindow
         config.SaveTemplate("fourth");config.Edit(d=>d.DirectoryMode="shared");config.Restore(config.Templates["fourth"]);Render();
         Check("native mode restore renders isolated",DirectoryMode.SelectedIndex==0&&config.Draft.DirectoryMode=="isolated");
         var firstId=config.Draft.Slots[0].Id;config.Edit(d=>d.Slots[0].Profiles["pi"]=new(){Executable="C:\\Example\\pi.exe",Arguments=["--only-pi"]});Render();
-        var select=Find<ComboBox>(SlotList).First();select.SelectedValue="local:codex";Check("native Agent selector separates profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Executable=="");
-        select=Find<ComboBox>(SlotList).First();select.SelectedValue="local:pi";Check("native Agent selector restores profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Arguments.SequenceEqual(new[]{"--only-pi"}));
+        var select=AgentCombo();select.SelectedValue="local:codex";Check("native Agent selector separates profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Executable=="");
+        select=AgentCombo();select.SelectedValue="local:pi";Check("native Agent selector restores profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Arguments.SequenceEqual(new[]{"--only-pi"}));
         var cloudHost=new RemoteHost(Guid.NewGuid(),"候选云 VPS","choices.example.com",22,"root","agent",["pi","kimi"],null);
         config.RemoteHosts=[cloudHost];Render();
         await SelectRailSlot(2);
-        var cloudSelect=Find<ComboBox>(SlotList).First();
-        Check("UX14 unbound slot lists cloud candidates",cloudSelect.Items.OfType<AgentChoice>().Any(c=>c.HostId==cloudHost.Id&&c.Label.Contains("☁")));
-        cloudSelect.SelectedValue=cloudHost.Id+":pi";
+        Check("UX14 agent list does not mix cloud hosts",AgentCombo().Items.OfType<AgentChoice>().All(c=>c.HostId==null));
+        var cloudPlace=PlaceCombo();
+        Check("UX14 unbound slot lists the cloud place separately",cloudPlace.Items.OfType<PlaceChoice>().Any(c=>c.HostId==cloudHost.Id));
+        cloudPlace.SelectedValue=cloudHost.Id.ToString();
         var boundSlot=config.Draft.Slots[1];
-        Check("UX14 picking cloud candidate binds host and derives remote dir",boundSlot.RemoteHostId==cloudHost.Id&&boundSlot.AgentId=="pi"&&RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(boundSlot.RemoteDirectory??"")&&boundSlot.RemoteDirectory!.StartsWith("~/work/"));
-        cloudSelect.SelectedValue="local:pi";
-        Check("UX14 picking local candidate unbinds host",config.Draft.Slots[1].RemoteHostId==null&&config.Draft.Slots[1].RemoteDirectory==null);
-        config.RemoteHosts=[];Render();
+        Check("UX14 picking cloud place binds host and derives remote dir",boundSlot.RemoteHostId==cloudHost.Id&&boundSlot.AgentId=="pi"&&RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(boundSlot.RemoteDirectory??"")&&boundSlot.RemoteDirectory!.StartsWith("~/work/"));
+        PlaceCombo().SelectedValue="local";
+        Check("UX14 picking local place unbinds host",config.Draft.Slots[1].RemoteHostId==null&&config.Draft.Slots[1].RemoteDirectory==null);
+        Check("UX15 shared directory risk stays outside the collapsed options",SharedDirectoryRisk.Visibility==Visibility.Collapsed&&!LaunchOptionsExpander.IsExpanded);
+        Edit(d=>d.DirectoryMode="shared");
+        Check("UX15 shared directory risk is visible while options stay collapsed",SharedDirectoryRisk.Visibility==Visibility.Visible&&SharedDirectoryRiskText.Text.Contains("互相覆盖")&&!LaunchOptionsExpander.IsExpanded);
+        Edit(d=>d.DirectoryMode="isolated");
+        var otherHost=new RemoteHost(Guid.NewGuid(),"另一云","other.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.None);
+        config.RemoteHosts=[cloudHost,otherHost];
+        Edit(d=>{d.Slots[0].Enabled=true;d.Slots[0].RemoteHostId=cloudHost.Id;d.Slots[1].Enabled=true;d.Slots[1].RemoteHostId=otherHost.Id;d.Slots[1].RemoteDirectory="~/work/other";});
+        var mixedLabel=LaunchButton.Content as string??"";
+        Check("UX15 mixed hosts do not collapse to one target",mixedLabel.Contains("多个目标")&&!mixedLabel.Contains(cloudHost.Name)&&!mixedLabel.Contains(otherHost.Name));
+        await SelectRailSlot(2);
+        var noneNote=Find<TextBlock>(SlotList).FirstOrDefault(t=>AutomationProperties.GetName(t)=="同步说明 "+config.Draft.Slots[1].DisplayName);
+        Check("UX15 none says this run is not peer and is refused",noneNote!=null&&noneNote.Text.Contains("这次不是同权")&&noneNote.Text.Contains("拒收")&&!noneNote.Text.Contains("仍可启动"));
+        config.RemoteHosts=[];Edit(d=>{foreach(var s in d.Slots){s.RemoteHostId=null;s.RemoteDirectory=null;s.Enabled=s==d.Slots[0];}});
         await SelectRailSlot(1);
         config.Edit(d=>{d.Slots[0].Profiles.Clear();d.Slots.ForEach(s=>s.Enabled=true);});Render();
         var firstMenu=Find<MenuButton>(SlotList).First();((Button)firstMenu.Content).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
@@ -149,11 +168,11 @@ public partial class MainWindow
         config.Theme="dark";ApplyTheme();Render();var darkInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var darkPage=((SolidColorBrush)Background).Color;
         Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1E2A3F")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#232733")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
         Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#9AA3B2"));
-        var agentCombo=Find<ComboBox>(SlotList).First();ComboBoxItem? selectedItem=null;
+        var agentCombo=AgentCombo();ComboBoxItem? selectedItem=null;
         for(var i=0;i<20;i++)
         {
             // Discovery may replace the row during a render turn. Inspect the attached combo after its real popup generated containers.
-            agentCombo=Find<ComboBox>(SlotList).First();agentCombo.IsDropDownOpen=true;
+            agentCombo=AgentCombo();agentCombo.IsDropDownOpen=true;
             await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(25);
             if(!Find<ComboBox>(SlotList).Contains(agentCombo))continue;
             selectedItem=agentCombo.ItemContainerGenerator.ContainerFromIndex(agentCombo.SelectedIndex) as ComboBoxItem;
@@ -189,7 +208,7 @@ public partial class MainWindow
         {
             config.Theme=variant.Item1;ApplyTheme();await ResizeForCheckAsync(variant.Item2,variant.Item3);
             var point=LaunchButton.TranslatePoint(new Point(),this);Check($"launch visible {variant}",point.Y>=0&&point.Y+LaunchButton.ActualHeight<=ActualHeight&&point.X>=0&&point.X+LaunchButton.ActualWidth<=ActualWidth);
-            var detailCombo=Find<ComboBox>(SlotList).FirstOrDefault();var selectedSlotIndex=detailCombo!=null&&int.TryParse(new string(AutomationProperties.GetName(detailCombo).Where(char.IsDigit).ToArray()),out var parsedSlot)?parsedSlot-1:-1;
+            var detailCombo=AgentCombo();var selectedSlotIndex=detailCombo!=null&&int.TryParse(new string(AutomationProperties.GetName(detailCombo).Where(char.IsDigit).ToArray()),out var parsedSlot)?parsedSlot-1:-1;
             Store.Save(System.IO.Path.Combine(folder,$"layout-{variant.Item1}-{variant.Item2}.json"),new{RequestedWidth=variant.Item2,RequestedHeight=variant.Item3,Width,ActualWidth,Height,ActualHeight,Scale=UiScale.Value,WorkWidth=WorkGrid.ActualWidth,ConfigWidth=ConfigurationPanel.ActualWidth,SummaryWidth=SummaryPanel.ActualWidth,ConfigMargin=ConfigurationPanel.Margin.ToString(),SummaryMargin=SummaryPanel.Margin.ToString(),SummaryColumn=Grid.GetColumn(SummaryPanel),SummaryRow=Grid.GetRow(SummaryPanel),ColumnWidth=SummaryColumn.Width.ToString(),RailWidth=Rail.ActualWidth,SelectedSlotIndex=selectedSlotIndex,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});
             Check($"primary configuration fills the main column without a right summary sidebar {variant}",Math.Abs(ConfigurationPanel.ActualWidth-WorkGrid.ActualWidth)<2&&SummaryColumn.Width.Value==0&&!LaunchOptionsExpander.IsExpanded&&!SummaryPanel.IsVisible);
             Check($"project accessible name {variant}",AutomationProperties.GetName(ProjectPath).Length>0);
@@ -259,8 +278,7 @@ public partial class MainWindow
         {
             config.TextScalePercent=scale;config.Theme="dark";ApplyTheme();Render();await ResizeForCheckAsync(650,700);
             var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth*UiScale.Value<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight*UiScale.Value<=ActualHeight);
-            var scaleCombo=Find<ComboBox>(SlotList).FirstOrDefault();
-            if(scaleCombo!=null){var comboOrigin=scaleCombo.TranslatePoint(new Point(),SlotList);Check($"detail combo stays inside the detail card at {scale}% text scale",comboOrigin.X>=-0.5&&comboOrigin.X+scaleCombo.ActualWidth<=SlotList.ActualWidth+0.5);}
+            foreach(var scaleCombo in Find<ComboBox>(SlotList)){var comboOrigin=scaleCombo.TranslatePoint(new Point(),SlotList);Check($"detail combo stays inside the detail card at {scale}% text scale",comboOrigin.X>=-0.5&&comboOrigin.X+scaleCombo.ActualWidth<=SlotList.ActualWidth+0.5);}
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-text-{scale}.png"));encoder.Save(file);
         }
         config.TextScalePercent=100;ApplyTheme();
@@ -306,7 +324,7 @@ public partial class MainWindow
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
         Check("rail index lists every slot with continuous names",Find<Button>(RailSlots).Count()==config.Draft.Slots.Count&&Find<Button>(RailSlots).Select(b=>AutomationProperties.GetName(b)).SequenceEqual(config.Draft.Slots.Select((_,i)=>$"第 {i+1} 项 Agent 行")));
         await SelectRailSlot(3);
-        Check("rail row selection drives the detail row",AutomationProperties.GetName(Find<ComboBox>(SlotList).First())=="第 3 项 Agent"&&SlotList.Children.Count==1);
+        Check("rail row selection drives the detail row",AutomationProperties.GetName(AgentCombo())=="第 3 项 Agent"&&AutomationProperties.GetName(PlaceCombo())=="第 3 项运行位置"&&SlotList.Children.Count==1);
         Render();
         Check("rail keeps exactly one detail row",SlotList.Children.Count==1);
         // Rail refresh seams: the polling/task fan-outs must update the rail without a full Render(). Probes must not weaken the final launch guard, so the real snapshot is restored via finally.
@@ -326,7 +344,7 @@ public partial class MainWindow
             status=new(true,"rail probe",[new(){Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"rail-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Started"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
             RenderMonitorStatus();
             Check("rail sessions follow monitor refresh",FindLogical<TextBlock>(RailSessions).Any(t=>t.Text.Contains("rail-session-probe")));
-            var focusButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="聚焦终端 rail-session-probe");
+            var focusButton=Find<Button>(ActiveSessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="聚焦终端 rail-session-probe");
             Check("active session offers terminal window recall",focusButton!=null);
             if(focusButton!=null){ProgressText.Text="";focusButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));for(var i=0;i<50&&ProgressText.Text.Length==0;i++)await Task.Delay(100);Check("missing terminal window reports instead of failing",ProgressText.Text.Contains("未找到该批次"));}
             // R28 operator-confirmed release: Disconnected remote entries expose judgment + reason + second confirm;
@@ -334,7 +352,7 @@ public partial class MainWindow
             var releaseAttempt=Guid.NewGuid();
             status=new(true,"remote release probe",[new(){Plan=new LaunchItem(releaseAttempt,Guid.NewGuid(),1,"remote-release-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("pi",[],"remote"),0,RemoteExecution:new RemoteExecutionSpec("release.example.com",22,"root","agent","pi","/home/agent/work",[],null,null)),State="Disconnected",Detail="SSH 连接断开（退出码 255）；远程进程可能仍在运行。"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
             RenderMonitorStatus();
-            var releaseButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认释放 remote-release-probe");
+            var releaseButton=Find<Button>(ActiveSessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认释放 remote-release-probe");
             Check("disconnected remote session offers operator release entry",releaseButton!=null);
             var releaseEntry=status.Entries!.Single(e=>e.Plan.Id==releaseAttempt);
             var releaseDialog=CreateRemoteReleaseDialog(releaseEntry);
@@ -369,8 +387,13 @@ public partial class MainWindow
                 Check("release confirm does not start reattach",releasePrompt.Contains("也不会重新挂接"));
             }
             finally{TestConfirm=priorConfirm;ProgressText.Text="";}
-            var reattachButton=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认重新挂接 remote-release-probe");
+            var reattachButton=Find<Button>(ActiveSessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认重新挂接 remote-release-probe");
             Check("disconnected remote session offers reattach beside release",reattachButton!=null&&releaseButton!=null&&(reattachButton.Content as string)!=(releaseButton.Content as string));
+            Check("UX15 reattach and release effects stay in separate sentences",Find<TextBlock>(ActiveSessions).Any(t=>t.Text.Contains("新的 SSH 窗格"))&&Find<TextBlock>(ActiveSessions).Any(t=>t.Text.Contains("不会结束远端进程")&&t.Text.Contains("也不会重新挂接")));
+            var narrowWidth=Width;Width=650;
+            for(var i=0;i<20&&ActualWidth>=900;i++){await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);await Task.Delay(25);}
+            Check("UX15 disconnected actions stay reachable when the rail sessions hide",ActiveNow.Visibility==Visibility.Visible&&RailSessionsSection.Visibility==Visibility.Collapsed&&releaseButton!.IsVisible&&reattachButton!.IsVisible);
+            Width=narrowWidth;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
             var reattachDialog=CreateRemoteReattachDialog(releaseEntry);
             // 取消钮只标了 IsCancel；测试里直接 RaiseEvent(Click) 不会走 Button.OnClick，对话框关不上，整段 UI 会卡到 90 秒。
             // 与释放对话框相同，点会设置 DialogResult 的「提交挂接」。二次确认取消仍由下面的 SubmitRemoteReattachAsync 覆盖。
@@ -426,7 +449,7 @@ public partial class MainWindow
             var queueTruncated=RailQueue.Children.Count==4&&RailQueue.Children[3] is Button queueMore&&queueMore.Content is string queueLabel&&queueLabel.Contains("全部");
             Check("rail summaries truncate with overflow entry",sessionsTruncated&&queueTruncated);
             var sessionExpandBefore=SessionExpander.IsExpanded;var taskExpandBefore=TaskExpander.IsExpanded;
-            if(RailSessions.Children[3] is Button jumpSessions){jumpSessions.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);var sessionPoint=SessionExpander.TranslatePoint(new Point(),ContentScroll);Check("rail session overflow jumps to the session list",SessionExpander.IsExpanded&&sessionPoint.Y>=-4&&sessionPoint.Y<=ContentScroll.ViewportHeight-36);}
+            if(RailSessions.Children[3] is Button jumpSessions){jumpSessions.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);var nowPoint=ActiveNow.TranslatePoint(new Point(),ContentScroll);Check("rail session overflow jumps to the current sessions",ActiveNow.Visibility==Visibility.Visible&&nowPoint.Y>=-4&&nowPoint.Y<=ContentScroll.ViewportHeight-36);}
             if(RailQueue.Children[3] is Button jumpQueue){jumpQueue.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);var queuePoint=TaskExpander.TranslatePoint(new Point(),ContentScroll);Check("rail queue overflow jumps to the task queue",TaskExpander.IsExpanded&&queuePoint.Y>=-4&&queuePoint.Y<=ContentScroll.ViewportHeight-36);}
             SessionExpander.IsExpanded=sessionExpandBefore;TaskExpander.IsExpanded=taskExpandBefore;
         }
@@ -438,6 +461,7 @@ public partial class MainWindow
         await RunQuickActionsChecksAsync(folder,Check,ResizeForCheckAsync);
         await RunSlotConvenienceChecksAsync(folder,Check,ResizeForCheckAsync);
         await RunPracticalFixChecksAsync(folder,Check);
+        await RunInstalledAgentsChecksAsync(folder, Check);
         await RunSyncReviewUiChecksAsync(folder,Check);
         // P1 session notifications: runtime transitions only, deduped, rate-limited and path-safe.
         var notifier = SessionNotifier.For(this);

@@ -27,7 +27,7 @@ public partial class MainWindow
         var waitingForResources = canQueue && status?.Ok == true
             && !IsPreviewStale && DecideAdmission(config.Draft, status.Memory, status.Entries, budgets: status.Budgets).Kind == AdmissionKind.Deny;
         QueueQuickButton.Content = quickQueueImporting ? "正在加入队列…" : waitingForResources ? "等待资源后启动" : "按资源依次启动";
-        QueueQuickButton.Style = (Style)FindResource(waitingForResources ? "PrimaryButton" : typeof(Button));
+        QueueQuickButton.Style = (Style)FindResource(waitingForResources ? "PrimaryButton" : "QuietButton");
         QueueQuickButton.ToolTip = QueueQuickButton.IsEnabled ? "将勾选项保存为任务；默认只执行本批次，按并发 1 等待资源。" : taskBook is null ? "任务文件无法读取，请打开「恢复与诊断」。" : LaunchHint.Text;
         if(config.Draft.Slots.Any(slot=>slot.Enabled&&slot.RemoteHostId.HasValue))
         {

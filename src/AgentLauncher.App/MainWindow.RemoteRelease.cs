@@ -22,7 +22,7 @@ public partial class MainWindow
             ["judgment"] = [("Running", "仍在运行（不释放）"), ("Gone", "已不在（已退出）"), ("Unknown", "无法判断（不释放）")]
         };
         return new FormWindow(this, "核对远程状态并确认释放", fields,
-            $"远程主机：{remote?.Host}\n远程目录：{remote?.RemoteWorkingDirectory}\n\n结束本地 SSH 不能证明远程进程已退出。请先登录远程主机核对 agent 进程是否仍在运行，再选择判断并填写释放原因。只有判断「已不在」并经二次确认后才会释放该条目；判断「仍在运行」或「无法判断」时保留占用，不释放。",
+            $"远程主机：{remote?.Host}\n远程目录：{remote?.RemoteWorkingDirectory}\n\n结束本地 SSH 不能证明远程进程已退出。请先登录远程主机核对 agent 进程是否仍在运行，再选择判断并填写释放原因。{LaunchSurface.ReleaseEffect}只有判断「已不在」并经二次确认后才会释放该条目；判断「仍在运行」或「无法判断」时保留占用，不释放。",
             choices: choices, applyLabel: "提交判断");
     }
 

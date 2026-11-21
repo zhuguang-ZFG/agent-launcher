@@ -20,10 +20,10 @@
     <Border DockPanel.Dock="Top" x:Name="ProjectCard" Style="{StaticResource Card}" Padding="12" Margin="0,0,0,10">
      <StackPanel>
       <TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="14" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
-      <TextBox x:Name="ProjectPath" Margin="0,8,0,0" FontFamily="Consolas,Microsoft YaHei" FontSize="12" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" ToolTip="输入本地绝对目录，或拖入文件夹"/>
+      <TextBox x:Name="ProjectPath" Margin="0,8,0,0" FontFamily="Consolas,Microsoft YaHei" FontSize="12" Visibility="Collapsed" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" ToolTip="输入本地绝对目录，或拖入文件夹"/>
       <DockPanel Margin="0,6,0,0">
-       <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" VerticalAlignment="Top"/>
-       <TextBlock x:Name="ProjectGuide" Text="选择项目，勾选 Agent，然后启动。" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+       <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" Visibility="Collapsed" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" VerticalAlignment="Top"/>
+       <TextBlock x:Name="ProjectGuide" Text="从上方选择项目，或把文件夹拖进窗口；本机 CLI 可点「补齐本机 Agent」。" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"/>
       </DockPanel>
       <ComboBox x:Name="Recent" Margin="0,6,0,0" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/>
      </StackPanel>
@@ -66,6 +66,7 @@
      <StackPanel>
       <StackPanel x:Name="RailSlots"/>
       <Button x:Name="AddButton" Content="＋ 添加 Agent" Style="{StaticResource QuietButton}" Click="AddClick" HorizontalAlignment="Left" Margin="0,6,0,0" AutomationProperties.Name="添加 Agent"/>
+      <Button x:Name="InstalledAgentsButton" Content="补齐本机 Agent" Style="{StaticResource QuietButton}" Click="InstalledAgentsClick" HorizontalAlignment="Left" Margin="0,6,0,0" AutomationProperties.Name="补齐本机 Agent"/>
      </StackPanel>
     </ScrollViewer>
    </DockPanel>
@@ -94,6 +95,13 @@
        <Border x:Name="LongTaskNotice" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12" Margin="0,0,0,12" Visibility="Collapsed">
         <DockPanel><Button x:Name="LongTaskButton" DockPanel.Dock="Right" Content="新任务上限改为 4 GiB" Click="LongTaskClick" Margin="12,0,0,0" ToolTip="增加内存余量，不保证任务不退出。新任务采用独立 4 GiB 上限和 1536 MiB 规划量；已有任务和排队计划保持原值"/><TextBlock x:Name="LongTaskText" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{DynamicResource WarningInk}"/></DockPanel>
        </Border>
+       <Border x:Name="ActiveNow" Style="{StaticResource Card}" Padding="16" Margin="0,0,0,12" Visibility="Collapsed">
+        <StackPanel>
+         <TextBlock Text="现在" Style="{StaticResource Heading}" Margin="0,0,0,8"/>
+         <TextBlock x:Name="ActiveNowHint" TextWrapping="Wrap" Margin="0,0,0,8"/>
+         <StackPanel x:Name="ActiveSessions"/>
+        </StackPanel>
+       </Border>
        <Border x:Name="PreviewCard" Style="{StaticResource Card}" Padding="16">
         <StackPanel>
          <DockPanel Margin="0,0,0,8"><TextBlock DockPanel.Dock="Right" Text="启动后的样子" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="分屏预览" Style="{StaticResource Heading}"/></DockPanel>
@@ -104,6 +112,9 @@
           </StackPanel>
          </Border>
         </StackPanel>
+       </Border>
+       <Border x:Name="SharedDirectoryRisk" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12" Margin="0,12,0,0" Visibility="Collapsed">
+        <TextBlock x:Name="SharedDirectoryRiskText" TextWrapping="Wrap" Foreground="{DynamicResource WarningInk}"/>
        </Border>
        <Expander x:Name="LaunchOptionsExpander" Header="启动选项 · 目录与分屏" Margin="0,12,0,0" HorizontalContentAlignment="Stretch" Foreground="{DynamicResource Ink}">
         <StackPanel x:Name="SummaryPanel" Margin="0,12,0,0">
@@ -179,7 +190,7 @@
       <ScrollViewer MaxHeight="96" VerticalScrollBarVisibility="Auto"><TextBox x:Name="ErrorText" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource WarningInk}" AutomationProperties.Name="错误详情，可选择复制" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
      </Border>
      <Grid x:Name="FooterGrid"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <StackPanel x:Name="FooterMessage" VerticalAlignment="Center" Margin="0,0,16,0" MinWidth="260"><TextBlock x:Name="LaunchHint" Text="先选择项目文件夹" TextWrapping="Wrap"/><DockPanel Margin="0,4,0,0"><TextBlock x:Name="SaveStatus" DockPanel.Dock="Left" Text="配置自动保存" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="80" MaxWidth="200" Margin="0,0,8,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/><Button x:Name="RetrySaveButton" DockPanel.Dock="Left" Content="重试保存" Style="{StaticResource QuietButton}" Padding="8,2" Margin="0,0,8,0" Visibility="Collapsed" Click="RetrySaveClick" AutomationProperties.Name="重试保存"/><Button x:Name="RefreshLaunchButton" DockPanel.Dock="Right" Content="重新检查" Style="{StaticResource QuietButton}" Padding="8,2" Click="RefreshLaunchClick"/><Button x:Name="ReconcileButton" DockPanel.Dock="Right" Content="核对并释放占用" Style="{StaticResource QuietButton}" Padding="8,2" Margin="4,0,0,0" Visibility="Collapsed" Click="ReconcileClick" AutomationProperties.Name="核对并释放占用" ToolTip="核对无存活进程的陈旧占用并释放其预约预算；仍在运行或无法证明的记录保持阻塞"/><TextBlock x:Name="MemoryBoardText" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="8,0,0,0" MaxWidth="320" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Text="内存：读取中…" AutomationProperties.Name="内存看板" AutomationProperties.AutomationId="MemoryBoard" ToolTip="VPS 会话在远端运行，降低本机内存占用"/></DockPanel></StackPanel>
+      <StackPanel x:Name="FooterMessage" VerticalAlignment="Center" Margin="0,0,16,0" MinWidth="260"><TextBlock x:Name="LaunchHint" Text="先选择项目文件夹" TextWrapping="Wrap"/><DockPanel Margin="0,4,0,0"><TextBlock x:Name="SaveStatus" DockPanel.Dock="Left" Text="配置自动保存" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="80" MaxWidth="200" Margin="0,0,8,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/><Button x:Name="RetrySaveButton" DockPanel.Dock="Left" Content="重试保存" Style="{StaticResource QuietButton}" Padding="8,2" Margin="0,0,8,0" Visibility="Collapsed" Click="RetrySaveClick" AutomationProperties.Name="重试保存"/><Button x:Name="RefreshLaunchButton" DockPanel.Dock="Right" Content="重新检查" Style="{StaticResource QuietButton}" Padding="8,2" Click="RefreshLaunchClick"/><Button x:Name="ReconcileButton" DockPanel.Dock="Right" Content="核对并释放占用" Style="{StaticResource QuietButton}" Padding="8,2" Margin="4,0,0,0" Visibility="Collapsed" Click="ReconcileClick" AutomationProperties.Name="核对并释放占用" ToolTip="核对无存活进程的陈旧占用并释放其预约预算；仍在运行或无法证明的记录保持阻塞。这是本机预约核对，不是远程名额释放，也不会结束远端进程。"/><TextBlock x:Name="MemoryBoardText" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="8,0,0,0" MaxWidth="320" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Text="内存：读取中…" AutomationProperties.Name="内存看板" AutomationProperties.AutomationId="MemoryBoard" ToolTip="VPS 会话在远端运行，降低本机内存占用"/></DockPanel></StackPanel>
       <WrapPanel x:Name="FooterActions" Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
        <Button x:Name="CancelButton" Content="停止后续步骤" Style="{StaticResource QuietButton}" IsEnabled="False" Click="CancelClick" Margin="0,0,8,0"><Button.Visibility><Binding Path="IsEnabled" RelativeSource="{RelativeSource Self}" Converter="{StaticResource BooleanVisibility}"/></Button.Visibility></Button>
        <Button x:Name="QueueQuickButton" Content="按资源依次启动" Click="QueueQuickClick" AutomationProperties.AutomationId="QueueQuick" Margin="0,0,8,0" ToolTip="将勾选项固定为任务，按并发 1 等待资源；不改变原配置或终止活动任务"/>

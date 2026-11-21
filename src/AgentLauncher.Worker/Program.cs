@@ -315,11 +315,11 @@ internal static class Program
             {
                 string? flushError;
                 try{flushError=syncToFlush.TryDisposeAsync().GetAwaiter().GetResult();}
-                catch(Exception ex){flushError="工作区同步收敛异常："+ex.Message;}
+                catch(Exception ex){flushError="工作区同步结束失败："+ex.Message;}
                 sshChild.SyncSession=null;  // 已处置，避免 Dispose 重复 flush
-                syncNote=flushError is null?" 工作区已同步收敛回本机。":" "+flushError;
+                syncNote=flushError is null?" 已同步只表示该次结束时的 flush。":" "+flushError;
                 // A1 终态证据：会话即将终止，App 之后找不到活会话；徽章回退该记录（synced/problem），不再误报「未同步」。
-                TryWriteSyncEvidence(Store.SyncFinalPath(id),new SyncFinalRecord(1,flushError is null?SyncFinalRecord.Synced:SyncFinalRecord.Problem,flushError??"Mutagen flush 成功，会话已终止；远端改动已收敛落回本机。",DateTimeOffset.UtcNow));
+                TryWriteSyncEvidence(Store.SyncFinalPath(id),new SyncFinalRecord(1,flushError is null?SyncFinalRecord.Synced:SyncFinalRecord.Problem,flushError??"Mutagen flush 成功，会话已终止。已同步只表示该次结束时的 flush。",DateTimeOffset.UtcNow));
             }
             exitMemory=child is not null?MemoryEvidence():null;var detail=ExitDiagnostics.Describe(exit,exitMemory)+syncNote;
             

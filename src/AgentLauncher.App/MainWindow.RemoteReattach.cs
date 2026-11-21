@@ -25,7 +25,7 @@ public partial class MainWindow
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException) { session = null; }
         var sessionText = string.IsNullOrWhiteSpace(session) ? "无已保存的同步会话名。" : "已保存的同步会话：" + session;
         return new FormWindow(this, "核对远程工作并确认重新挂接", Array.Empty<(string Key, string Label, string Value, bool Multiline)>(),
-            $"远程主机：{remote?.Host}\n远程目录：{remote?.RemoteWorkingDirectory}\n本地 SSH：{entry.Detail}\n{syncText}\n{sessionText}\n\n只有确认后才会重新挂接。监视器会先核对远程进程是否仍在：仍在则恢复到同一主机、同一目录的本地 SSH 窗格，占用继续保留，条目不会被标成已结束。已不在则拒绝，账本不变，请改用「核对并确认释放」。不会自动重连，也不会自动释放。",
+            $"远程主机：{remote?.Host}\n远程目录：{remote?.RemoteWorkingDirectory}\n本地 SSH：{entry.Detail}\n{syncText}\n{sessionText}\n\n{LaunchSurface.ReattachIsNewPane}\n只有确认后才会重新挂接。监视器会先核对远程进程是否仍在：仍在则恢复到同一主机、同一目录的新本地 SSH 窗格，占用继续保留，条目不会被标成已结束。已不在则拒绝，账本不变，请改用「核对并确认释放」。不会自动重连，也不会自动释放。文件同步不是实时一致。",
             applyLabel: "提交挂接");
     }
 
@@ -39,7 +39,7 @@ public partial class MainWindow
     internal async Task SubmitRemoteReattachAsync(ControlEntry entry)
     {
         var remote = entry.Plan.RemoteExecution;
-        var prompt = $"二次确认：重新挂接远程主机 {remote?.Host} 的 {remote?.RemoteWorkingDirectory}。\n\n确认后才检查远程进程并恢复本地 SSH。若原来启用了同步，会重新建立；没有启用同步则不会假装已同步。此操作不释放占用，也不把条目标为已结束。远程进程已不在时会拒绝。不会自动重连。是否确认重新挂接？";
+        var prompt = $"二次确认：重新挂接远程主机 {remote?.Host} 的 {remote?.RemoteWorkingDirectory}。\n\n{LaunchSurface.ReattachIsNewPane}\n确认后才检查远程进程并恢复本地 SSH。若原来启用了同步，会重新建立；没有启用同步则不会假装已同步。此操作不释放占用，也不把条目标为已结束。远程进程已不在时会拒绝。不会自动重连。是否确认重新挂接？";
 #if INTEGRATION_TESTS
         var confirmed = TestConfirm != null ? TestConfirm(prompt, "确认重新挂接", MessageBoxButton.YesNo) : MessageBox.Show(this, prompt, "确认重新挂接", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
 #else

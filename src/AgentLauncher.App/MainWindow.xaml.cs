@@ -63,6 +63,7 @@ public partial class MainWindow : Window
     {
         public string Key=>HostId==null?"local:"+Id:HostId+":"+Id;
     }
+    private sealed record PlaceChoice(string Key,string Label,Guid? HostId);
     private enum TemplateAction { LastEdited }
     public MainWindow(string[] args)
     {
@@ -229,11 +230,14 @@ public partial class MainWindow : Window
             ProjectPath.Text=config.Draft.Project;var noProject=string.IsNullOrWhiteSpace(config.Draft.Project);ProjectTitle.Text=MiddleEllipsis(noProject?"还没有选择项目":System.IO.Path.GetFileName(config.Draft.Project.TrimEnd('\\','/')) is {Length:>0} title?title:config.Draft.Project);ProjectTitle.ToolTip=noProject?null:config.Draft.Project;
             ProjectSwitchText.Text=noProject?"选择项目…":ProjectName(config.Draft.Project);ProjectSwitchButton.ToolTip=noProject?"选择项目或最近项目":config.Draft.Project+"\n点击切换最近项目";
             var ownDirectories=config.Draft.Slots.Count(s=>s.Enabled&&!string.IsNullOrWhiteSpace(s.Directory));
-            ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用下方各自的工作目录；修改此处不会改变它们。":noProject?"选择项目，勾选 Agent，然后启动。":"未单独指定目录的 Agent 使用此项目";
+            ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用下方各自的工作目录；修改此处不会改变它们。":noProject?"从上方选择项目，或把文件夹拖进窗口；本机 CLI 可点「补齐本机 Agent」。":"未单独指定目录的 Agent 使用此项目";
             ProjectGuide.Visibility=Visibility.Visible;
             RenderRecentProjects();
+            Recent.Visibility=Visibility.Collapsed;ProjectPath.Visibility=Visibility.Collapsed;ChooseProjectButton.Visibility=Visibility.Collapsed;
             DirectoryMode.SelectedIndex=config.Draft.DirectoryMode switch{"prepared"=>1,"shared"=>2,_=>0};Layout.SelectedIndex=config.Draft.Layout=="horizontal"?1:0;
             DirectoryHelp.Text=DirectoryModeHelp();
+            SharedDirectoryRiskText.Text=LaunchSurface.SharedDirectoryRisk;
+            SharedDirectoryRisk.Visibility=config.Draft.DirectoryMode=="shared"?Visibility.Visible:Visibility.Collapsed;
             Templates.Items.Clear();Templates.Items.Add(new ComboBoxItem{Content="套用组合方案…",IsEnabled=false});
             Templates.Items.Add(new ComboBoxItem{Content="上次用的组合",Tag=TemplateAction.LastEdited,IsEnabled=config.LastEdited!=null,ToolTip="最近一次切换组合前的配置"});
             foreach(var name in config.Templates.Keys)Templates.Items.Add(new ComboBoxItem{Content=name,Tag=name});Templates.SelectedIndex=0;
@@ -253,7 +257,7 @@ public partial class MainWindow : Window
             if(selectedSlot is {} shown)DetailTitle.Text=$"{slots.IndexOf(shown)+1:00} · {shown.DisplayName}";else DetailTitle.Text="要一起启动的 Agent";
             RailSlots.Children.Clear();railLabels.Clear();railNames.Clear();railDots.Clear();railSources.Clear();
             for(var i=0;i<slots.Count;i++)AddRailSlot(slots[i],i+1);
-            AddButton.IsEnabled=CanAddSlot;
+            AddButton.IsEnabled=CanAddSlot;InstalledAgentsButton.IsEnabled=CanEditSlots;
             var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
             RenderMultipanePreview(active);Layout.IsEnabled=active.Length==2;
             PaneCount.Text=$"{active.Length} 个窗格";ArrangePanels();
@@ -318,21 +322,21 @@ public partial class MainWindow : Window
     private AgentChoice[] AgentChoices()=>Agents.All.OrderBy(a=>a.Id=="custom"?3:config.RecentAgents.Contains(a.Id)?0:discoveredInstalls.GetValueOrDefault(a.Id)?.Length>0?1:2).ThenBy(a=>config.RecentAgents.Contains(a.Id)?config.RecentAgents.IndexOf(a.Id):int.MaxValue).Select(a=>new AgentChoice(a.Id,a.Name,a.Name+(a.Id=="custom"?"":discoveredInstalls.TryGetValue(a.Id,out var paths)?paths.Length>0?" · 找到命令":" · 未找到":""))).ToArray();
     private AgentChoice[] ChoicesForSlot(Slot slot)
     {
-        // 云候选对所有槽位可见：选中即绑定该 VPS（不必先去详情绑主机），选本机候选即解绑。
-        var remote=config.RemoteHosts.SelectMany(host=>
+        // 运行位置单独选择。Agent 下拉只列当前位置的程序，避免把云端主机混进 CLI 名称。
+        if(slot.RemoteHostId is Guid hostId&&config.RemoteHosts.FirstOrDefault(h=>h.Id==hostId) is {} host)
         {
-            var ids=host.AvailableAgents.Select(RemoteAgentMaintenance.CatalogId).Where(id=>RemoteAgentMaintenance.AgentCommand(id)!=null).Distinct().ToList();
-            if(host.Id==slot.RemoteHostId&&!ids.Contains(slot.AgentId))ids.Insert(0,slot.AgentId);
-            return ids.Select(id=>{var name=Agents.All.FirstOrDefault(a=>a.Id==id)?.Name??id;return new AgentChoice(id,name,name+" · ☁ "+host.Name,host.Id);});
-        });
-        return AgentChoices().Concat(remote).ToArray();
+var ids=host.AvailableAgents.Any()?host.AvailableAgents.ToList():new List<string>{"pi"};
+            if(!ids.Contains(slot.AgentId))ids.Insert(0,slot.AgentId);
+            return ids.Select(id=>{var name=Agents.All.FirstOrDefault(a=>a.Id==id)?.Name??id;return new AgentChoice(id,name,name,host.Id);}).ToArray();
+        }
+        return AgentChoices();
     }
     private static string SelectedKey(Slot slot)=>slot.RemoteHostId is Guid host?host+":"+slot.AgentId:"local:"+slot.AgentId;
     private AgentChoice[] FilterChoices(IEnumerable<AgentChoice> choices,string? selected)=>choices.Where(a=>a.Key==selected||a.Name.Contains(AgentSearch.Text.Trim(),StringComparison.OrdinalIgnoreCase)).ToArray();
     private void RefreshAgentChoices()
     {
         if(SlotList==null)return;var previous=rendering;rendering=true;
-        try{foreach(var combo in FindLogical(SlotList).OfType<ComboBox>()){var selected=combo.SelectedValue as string;var slot=combo.Tag is Guid id?config.Draft.Slots.FirstOrDefault(s=>s.Id==id):null;var choices=slot==null?AgentChoices():ChoicesForSlot(slot);combo.ItemsSource=FilterChoices(choices,selected);combo.SelectedValue=selected;}}
+        try{foreach(var combo in FindLogical(SlotList).OfType<ComboBox>()){if(AutomationProperties.GetName(combo) is string comboName&&comboName.Contains("运行位置"))continue;var selected=combo.SelectedValue as string;var slot=combo.Tag is Guid id?config.Draft.Slots.FirstOrDefault(s=>s.Id==id):null;var choices=slot==null?AgentChoices():ChoicesForSlot(slot);combo.ItemsSource=FilterChoices(choices,selected);combo.SelectedValue=selected;}}
         finally{rendering=previous;}
     }
     private void AgentSearchChanged(object sender,TextChangedEventArgs e){if(!loading)RefreshAgentChoices();}
@@ -344,8 +348,15 @@ public partial class MainWindow : Window
         var enabled=CreateSlotToggle(slot,position,false);enabled.Margin=new(16,0,8,0);enabled.MinWidth=28;row.Children.Add(enabled);
         var number=new TextBlock{Text=$"{position:00}",Foreground=(Brush)FindResource("Muted"),FontFamily=new FontFamily("Consolas"),VerticalAlignment=VerticalAlignment.Center,Margin=new(0,0,12,0)};Grid.SetColumn(number,1);row.Children.Add(number);
         var choices=FilterChoices(ChoicesForSlot(slot),SelectedKey(slot));
-        var choice=new ComboBox{ItemsSource=choices,Tag=slot.Id,DisplayMemberPath="Label",SelectedValuePath="Key",SelectedValue=SelectedKey(slot),VerticalAlignment=VerticalAlignment.Center,MinWidth=180,MaxWidth=240,MinHeight=36};AutomationProperties.SetName(choice,$"第 {position} 项 Agent");TextSearch.SetTextPath(choice,"Name");
-        choice.SelectionChanged+=(_,_)=>{if(rendering||choice.SelectedItem is not AgentChoice picked)return;var before=SelectedKey(slot);if(Edit(d=>{var target=d.Slots.Single(s=>s.Id==slot.Id);target.AgentId=picked.Id;target.RemoteHostId=picked.HostId;if(picked.HostId!=null){if(string.IsNullOrEmpty(target.RemoteDirectory))target.RemoteDirectory=RemoteWorkspaceMappingHelper.DeriveRemoteDirectory(target.Directory is {Length:>0} local?local:d.Project);}else target.RemoteDirectory=null;})){config.RecentAgents.Remove(picked.Id);config.RecentAgents.Insert(0,picked.Id);config.RecentAgents=config.RecentAgents.Take(9).ToList();QueueSave();RefreshAgentChoices();}else{rendering=true;choice.SelectedValue=before;rendering=false;}};Grid.SetColumn(choice,2);row.Children.Add(choice);
+        var choice=new ComboBox{ItemsSource=choices,Tag=slot.Id,DisplayMemberPath="Label",SelectedValuePath="Key",SelectedValue=SelectedKey(slot),VerticalAlignment=VerticalAlignment.Center,MinWidth=140,MaxWidth=220,MinHeight=36};AutomationProperties.SetName(choice,$"第 {position} 项 Agent");TextSearch.SetTextPath(choice,"Name");
+        choice.SelectionChanged+=(_,_)=>{if(rendering||choice.SelectedItem is not AgentChoice picked)return;var before=SelectedKey(slot);if(Edit(d=>{var target=d.Slots.Single(s=>s.Id==slot.Id);target.AgentId=picked.Id;})){config.RecentAgents.Remove(picked.Id);config.RecentAgents.Insert(0,picked.Id);config.RecentAgents=config.RecentAgents.Take(9).ToList();QueueSave();RefreshAgentChoices();}else{rendering=true;choice.SelectedValue=before;rendering=false;}};
+        var places=new List<PlaceChoice>{new("local","本机",null)};
+        foreach(var host in config.RemoteHosts)places.Add(new(host.Id.ToString(),"☁ "+host.Name,host.Id));
+        if(slot.RemoteHostId is Guid bound&&places.All(p=>p.HostId!=bound))places.Add(new(bound.ToString(),"云端",bound));
+        var place=new ComboBox{ItemsSource=places,DisplayMemberPath="Label",SelectedValuePath="Key",SelectedValue=slot.RemoteHostId?.ToString()??"local",VerticalAlignment=VerticalAlignment.Center,MinWidth=88,MaxWidth=150,MinHeight=36,Margin=new(0,0,8,0)};
+        AutomationProperties.SetName(place,$"第 {position} 项运行位置");
+        place.SelectionChanged+=(_,_)=>{if(rendering||place.SelectedItem is not PlaceChoice picked)return;var before=slot.RemoteHostId?.ToString()??"local";if(!Edit(d=>{var target=d.Slots.Single(s=>s.Id==slot.Id);target.RemoteHostId=picked.HostId;if(picked.HostId is Guid hostId){if(string.IsNullOrEmpty(target.RemoteDirectory))target.RemoteDirectory=RemoteWorkspaceMappingHelper.DeriveRemoteDirectory(target.Directory is {Length:>0} local?local:d.Project);var known=config.RemoteHosts.FirstOrDefault(h=>h.Id==hostId);var ids=known?.AvailableAgents is {Length:>0} list?list.ToList():new List<string>{"pi"};if(!ids.Contains(target.AgentId))target.AgentId=ids[0];}else target.RemoteDirectory=null;})){rendering=true;place.SelectedValue=before;rendering=false;}};
+        var placeRow=new DockPanel{LastChildFill=true};DockPanel.SetDock(place,Dock.Left);placeRow.Children.Add(place);placeRow.Children.Add(choice);Grid.SetColumn(placeRow,2);row.Children.Add(placeRow);
         var command=new TextBlock{Text=slot.Enabled?"正在检查…":"未勾选 · 不启动、不预约",Foreground=(Brush)FindResource("Muted"),FontSize=12,Margin=new(16,4,12,0),TextWrapping=TextWrapping.Wrap};commandLabels[slot.Id]=command;Grid.SetColumnSpan(command,6);Grid.SetRow(command,1);row.Children.Add(command);
         command.SetResourceReference(TextBlock.ForegroundProperty,"Muted");
         var detail=new Button{Content="详情",ToolTip="程序路径、启动参数、工作目录与分工备注",Style=(Style)FindResource("QuietButton"),Padding=new(8,4,8,4),VerticalAlignment=VerticalAlignment.Center};AutomationProperties.SetName(detail,$"第 {position} 项详情");
@@ -364,7 +375,7 @@ public partial class MainWindow : Window
         // Auto columns can otherwise push the row across its own breakpoint repeatedly at larger text scales.
         // Compact stacks the directory button on its own span including the star column: two Auto-only spans
         // (directory + agent combo) otherwise inflate the Auto columns past the row width at 150% text scale.
-        row.SizeChanged+=(_,_)=>{var compact=ActualWidth/UiScale.Value<650;directoryButton.MaxWidth=compact?160:double.PositiveInfinity;choice.MinWidth=compact?110:180;Grid.SetColumnSpan(choice,compact?4:1);Grid.SetRow(detail,compact?1:0);Grid.SetRow(actions,compact?1:0);Grid.SetRow(command,compact?2:1);Grid.SetRow(directoryButton,compact?1:0);Grid.SetColumn(directoryButton,compact?0:3);Grid.SetColumnSpan(directoryButton,compact?4:1);};
+        row.SizeChanged+=(_,_)=>{var compact=ActualWidth/UiScale.Value<650;directoryButton.MaxWidth=compact?160:double.PositiveInfinity;choice.MinWidth=compact?96:140;place.MinWidth=compact?72:88;Grid.SetColumnSpan(placeRow,compact?2:1);Grid.SetRow(detail,compact?1:0);Grid.SetRow(actions,compact?1:0);Grid.SetRow(command,compact?2:1);Grid.SetRow(directoryButton,compact?1:0);Grid.SetColumn(directoryButton,compact?0:3);Grid.SetColumnSpan(directoryButton,compact?4:1);};
         // v0.8 renders exactly the selected row, so a "separator before the next row" would draw a stray line.
         var container=new Border{BorderBrush=(Brush)FindResource("Line"),BorderThickness=new(0),Child=row};AttachSlotDrag(container,number,directory,slot,position);SlotList.Children.Add(container);
     }
@@ -504,9 +515,16 @@ public partial class MainWindow : Window
         catch(Exception e)when(e is not OutOfMemoryException){commandsChecking=false;validationError="命令/目录检查中断："+e.Message;}
         finally{commandsRunning=false;UpdateLaunch();}
     }
+    private string? PlaceLabel(Slot slot)
+    {
+        if(slot.RemoteHostId is not Guid id)return null;
+        var name=config.RemoteHosts.FirstOrDefault(h=>h.Id==id)?.Name;
+        return string.IsNullOrWhiteSpace(name)?"云端·"+id.ToString("N")[..4]:name;
+    }
     private void UpdateLaunch()
     {
         var count=config.Draft.Slots.Count(s=>s.Enabled);
+        var places=config.Draft.Slots.Where(s=>s.Enabled).Select(PlaceLabel).ToArray();
         var admission=DecideAdmission(config.Draft,status?.Memory,status?.Entries,budgets:status?.Budgets);
         var admissionBlockedReason=status?.AdmissionHardBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
         var admissionPressureBlocked=status?.AdmissionPressure==true&&LaunchesConservatively;
@@ -514,11 +532,12 @@ public partial class MainWindow : Window
         var missing=explicitDirectoryMissing||config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
         var concurrencyBlocked=ConcurrencyBlocked(count);
-        LaunchButton.Content=busy?"正在处理…":previewOnly?$"检查资源并启动 {count} 个 Agent":$"启动 {count} 个 Agent";
+        LaunchButton.Content=LaunchSurface.LaunchButtonText(count,places,busy,previewOnly);
+        var targetTip=LaunchSurface.TargetTooltip(places);
+        LaunchButton.ToolTip=targetTip.Length>0?targetTip:"Ctrl+Enter · 启动已勾选项";
         LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&(admission.Launchable||IsPreviewStale)&&!admissionBlocked&&!admissionPressureBlocked&&!concurrencyBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
         var hint=LaunchHintState(admission);LaunchHint.Text=hint.Text;LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,hint.Key);
         ReconcileButton.Visibility=status?.ReconcileOffered==true&&!busy?Visibility.Visible:Visibility.Collapsed;
-        if(status?.Entries?.Any(e=>!Store.IsTerminal(e))==true)SessionExpander.IsExpanded=true;
         UpdateQuickQueueButton();
         UpdateMultipaneSummary();UpdateSimpleStatus();UpdatePollingInterval();
     }
@@ -602,11 +621,17 @@ public partial class MainWindow : Window
         var retryable=taskBook is null?[]:entries.Where(e=>e.State is "FailedBeforeStart" or "Revoked")
             .Where(e=>AttemptIdentity.CanRetryOutsideQueue(e.Plan,entries.Select(entry=>entry.Plan),taskBook)).Select(e=>e.Plan.Id).ToHashSet();
         signature+="|retry:"+string.Join(",",retryable);
-        if(signature==sessionSignature&&Sessions.Children.Count>0)return;sessionSignature=signature;Sessions.Children.Clear();
+        if(signature==sessionSignature&&(Sessions.Children.Count>0||ActiveSessions.Children.Count>0))return;sessionSignature=signature;Sessions.Children.Clear();ActiveSessions.Children.Clear();
         var agents=entries.Where(e=>e.Plan.Kind=="agent").OrderByDescending(e=>e.Created).ToArray();
         var history=agents.Where(Store.IsTerminal).Take(12).ToHashSet();
         var visible=agents.Where(e=>!Store.IsTerminal(e)||history.Contains(e)).ToArray();
-        if(visible.Length==0&&undoRemovals.Count==0){Sessions.Children.Add(new TextBlock{Text="尚无启动记录。关闭配置窗口不会结束已运行的 Agent。",Foreground=(Brush)FindResource("Muted")});}
+        var live=visible.Where(e=>!Store.IsTerminal(e)).ToArray();
+        ActiveNow.Visibility=live.Length>0?Visibility.Visible:Visibility.Collapsed;
+        ActiveNowHint.Text=live.Any(e=>e.Plan.RemoteExecution!=null)
+            ?"尚未结束的条目都在这里。进程出现后，Agent 是否就绪看终端。"+LaunchSurface.RemoteConnection+" "+LaunchSurface.ReattachIsNewPane
+            :"尚未结束的条目都在这里。进程出现后，Agent 是否就绪看终端。关闭本窗口不会结束已运行的 Agent。";
+        if(visible.Length==0&&undoRemovals.Count==0)Sessions.Children.Add(new TextBlock{Text="尚无启动记录。关闭配置窗口不会结束已运行的 Agent。",Foreground=(Brush)FindResource("Muted")});
+        else if(live.Length>0&&live.Length==visible.Length&&undoRemovals.Count==0)Sessions.Children.Add(new TextBlock{Text="更早的记录会显示在这里。关闭配置窗口不会结束已运行的 Agent。",Foreground=(Brush)FindResource("Muted")});
         foreach(var e in visible)
         {
             var row=new StackPanel{Tag=e.Plan.Id,Focusable=true,Margin=new(0,0,0,8)};
@@ -631,15 +656,18 @@ public partial class MainWindow : Window
             if(e.State=="Pending"){var revoke=new Button{Content="撤销未启动项",HorizontalAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(revoke,$"撤销未启动项 {e.Plan.Name}");revoke.Click+=async(_,_)=>await GuardAsync(async()=>{var result=await Ipc.SendAsync(new("revoke",Guid.NewGuid(),Attempt:e.Plan.Id));ProgressText.Text=result.Message;await RefreshAsync();});row.Children.Add(revoke);}
             if(e.State is "Disconnected" or "Reattaching")
             {
-                // 断开与重新挂接都保持非终态。释放和重新挂接是两个入口：释放不挂接，挂接不释放。不会自动重连。
-                var warning=new TextBlock{Text=e.State=="Reattaching"?"正在重新挂接，占用仍保留。若窗格没有出现，可再次确认挂接；若远程进程已不在，请核对并确认释放。不会自动重连。":"⚠ SSH 连接已断开，远程进程可能仍在运行。可核对后重新挂接，或在确认进程已不在后释放。不会自动重连。",Foreground=(Brush)FindResource("WarningInk"),TextWrapping=TextWrapping.Wrap,Margin=new(0,4,0,0)};
+                // 断开与重新挂接都保持非终态。两块分开：释放不挂接，挂接不释放。不会自动重连。
+                var warning=new TextBlock{Text=e.State=="Reattaching"?"正在重新挂接，占用仍保留。若窗格没有出现，可再次确认挂接；若远程进程已不在，请核对并确认释放。不会自动重连。":"SSH 连接已断开，远程进程可能仍在运行。名额仍占用。不会自动重连。",Foreground=(Brush)FindResource("WarningInk"),TextWrapping=TextWrapping.Wrap,Margin=new(0,4,0,0)};
                 row.Children.Add(warning);
-                var reattach=new Button{Content="核对并确认重新挂接",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,4,0,0),ToolTip="确认后才挂接。远程进程仍在则恢复本地 SSH；原来启用了同步的会重新建立。不会释放占用，也不会自动重连。"};
+                var reattachNote=new TextBlock{Text=LaunchSurface.ReattachEffect+" "+LaunchSurface.ReattachIsNewPane,TextWrapping=TextWrapping.Wrap,Margin=new(0,8,0,0)};
+                AutomationProperties.SetName(reattachNote,"重新挂接的效果 "+e.Plan.Name);row.Children.Add(reattachNote);
+                var reattach=new Button{Content="核对并确认重新挂接",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,4,0,0),ToolTip=LaunchSurface.ReattachEffect};
                 AutomationProperties.SetName(reattach,$"核对并确认重新挂接 {e.Plan.Name}");
                 reattach.Click+=async(_,_)=>await GuardAsync(()=>ConfirmRemoteReattachAsync(e));
                 row.Children.Add(reattach);
-                // R28：只有确认远程进程已不在才释放账本。这个按钮不发起重新挂接。
-                var release=new Button{Content="核对并确认释放",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,4,0,0),ToolTip="先登录远程主机核对 agent 进程；只有判断「已不在」并填写原因、经二次确认后才释放占用。不会重新挂接。"};
+                var releaseNote=new TextBlock{Text=LaunchSurface.ReleaseEffect,TextWrapping=TextWrapping.Wrap,Margin=new(0,8,0,0),Foreground=(Brush)FindResource("WarningInk")};
+                AutomationProperties.SetName(releaseNote,"释放名额的效果 "+e.Plan.Name);row.Children.Add(releaseNote);
+                var release=new Button{Content="核对并确认释放",HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,4,0,0),ToolTip=LaunchSurface.ReleaseEffect};
                 AutomationProperties.SetName(release,$"核对并确认释放 {e.Plan.Name}");
                 release.Click+=async(_,_)=>await GuardAsync(()=>ConfirmRemoteReleaseAsync(e));
                 row.Children.Add(release);
@@ -652,7 +680,7 @@ public partial class MainWindow : Window
                 }
                 else row.Children.Add(new TextBlock{Text="请从任务卡重新入队；来源无法核对时先检查任务记录。",TextWrapping=TextWrapping.Wrap});
             }
-            Sessions.Children.Add(row);
+            if(!Store.IsTerminal(e))ActiveSessions.Children.Add(row);else Sessions.Children.Add(row);
         }
         var clipped=agents.Count(Store.IsTerminal)-history.Count;if(clipped>0)Sessions.Children.Add(new TextBlock{Text=$"仅显示最近 12 条历史记录；另有 {clipped} 条较旧记录未展示。活动项始终显示。",Foreground=(Brush)FindResource("Muted")});
         foreach(var state in undoRemovals){var undo=new Button{Content="撤销移除",Style=(Style)FindResource("QuietButton"),HorizontalAlignment=HorizontalAlignment.Left,Margin=new(0,0,0,8)};AutomationProperties.SetName(undo,"撤销移除");undo.Click+=(_,_)=>UndoRemoval(state);Sessions.Children.Add(undo);}
@@ -674,7 +702,7 @@ public partial class MainWindow : Window
     {
         ProjectPath.IsEnabled=!locked;Recent.IsEnabled=!locked;Templates.IsEnabled=!locked;AgentSearch.IsEnabled=!locked;SlotList.IsEnabled=!locked;DirectoryMode.IsEnabled=!locked;
         foreach(var toggle in FindLogical(RailSlots).OfType<CheckBox>())toggle.IsEnabled=!locked&&CanEditSlots;
-        ChooseProjectButton.IsEnabled=!locked;SaveTemplateButton.IsEnabled=!locked;DiscoverButton.IsEnabled=!locked&&!discovering;AddButton.IsEnabled=!locked&&CanAddSlot;Layout.IsEnabled=!locked&&config.Draft.Slots.Count(s=>s.Enabled)==2;
+        ChooseProjectButton.IsEnabled=!locked;SaveTemplateButton.IsEnabled=!locked;DiscoverButton.IsEnabled=!locked&&!discovering;AddButton.IsEnabled=!locked&&CanAddSlot;InstalledAgentsButton.IsEnabled=!locked&&CanEditSlots;Layout.IsEnabled=!locked&&config.Draft.Slots.Count(s=>s.Enabled)==2;
     }
     private void SetBusy(bool value){busy=value;CancelButton.IsEnabled=value&&launchCancellation!=null;SetConfigLocked(value);UpdateLaunch();}
     private void UnlockForCleanup()
@@ -842,6 +870,7 @@ public partial class MainWindow : Window
     private void ChooseClick(object sender,RoutedEventArgs e){if(busy||readOnly)return;var picker=new OpenFolderDialog{Title="选择项目文件夹"};if(picker.ShowDialog(this)==true)SelectProject(picker.FolderName);}
     private async void RecentChanged(object sender,SelectionChangedEventArgs e){if(!rendering&&Recent.SelectedItem is string path)await (recentProjectTask=GuardAsync(()=>SwitchRecentProjectAsync(path)));}
     private void AddClick(object sender,RoutedEventArgs e)=>AddAgentSlot();
+    private async void InstalledAgentsClick(object sender,RoutedEventArgs e)=>await GuardAsync(()=>AddInstalledAgentsAsync());
     private void LayoutChanged(object sender,SelectionChangedEventArgs e){if(Layout.SelectedItem is ComboBoxItem {Tag:string value})Edit(d=>d.Layout=value);}
     private void DirectoryChanged(object sender,SelectionChangedEventArgs e){if(DirectoryMode.SelectedItem is ComboBoxItem {Tag:string value})Edit(d=>d.DirectoryMode=value);}
     private void TemplateChanged(object sender,SelectionChangedEventArgs e)
@@ -997,7 +1026,7 @@ public partial class MainWindow : Window
         // 同步模式用下拉选择而不是自由文本，避免拼写错误静默回退成另一种同步策略。
         var syncChoices=new Dictionary<string,(string Value,string Label)[]>
         {
-            ["syncMode"]=[("mutagen","mutagen（推荐：实时双向同步）"),("sshfs","sshfs（透明挂载）"),("none","none（不同步）")]
+            ["syncMode"]=[("mutagen","mutagen（双向同步，不是实时一致，也不是已收敛）"),("sshfs","sshfs（挂载读写，不是已收敛）"),("none","none（不同步，这次不是同权）")]
         };
         
         void Build()
@@ -1073,7 +1102,7 @@ public partial class MainWindow : Window
                 ("upgradeOverrides","Agent 升级命令覆盖（每行 agent=命令，留空用默认）",RemoteHostEditor.UpgradeOverridesText(host?.AgentUpgradeCommands),true)
             };
             var caption=isNew?"添加远程主机":"编辑远程主机";
-            var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的槽位会应用新配置。\n同步在远程启动时生效：mutagen 为实时双向同步；同步模式不能选 none（三台同权）。\n内存上限在启动时经 systemd 生效：远程主机需有 systemd-run（root 登录）；缺失时该次启动拒绝。",choices:syncChoices);
+var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的槽位会应用新配置。\n同步在远程启动时生效：mutagen 为实时双向同步；同步模式不能选 none（三台同权）。\n内存上限在启动时经 systemd 生效：远程主机需有 systemd-run（root 登录）；缺失时该次启动拒绝。",choices:syncChoices);
             if(dialog.ShowDialog()!=true)return;
             var name=dialog.Values["name"].Trim();
             var address=dialog.Values["address"].Trim();

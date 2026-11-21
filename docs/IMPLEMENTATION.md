@@ -1552,3 +1552,23 @@ powershell -NoProfile -File scripts/test.ps1
 - 夹具修复（仅 App 自检，断言不放宽）：A1 四条徽章断言改为显式投递 `No sessions found` 的 list 结果（与该文件 B3/R39 既有写法一致，消除对端侧安装状态的依赖）；保留一次真实探针调用并断言环境无关的不变量「无 sync-final 记录时绝不宣称已同步」。同步新增一项检查（456→457）。
 - 夹具修复验证：solution build 0 警告/0 错误；`--ui-check` 在**无 mutagen**与**有 mutagen** 两种环境下均 **457/457、退出 0**；修复前无 mutagen 基线为 388 项后同点失败（`D:/temp/ui-repro`）。本轮以 PR gate CI 重跑作为该夹具修复的完整门禁证据，落地后另行记录。
 - 远程推进经本轮操作员明示授权：分支已推送，PR #12（base `main`）已开；合并以 PR gate 全绿为前提。
+
+## 97. 启动主路径分组（2026-11-18）
+
+- 计划：`docs/superpowers/plans/2026-11-18-ui-launch-flow.md`。只改分组和文案。8 名额、16 槽位、reserve/begin、远程不进本机内存/CPU 准入都没有改。
+- 可见项目入口只留顶栏。运行位置和 Agent 分成两个下拉。非终态放到预览上方的「现在」。重新挂接和释放名额仍是原来的按钮名，旁边写明效果。`None` 写「这次不是同权」；合并 main 后按 2026-11-19 的更晚决定，保存与启动会拒收（§92）。Mutagen 文案只引用 `MutagenCreateMode.SyncMode`。没有新增自动重连、空闲关闭确认、通知、终端召回、Grok 配置，也没有实现 PR9 的已收敛状态机。没有重建桌面预览。
+- 本环境是 Linux，SDK 8.0.428。`dotnet build AgentLauncher.sln -c Release -m:1 -p:EnableWindowsTargeting=true` 为 0 警告、0 错误。带 `DefineConstants=INTEGRATION_TESTS` 的 App 编译同样是 0 警告、0 错误。`dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release -- --launch-surface-checks` 为 **7/7 通过、退出 0**。这 7 项不碰 `Store`。审查后又改了三处：成功 flush 的退出说明不再写「已收敛」；主按钮在回到单一目标时恢复 `Ctrl+Enter` 提示；侧栏「全部…」和已有通知点击改到「现在」里的非终态行。这三处同样只做了编译，没有 Windows 界面运行。
+- PR 分支当时没有跑 `--ui-check`，也没有跑 `scripts/test.ps1`。当时的机器没有 Windows 桌面，不能启动 WPF，也没有新的窗口截图。UX14/UX15、ACC-U04、ACC-U06、CR05、R28/R33 的界面断言留给 Windows CI。在那次结果出来之前，不把这些断言写成通过。
+- 2026-11-21 合并后在 Windows 测试运行时复跑：`dotnet publish src/AgentLauncher.App/AgentLauncher.App.csproj -c Release -p:DefineConstants=INTEGRATION_TESTS -o artifacts/test-runtime --nologo -m:1` 退出 0；`scripts/run-ui-check-once.ps1` 退出 0；`artifacts/ui-rerun/ui-checks.json` 为 **475/475**，通过项含 `UX15 none says this run is not peer and is refused`。上一条保留为 PR 分支当时的 Linux 记录；本次合并验证以本条为准。
+- 2026-11-21 合并后完整门禁：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test.ps1 -RuntimeDirectory artifacts/gate-pr11-integration` 全量执行，未使用 SkipUi/SkipBrowser，**726.99 秒**、退出 0、各阶段 0 失败；WPF `--ui-check` **475/475、0 失败**（`artifacts/ui/ui-checks.json`），embedded `Passed=true`（`artifacts/embedded-ui.json`）。
+
+## 98. 本机已安装 Agent 一键补齐与 UI 回归（2026-11-20，Asia/Shanghai）
+
+- 行为：快捷动作「补齐本机 Agent」扫描 agent catalog 中的 CLI 命令，把发现结果按任务使用次数（其次最近使用、catalog 顺序）填入完全空白且未勾选的默认槽位；已有备注、目录、程序配置、远程主机或已启用槽位一律保留。空白槽位不足时在 `ResourcePolicy.MaxSlots` 内新增槽位；加载中、忙碌、只读时拒绝修改。状态栏列出发现的 Agent，并明确版本与登录状态未验证。
+- 实现位置：`src/AgentLauncher.App/MainWindow.SlotConvenience.cs` 的 `AddInstalledAgentsAsync` / `IsBlankSlot`，快捷动作注册在 `MainWindow.QuickActions.cs`。只复用既有 `Commands.DiscoverInstalls` 与 `config.Edit` 原子保存链，未新增配置旋钮，也未改资源策略。补齐分两轮：先保留默认配置中已写有同一 Agent 的空白槽位（如 codex/hermes），再按频率填充其余空白槽位，避免后续 Agent 抢占默认槽位后重复新建同 Agent 配置。
+- 回归：`src/AgentLauncher.App/InstalledAgentsUiChecks.cs` 新增 UX13 八项，覆盖动作可用、注入目录确实被扫描、任务频率排序（2 个 qoder 任务 vs 1 个 omp 任务，直接断言最初两个空白槽位依次变为 `qoder`、`omp`）、空白槽位填入、已配置槽位不变、状态文案、重复执行幂等、只读拒改。夹具保存并恢复 `taskBook`，把临时假 CLI 目录前置到 `PATH` 并在 `finally` 恢复，另直接断言发现的 Qoder 路径来自该夹具目录，不依赖开发机真实安装或真实任务账本；旧行为没有该动作和填入路径，前三项在旧行为下必然失败。
+- 过程记录：首轮夹具把 `filler` 数量硬编码为 4，实际第三个已发现 Agent 会合法新增槽位，断言失败；改为以第一次执行后的槽位快照与修订号作为幂等基准，没有弱化判据。测试根必须使用脚本识别的 `AgentLauncher-tests-` 前缀，否则既有 monitor 守卫拒绝运行。
+- 验证：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 为 0 警告/0 错误；集成版发布后真实 WPF `--ui-check` 为 **464 项通过、0 失败、退出 0**（`artifacts/ui-installed-final4/ui-checks.json`），八项 UX13 全部通过。该轮只覆盖本机 UI 回归，不代表完整门禁或真实登录/版本验收。
+- 补充可见入口（2026-11-21）：侧栏在「＋ 添加 Agent」下新增常驻按钮 `InstalledAgentsButton`（文案「补齐本机 Agent」），空项目时的引导文案同步改为「选择项目，点「补齐本机 Agent」，然后启动。」；按钮仍走同一条 `AddInstalledAgentsAsync`，不会自动启动任何 Agent。`Render`/`SetConfigLocked` 同步维护其启用态，只读或忙碌时禁用。UX13 增加第 9 项断言该按钮在侧栏可见且 AutomationId 一致；上一轮集成版真实 WPF `--ui-check` **465 项通过、0 失败、退出 0**（`artifacts/ui-installed-button/ui-checks.json`），九项 UX13 全部通过。
+- 默认槽位防重（2026-11-21）：`InstalledAgentsUiChecks.cs` 增加默认配置回归，断言安装 codex/hermes 后各自仍只有一个槽位、原空白槽位被复用并启用；补齐实现同步改为先匹配同名 Agent 的空白默认槽位，再分配其余空槽位。另在 `UiChecks.cs` 增加测试夹具窗口规范化：后台/非交互启动若把窗口置为最小化，焦点断言前恢复 `WindowState.Normal` 并 `Activate()`；不修改生产启动路径或断言条件。
+- 完整门禁（2026-11-21）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test.ps1` 全量执行，未使用 SkipUi/SkipBrowser，**762.04 秒**且各阶段 0 失败。原生/模型 **292/0**、同步评审 **6/0**、TerminalModel **13/0**、ManualRelay 通过、修复 **36/0**、admission **0 失败**、integration **138 条记录 / 129 项测试，0 失败**（9 条环境/能力元数据不计为测试）、sync-reliability **11/0**；WPF `--ui-check` **466 项通过、0 失败**（`artifacts/ui/ui-checks.json`，含 10 条 UX13 前缀检查）、embedded `Passed=true`、原型 **5/5**、Omp **6/6**、浏览器 **5 项 PASS**。日志 `artifacts/gate-installed-agents-fill.log`。新增测试与 `UiChecks` 夹具改动仍待评审，不把本机门禁冒充独立评审。

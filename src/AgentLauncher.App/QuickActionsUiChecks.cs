@@ -54,8 +54,8 @@ public partial class MainWindow
             sessionButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
             var focusedElement = Keyboard.FocusedElement as FrameworkElement;
-            var sessionFocused = SessionExpander.IsExpanded && focusedElement?.Tag is Guid focusedId && focusedId == attemptId;
-            Store.Save(Path.Combine(folder, "quick-session-focus.json"), new { IsActive, IsVisible, WindowState, Expanded = SessionExpander.IsExpanded, ExpectedId = attemptId, FocusedType = focusedElement?.GetType().Name, FocusedName = focusedElement?.Name, FocusedId = focusedElement?.Tag is Guid tag ? (Guid?)tag : null, FocusedLoaded = focusedElement?.IsLoaded, FocusedVisible = focusedElement?.IsVisible, LogicalFocusType = FocusManager.GetFocusedElement(this)?.GetType().Name });
+            var sessionFocused = (ActiveNow.Visibility == Visibility.Visible || SessionExpander.IsExpanded) && focusedElement?.Tag is Guid focusedId && focusedId == attemptId;
+            Store.Save(Path.Combine(folder, "quick-session-focus.json"), new { IsActive, IsVisible, WindowState, Expanded = SessionExpander.IsExpanded, ActiveNow = ActiveNow.Visibility, ExpectedId = attemptId, FocusedType = focusedElement?.GetType().Name, FocusedName = focusedElement?.Name, FocusedId = focusedElement?.Tag is Guid tag ? (Guid?)tag : null, FocusedLoaded = focusedElement?.IsLoaded, FocusedVisible = focusedElement?.IsVisible, LogicalFocusType = FocusManager.GetFocusedElement(this)?.GetType().Name });
             if (!sessionFocused) CaptureQuickActions(this, Path.Combine(folder, "quick-session-focus-failure.png"));
             check("UX10 rail session opens and focuses the exact record", sessionFocused);
             check("UX10 session navigation reveals the record without closing the terminal", EmbeddedPanel.Visibility == Visibility.Collapsed && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);

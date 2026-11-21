@@ -111,8 +111,9 @@ public partial class MainWindow
         for(var i=0;i<13;i++){var history=ReviewEntry("cr05-history-"+i,"Settled");entries.Add(history);}
         status=new Response(true,"healthy",entries.ToArray(),healthy);RenderSessions();
         var sessionRows=ReviewFind<TextBox>(Sessions).ToArray();
-        Check("CR05 active pending row survives thirteen histories",sessionRows.Any(row=>row.Text==active.Plan.Cwd)&&sessionRows.Length==13);
-        Check("CR05 active pending revoke survives thirteen histories",ReviewFind<Button>(Sessions).Any(button=>button.Content as string=="撤销未启动项"));
+        var activeRows=ReviewFind<TextBox>(ActiveSessions).ToArray();
+        Check("CR05 active pending row survives thirteen histories",activeRows.Any(row=>row.Text==active.Plan.Cwd)&&sessionRows.Length==12);
+        Check("CR05 active pending revoke survives thirteen histories",ReviewFind<Button>(ActiveSessions).Any(button=>button.Content as string=="撤销未启动项"));
         await RefreshAsync();
 
         // CR09: undo is model state, not a child of the session tree; multiple removals and capacity refusal stay retryable.

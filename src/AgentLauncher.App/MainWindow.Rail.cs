@@ -32,7 +32,7 @@ public partial class MainWindow
             RailSessions.Children.Add(RailRecordButton(text, text + "\n查看这条运行记录", "查看会话 " + entry.Plan.Name, () => NavigateToSession(entry.Plan.Id)));
         }
         if (active.Length == 0) RailSessions.Children.Add(new TextBlock { Text = "无活动会话", FontSize = 12, Foreground = muted, Margin = new Thickness(0, 2, 0, 2) });
-        if (active.Length > RailSummaryRows) RailSessions.Children.Add(RailMoreButton("查看全部会话", () => JumpTo(SessionExpander)));
+        if (active.Length > RailSummaryRows) RailSessions.Children.Add(RailMoreButton("查看全部会话", () => JumpTo(ActiveNow)));
     }
 
     private void RenderRailQueue(Brush muted)
