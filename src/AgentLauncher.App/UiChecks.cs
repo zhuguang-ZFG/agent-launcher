@@ -33,6 +33,17 @@ public partial class MainWindow
         }
         async Task CheckWindowPlacementRoundTripAsync()
         {
+            // Native WM_SIZE transitions lag the WPF property under load. Wait for the HWND state so a late
+            // minimize message cannot land after the fixture restores the window and break later focus checks.
+            async Task WaitForNativeStateAsync(bool iconic,bool zoomed=false)
+            {
+                var deadline=Stopwatch.StartNew();
+                while(deadline.Elapsed<TimeSpan.FromSeconds(3))
+                {
+                    if(windowHandle!=IntPtr.Zero&&WindowPlacementNative.IsIconic(windowHandle)==iconic&&WindowPlacementNative.IsZoomed(windowHandle)==zoomed)return;
+                    await Task.Delay(25);
+                }
+            }
             var path=Store.FilePath("window-placement.json");var backupPath=path+".bak";
             var savedPlacement=System.IO.File.Exists(path)?System.IO.File.ReadAllBytes(path):null;
             var savedBackup=System.IO.File.Exists(backupPath)?System.IO.File.ReadAllBytes(backupPath):null;
@@ -49,7 +60,7 @@ public partial class MainWindow
                 await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
                 var expected=new Rect(Left,Top,Width,Height);
                 WindowState=WindowState.Maximized;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
-                WindowState=WindowState.Minimized;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
+                WindowState=WindowState.Minimized;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await WaitForNativeStateAsync(true);
                 SaveWindowPlacement();
                 var actual=Store.Read<WindowPlacement>(path);
                 Check("UX16 minimized placement retains normal position size and max state",actual is {Maximized:true}&&Math.Abs(actual.Left-expected.Left)<0.5&&Math.Abs(actual.Top-expected.Top)<0.5&&Math.Abs(actual.Width-expected.Width)<0.5&&Math.Abs(actual.Height-expected.Height)<0.5);
@@ -65,11 +76,19 @@ public partial class MainWindow
                 if(!TryGetWindowWorkArea(out var work))throw new InvalidOperationException("无法读取测试窗口工作区。");
                 Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,false));
                 ApplyWindowPlacement();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
-                Check("UX16 restored normal bounds fit the selected monitor work area",Left>=work.Left-0.5&&Top>=work.Top-0.5&&Left+Width<=work.Right+0.5&&Top+Height<=work.Bottom+0.5);
+                Check("UX16 restored normal bounds fit the selected monitor work area",Math.Abs(Left-work.Left)<0.5&&Math.Abs(Top-work.Top)<0.5&&Math.Abs(Width-work.Width)<0.5&&Math.Abs(Height-work.Height)<0.5);
+                Width=testWidth;Height=testHeight;Left=expected.Left;Top=expected.Top;
+                await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
                 Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,true));
                 ApplyWindowPlacement();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
                 var maxPlacement=Store.Read<WindowPlacement>(path);
-                Check("UX16 maximized restore retains work-area-safe windowed bounds",WindowState==WindowState.Maximized&&maxPlacement is {Maximized:true}&&maxPlacement.Left>=work.Left-0.5&&maxPlacement.Top>=work.Top-0.5&&maxPlacement.Left+maxPlacement.Width<=work.Right+0.5&&maxPlacement.Top+maxPlacement.Height<=work.Bottom+0.5);
+                Check("UX16 maximized restore retains work-area-safe windowed bounds",WindowState==WindowState.Maximized&&maxPlacement is {Maximized:true}&&Math.Abs(maxPlacement.Left-work.Left)<0.5&&Math.Abs(maxPlacement.Top-work.Top)<0.5&&Math.Abs(maxPlacement.Width-work.Width)<0.5&&Math.Abs(maxPlacement.Height-work.Height)<0.5);
+                var compactWidth=Math.Max(MinWidth,Math.Min(800,work.Width-64));var compactHeight=Math.Max(MinHeight,Math.Min(600,work.Height-64));
+                var compact=new Rect(work.Left+(work.Width-compactWidth)/2,work.Top+(work.Height-compactHeight)/2,compactWidth,compactHeight);
+                Store.Save(path,new WindowPlacement(compact.Left,compact.Top,compact.Width,compact.Height,true));
+                ApplyWindowPlacement();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
+                var compactPlacement=Store.Read<WindowPlacement>(path);
+                Check("UX16 applying distinct bounds while maximized preserves the requested geometry",WindowState==WindowState.Maximized&&compactPlacement is {Maximized:true}&&Math.Abs(compactPlacement.Left-compact.Left)<0.5&&Math.Abs(compactPlacement.Top-compact.Top)<0.5&&Math.Abs(compactPlacement.Width-compact.Width)<0.5&&Math.Abs(compactPlacement.Height-compact.Height)<0.5);
                 Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,false));
                 var beforeShow=new MainWindow([]);
                 try
@@ -88,6 +107,7 @@ public partial class MainWindow
                 MinWidth=originalMinWidth;MinHeight=originalMinHeight;
                 WindowState=WindowState.Normal;WindowStartupLocation=originalStartup;Left=originalLeft;Top=originalTop;Width=originalWidth;Height=originalHeight;WindowState=originalState;
                 await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                await WaitForNativeStateAsync(false,originalState==WindowState.Maximized);
                 windowedBounds=originalWindowedBounds;lastNonMinimizedState=originalLastNonMinimizedState;
             }
         }
