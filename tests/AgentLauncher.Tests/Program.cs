@@ -445,6 +445,7 @@ ResourcePolicyChecks.RunAuthorityFixes(Test);
 ConfigurationReviewChecks.Run(Test,temp);
 AgentLauncher.Tests.PaneLayoutChecks.Run(Test);
 AgentLauncher.Tests.WorkbenchLayoutChecks.Run(Test);
+AgentLauncher.Tests.StartPageSurfaceChecks.Run(Test);
 AgentLauncher.Tests.TaskChecks.Run(Test,temp);
 AgentLauncher.Tests.TaskUsabilityChecks.Run(Test,temp);
 AgentLauncher.Tests.TaskDailyFixChecks.Run(Test,temp);

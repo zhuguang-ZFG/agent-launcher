@@ -41,9 +41,9 @@ public static class LaunchSurface
 
     public static string LaunchButtonText(int count, IReadOnlyList<string?> hostNames, bool busy, bool previewOnly)
     {
-        if (busy) return "正在处理…";
-        var verb = previewOnly ? "检查资源并启动" : "启动";
-        return verb + " " + count + " 个 · " + TargetPhrase(hostNames);
+        _ = hostNames;
+        _ = previewOnly;
+        return StartPageSurface.LaunchButtonText(count, busy);
     }
 
     // 只按主机上保存的同步模式取文案。调用方不要把 mutagen list 的原文传进来。
