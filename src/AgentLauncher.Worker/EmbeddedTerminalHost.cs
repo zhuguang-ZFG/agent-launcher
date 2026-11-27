@@ -12,6 +12,11 @@ internal sealed class EmbeddedTerminalHost
     private readonly TerminalScreen screen = new(100, 28);
     private byte[]? latestFrame;
     private int requestedSize;
+    private TerminalReadRequest? requestedRead;
+    private byte[]? readbackFrame;
+    private int connectedView;
+    private int everConnected;
+    private int processCompleted;
 
     public int Run(Guid attempt, bool reattach)
     {
@@ -49,12 +54,21 @@ internal sealed class EmbeddedTerminalHost
                 {
                     Publish(); dirty=false; frameAge.Restart();
                 }
+                PublishReadback();
                 if (runner.Process.HasExited && count==0) break;
             } while (!host.OutputClosed);
             runner.Process.WaitForExit();
-            Publish();
-            // Allow the connected reader to receive the final screen before EOF.
-            Thread.Sleep(250);
+            Volatile.Write(ref processCompleted,1);
+            Publish(runner.Process.ExitCode);
+            // 进程已结束，账本正常终结。仅为已打开的视图保留有界输出；关闭视图即释放宿主。
+            // 极短任务可能早于首次连接结束，允许与客户端相同的 5 秒初次连接窗口。
+            var completionAge=Stopwatch.StartNew();
+            while(Volatile.Read(ref connectedView)!=0 || Volatile.Read(ref everConnected)==0&&completionAge.ElapsedMilliseconds<5000)
+            {
+                var finalSize=Interlocked.Exchange(ref requestedSize,0);
+                if(finalSize!=0){screen.Resize(finalSize>>16,finalSize&0xffff);Publish(runner.Process.ExitCode);}
+                PublishReadback();Thread.Sleep(40);
+            }
             return runner.Process.ExitCode;
         }
         finally
@@ -65,7 +79,13 @@ internal sealed class EmbeddedTerminalHost
         }
     }
 
-    private void Publish()=>Volatile.Write(ref latestFrame,TerminalWire.Frame(TerminalWire.EncodeSnapshot(screen.Snapshot())));
+    private void Publish(int? exitCode=null)=>Volatile.Write(ref latestFrame,TerminalWire.Frame(TerminalWire.EncodeSnapshot(screen.Snapshot() with{ExitCode=exitCode})));
+
+    private void PublishReadback()
+    {
+        var read=Interlocked.Exchange(ref requestedRead,null);
+        if(read is not null)Volatile.Write(ref readbackFrame,TerminalWire.Frame(TerminalWire.EncodeReadback(screen.Readback(read))));
+    }
 
     private async Task ServeAsync(Guid id,ConPtyHost host,CancellationToken stop)
     {
@@ -73,24 +93,33 @@ internal sealed class EmbeddedTerminalHost
         {
             using var pipe=new NamedPipeServerStream(TerminalPipeClient.PipeName(id),PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly);
             await pipe.WaitForConnectionAsync(stop);
+            Volatile.Write(ref readbackFrame, null);
+            Interlocked.Exchange(ref requestedRead, null);
+            Volatile.Write(ref connectedView,1);Volatile.Write(ref everConnected,1);
             using var connected=CancellationTokenSource.CreateLinkedTokenSource(stop);
-            var input=ReadInputAsync(pipe,host,connected.Token);
-            var output=WriteFramesAsync(pipe,connected.Token);
-            await Task.WhenAny(input,output);
-            connected.Cancel();
-            pipe.Dispose();
-            try { await Task.WhenAll(input,output); }
-            catch(Exception e) when(e is IOException or ObjectDisposedException or OperationCanceledException or System.ComponentModel.Win32Exception) { }
+            try
+            {
+                var input=ReadInputAsync(pipe,host,connected.Token);
+                var output=WriteFramesAsync(pipe,connected.Token);
+                await Task.WhenAny(input,output);
+                connected.Cancel();pipe.Dispose();
+                try { await Task.WhenAll(input,output); }
+                catch(Exception e) when(e is IOException or ObjectDisposedException or OperationCanceledException or System.ComponentModel.Win32Exception) { }
+            }
+            finally{Volatile.Write(ref connectedView,0);}
         }
     }
 
     private async Task WriteFramesAsync(Stream pipe,CancellationToken ct)
     {
         byte[]? sent=null;
+        byte[]? readSent=null;
         while(!ct.IsCancellationRequested)
         {
             var frame=Volatile.Read(ref latestFrame);
             if(frame!=null && !ReferenceEquals(sent,frame)) { await pipe.WriteAsync(frame,ct); sent=frame; }
+            var page=Volatile.Read(ref readbackFrame);
+            if(page!=null && !ReferenceEquals(readSent,page)) { await pipe.WriteAsync(page,ct); readSent=page; }
             await Task.Delay(40,ct);
         }
     }
@@ -100,9 +129,11 @@ internal sealed class EmbeddedTerminalHost
         while(await TerminalWire.ReadFrameAsync(pipe,ct) is {} frame)
         {
             var message=TerminalWire.Decode(frame);
-            if(message is {Kind:TerminalWire.InputKind,Input:{} bytes} && bytes.Length<=TerminalPipeClient.MaxInput)host.WriteInput(bytes);
+            if(message is {Kind:TerminalWire.InputKind,Input:{} bytes} && bytes.Length<=TerminalPipeClient.MaxInput)
+            {if(Volatile.Read(ref processCompleted)==0)host.WriteInput(bytes);}
             else if(message is {Kind:TerminalWire.ResizeKind,Columns:{} cols,Rows:{} rows} && cols is >=TerminalScreen.MinColumns and <=TerminalScreen.MaxColumns && rows is >=TerminalScreen.MinRows and <=TerminalScreen.MaxRows)
                 Interlocked.Exchange(ref requestedSize,(cols<<16)|rows);
+            else if(message is {Kind:TerminalWire.ReadKind,Request:{IsWellFormed:true} request})Interlocked.Exchange(ref requestedRead,request);
             else break;
         }
     }

@@ -25,7 +25,7 @@ internal static class RemoteMaintenanceChecks
                 try { await action(); Console.WriteLine("PASS " + name); evidence.Add(new { name, passed = true }); }
                 catch (Exception e) { Console.WriteLine("FAIL " + name + ": " + e.Message); evidence.Add(new { name, passed = false, error = e.ToString() }); }
             }
-            RemoteHost Host(string address) => new(Guid.NewGuid(), "测试 VPS", address, 22, "testuser", "agent", ["pi"], null);
+            RemoteHost Host(string address) => new(Guid.NewGuid(), "测试 VPS", address, 22, "testuser", "agent", ["omp"], null);
             const string dir = "/home/agent/work";
 
             await Test("B2 resource sample parsing free -b/nproc/loadavg", () =>
@@ -71,9 +71,9 @@ internal static class RemoteMaintenanceChecks
 
             await Test("C1 ResumeFlagsFor mapping fail-closed", () =>
             {
-                foreach (var agent in new[] { "pi", "kimi", "qodercli", "qoder" })
+                foreach (var agent in new[] { "omp", "claude" })
                     Assert(RemoteAgentMaintenance.ResumeFlagsFor(agent) is ["--continue"], agent + " 应映射为 [--continue]");
-                foreach (var agent in new[] { "omp", "codex", "claude", "gemini", "custom", "" })
+                foreach (var agent in new[] { "codex", "pi", "qoder", "kimi", "gemini", "custom", "" })
                     Assert(RemoteAgentMaintenance.ResumeFlagsFor(agent) is null, agent + " 未实测续接参数，应返回 null（fail-closed）");
                 return Task.CompletedTask;
             });
@@ -92,11 +92,11 @@ internal static class RemoteMaintenanceChecks
 
             await Test("C1 remote help verification fail-closed via fake-ssh", async () =>
             {
-                var (ok, _) = await SshRemoteCommand.VerifyResumeFlagsAsync(Host("help-ok.example.com"), "pi", dir, ["--continue"]);
+                var (ok, _) = await SshRemoteCommand.VerifyResumeFlagsAsync(Host("help-ok.example.com"), "omp", dir, ["--continue"]);
                 Assert(ok, "help 含 --continue 时应通过核对");
-                var (missingOk, missingMessage) = await SshRemoteCommand.VerifyResumeFlagsAsync(Host("help-missing.example.com"), "pi", dir, ["--continue"]);
+                var (missingOk, missingMessage) = await SshRemoteCommand.VerifyResumeFlagsAsync(Host("help-missing.example.com"), "omp", dir, ["--continue"]);
                 Assert(!missingOk && missingMessage.Contains("已拒绝"), "help 不含 --continue 时应拒绝续接：" + missingMessage);
-                var (downOk, downMessage) = await SshRemoteCommand.VerifyResumeFlagsAsync(Host("disconnect.example.com"), "pi", dir, ["--continue"]);
+                var (downOk, downMessage) = await SshRemoteCommand.VerifyResumeFlagsAsync(Host("disconnect.example.com"), "omp", dir, ["--continue"]);
                 Assert(!downOk && downMessage.Contains("已拒绝"), "SSH 失败时应拒绝续接：" + downMessage);
                 var unknownThrew = false;
                 try { await SshRemoteCommand.VerifyResumeFlagsAsync(Host("help-ok.example.com"), "unknown-agent", dir, ["--continue"]); }
@@ -147,25 +147,25 @@ internal static class RemoteMaintenanceChecks
             {
                 var history = Array.Empty<RemoteVersionEntry>();
                 for (var i = 0; i < 60; i++)
-                    history = RemoteAgentMaintenance.AppendVersion(history, new RemoteVersionEntry("pi", "1.0." + i, DateTimeOffset.UtcNow, "npm install -g @earendil-works/pi-coding-agent@latest"));
+                    history = RemoteAgentMaintenance.AppendVersion(history, new RemoteVersionEntry("omp", "1.0." + i, DateTimeOffset.UtcNow, "npm install -g @oh-my-pi/pi-coding-agent@latest"));
                 Assert(history.Length == 50, "每主机每 agent 历史上限应为 50，实际：" + history.Length);
                 Assert(history[0].Version == "1.0.10" && history[^1].Version == "1.0.59", "裁剪应保留最新 50 条");
                 Assert(RemoteAgentMaintenance.PreviousVersion([]) is null, "无历史时回滚目标应为 null");
-                Assert(RemoteAgentMaintenance.PreviousVersion([new("pi", "1.0.0", DateTimeOffset.UtcNow, "cmd")]) is null, "只有一条记录时无上一版");
-                var same = new RemoteVersionEntry("pi", "1.0.0", DateTimeOffset.UtcNow, "cmd");
+                Assert(RemoteAgentMaintenance.PreviousVersion([new("omp", "1.0.0", DateTimeOffset.UtcNow, "cmd")]) is null, "只有一条记录时无上一版");
+                var same = new RemoteVersionEntry("omp", "1.0.0", DateTimeOffset.UtcNow, "cmd");
                 Assert(RemoteAgentMaintenance.PreviousVersion([same, same]) is null, "全部同版本时回滚目标应为 null");
-                RemoteVersionEntry Entry(string version) => new("pi", version, DateTimeOffset.UtcNow, "cmd");
+                RemoteVersionEntry Entry(string version) => new("omp", version, DateTimeOffset.UtcNow, "cmd");
                 Assert(RemoteAgentMaintenance.PreviousVersion([Entry("1.0.0"), Entry("1.1.0"), Entry("1.1.0")]) == "1.0.0", "回滚目标应为上一个不同版本");
                 return Task.CompletedTask;
             });
 
             await Test("C2 pinned/rollback command derivation", () =>
             {
-                const string npm = "npm install -g @earendil-works/pi-coding-agent@latest";
-                const string pip = "python3 -m pip install --upgrade kimi-cli";
-                Assert(RemoteAgentMaintenance.PinUpgradeCommand(npm, "1.5.2") == "npm install -g @earendil-works/pi-coding-agent@1.5.2", "npm 应把 @latest 替换为 @<version>");
-                Assert(RemoteAgentMaintenance.PinUpgradeCommand(pip, "0.9.0") == "python3 -m pip install kimi-cli==0.9.0", "pip 应把 upgrade 替换为 install <pkg>==<version>");
-                Assert(RemoteAgentMaintenance.PinUpgradeCommand(npm, "latest") == "npm install -g @earendil-works/pi-coding-agent@latest", "指定 latest 等价于最新");
+                const string npm = "npm install -g @oh-my-pi/pi-coding-agent@latest";
+                const string pip = "python3 -m pip install --upgrade example-cli";
+                Assert(RemoteAgentMaintenance.PinUpgradeCommand(npm, "1.5.2") == "npm install -g @oh-my-pi/pi-coding-agent@1.5.2", "npm 应把 @latest 替换为 @<version>");
+                Assert(RemoteAgentMaintenance.PinUpgradeCommand(pip, "0.9.0") == "python3 -m pip install example-cli==0.9.0", "pip 应把 upgrade 替换为 install <pkg>==<version>");
+                Assert(RemoteAgentMaintenance.PinUpgradeCommand(npm, "latest") == "npm install -g @oh-my-pi/pi-coding-agent@latest", "指定 latest 等价于最新");
                 Assert(RemoteAgentMaintenance.SupportsVersionPinning(npm) && RemoteAgentMaintenance.SupportsVersionPinning(pip), "默认 npm/pip 形态应支持固定版本");
                 const string overrideCommand = "bash /opt/upgrade-agent.sh";
                 Assert(!RemoteAgentMaintenance.SupportsVersionPinning(overrideCommand), "不含 @latest/pip upgrade 的覆盖命令不应支持固定版本");
@@ -180,30 +180,30 @@ internal static class RemoteMaintenanceChecks
                 var path = Path.Combine(tempRoot, "remote-versions.json");
                 var hostId = Guid.NewGuid().ToString();
                 for (var i = 0; i < 55; i++)
-                    RemoteVersionHistory.Record(path, hostId, "pi", "1.0." + i, "pi --version");
-                var history = RemoteVersionHistory.For(path, hostId, "pi");
+                    RemoteVersionHistory.Record(path, hostId, "omp", "1.0." + i, "omp --version");
+                var history = RemoteVersionHistory.For(path, hostId, "omp");
                 Assert(history.Length == 50 && history[^1].Version == "1.0.54", "落盘历史应裁剪到 50 条且保留最新");
-                Assert(RemoteVersionHistory.For(path, hostId, "kimi").Length == 0, "不同 agent 的历史应隔离");
-                Assert(RemoteVersionHistory.For(path, Guid.NewGuid().ToString(), "pi").Length == 0, "不同主机的历史应隔离");
-                RemoteVersionHistory.RecordFromVersionOutput(path, Host("version-ok.example.com") with { Id = Guid.Parse(hostId) }, "pi", "no version here", "pi --version");
-                Assert(RemoteVersionHistory.For(path, hostId, "pi")[^1].Version == "1.0.54", "无法解析版本时不应写入历史");
+                Assert(RemoteVersionHistory.For(path, hostId, "claude").Length == 0, "不同 agent 的历史应隔离");
+                Assert(RemoteVersionHistory.For(path, Guid.NewGuid().ToString(), "omp").Length == 0, "不同主机的历史应隔离");
+                RemoteVersionHistory.RecordFromVersionOutput(path, Host("version-ok.example.com") with { Id = Guid.Parse(hostId) }, "omp", "no version here", "omp --version");
+                Assert(RemoteVersionHistory.For(path, hostId, "omp")[^1].Version == "1.0.54", "无法解析版本时不应写入历史");
                 File.WriteAllText(path, "{corrupted");
-                RemoteVersionHistory.Record(path, hostId, "pi", "2.0.0", "pi --version");
-                Assert(RemoteVersionHistory.For(path, hostId, "pi") is [{ Version: "2.0.0" }], "损坏历史应按空历史重建，不阻断维护");
+                RemoteVersionHistory.Record(path, hostId, "omp", "2.0.0", "omp --version");
+                Assert(RemoteVersionHistory.For(path, hostId, "omp") is [{ Version: "2.0.0" }], "损坏历史应按空历史重建，不阻断维护");
                 Store.Save(path, new RemoteVersionBook(2, []));
-                Assert(RemoteVersionHistory.For(path, hostId, "pi").Length == 0, "未来 schema 应按空历史处理（fail-closed）");
+                Assert(RemoteVersionHistory.For(path, hostId, "omp").Length == 0, "未来 schema 应按空历史处理（fail-closed）");
                 return Task.CompletedTask;
             });
 
             await Test("C2 CheckVersionAsync via fake-ssh records version", async () =>
             {
                 var host = Host("version-ok.example.com");
-                var result = await SshRemoteCommand.CheckVersionAsync(host, "pi", dir);
+                var result = await SshRemoteCommand.CheckVersionAsync(host, "omp", dir);
                 Assert(!result.TimedOut && result.ExitCode == 0 && result.StdOut.Trim() == "1.2.3", "fake-ssh 版本夹具应返回 1.2.3");
                 var path = Path.Combine(tempRoot, "remote-versions-check.json");
-                RemoteVersionHistory.RecordFromVersionOutput(path, host, "pi", result.StdOut, RemoteAgentMaintenance.VersionCommandFor("pi")!);
-                var entry = RemoteVersionHistory.For(path, host.Id.ToString(), "pi").Single();
-                Assert(entry is { Agent: "pi", Version: "1.2.3", Command: "pi --version" }, "版本历史条目不正确：" + entry);
+                RemoteVersionHistory.RecordFromVersionOutput(path, host, "omp", result.StdOut, RemoteAgentMaintenance.VersionCommandFor("omp")!);
+                var entry = RemoteVersionHistory.For(path, host.Id.ToString(), "omp").Single();
+                Assert(entry is { Agent: "omp", Version: "1.2.3", Command: "omp --version" }, "版本历史条目不正确：" + entry);
             });
 
             Store.Save(Path.Combine(tempRoot, "remote-maintenance-results.json"), evidence);

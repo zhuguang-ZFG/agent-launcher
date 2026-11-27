@@ -43,9 +43,9 @@ public partial class MainWindow
         var fixture = Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe");
         check("ACC-B05 task fixture program exists", File.Exists(fixture));
         var book = new TaskBook();
-        var waiting = TaskBookOps.Create(book, "任务甲", Store.Root, "custom", new AgentProfile { Executable = fixture }, "", ["通过"], "shared", null, 4);
+        var waiting = TaskBookOps.Create(book, "任务甲", Store.Root, "codex", new AgentProfile { Executable = fixture }, "", ["通过"], "shared", null, 4);
         TaskBookOps.Enqueue(book, waiting.Id, new CommandSpec(fixture, ["--fixture"], "exe"), new string('A', 64));
-        var reviewed = TaskBookOps.Create(book, "任务乙", Store.Root, "custom", new AgentProfile { Executable = fixture }, "", [], "shared", null, 1);
+        var reviewed = TaskBookOps.Create(book, "任务乙", Store.Root, "codex", new AgentProfile { Executable = fixture }, "", [], "shared", null, 1);
         var reviewedRun = TaskBookOps.StartRun(book, TaskBookOps.Enqueue(book, reviewed.Id, new CommandSpec(fixture, [], "exe"), AgentProbe.Fingerprint(fixture)), Guid.NewGuid(), Guid.NewGuid(), "volume:task-check");
         reviewedRun.SessionRef = "session-check";
         TaskBookOps.FinishRun(book, reviewedRun.AttemptId, "Review", "进程已结束，等待人工验收");
@@ -128,6 +128,7 @@ public partial class MainWindow
         check("CR-N02 missing task primary keeps queue disabled and backup untouched", taskBook is null && !QueueToggleButton.IsEnabled
             && !File.Exists(tasksPath) && backup.SequenceEqual(File.ReadAllBytes(tasksPath + ".bak")) && TaskEmptyText.Text.Contains("备份"));
         File.Delete(tasksPath + ".bak");
+        Store.Save(tasksPath, new TaskBook());
         await LoadTasksAsync();
         ErrorText.Text = "";
         }
@@ -184,8 +185,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             var otherShim = Path.Combine(root, "other.cmd");
             File.WriteAllText(otherShim, File.ReadAllText(shim).Replace("queue-agent.js", "other-agent.js", StringComparison.Ordinal));
             var identityDraft = new Draft { Project = root, DirectoryMode = "shared", Slots = [
-                new() { Enabled = true, AgentId = "custom", Profiles = new() { ["custom"] = new() { Executable = shim } } },
-                new() { Enabled = true, AgentId = "custom", Profiles = new() { ["custom"] = new() { Executable = otherShim } } }] };
+                new() { Enabled = true, AgentId = "codex", Profiles = new() { ["codex"] = new() { Executable = shim } } },
+                new() { Enabled = true, AgentId = "codex", Profiles = new() { ["codex"] = new() { Executable = otherShim } } }] };
             var captured = CaptureQuickQueue(identityDraft, "").Items;
             check("CR-N04 quick queue keeps distinct package identities on one Node runtime", captured.Count == 2
                 && captured[0].Command.Executable == captured[1].Command.Executable && captured[0].ProgramFingerprint != captured[1].ProgramFingerprint
@@ -331,7 +332,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
     {
         await LoadTasksAsync();
         var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "任务重试门禁", Store.Root, PhysicalDirectory.Workspace(Store.Root),
-            true, command, ResourcePolicy.AgentBudget, SourceSlotId: Guid.NewGuid());
+            true, command, ResourcePolicy.AgentBudget, SourceSlotId: Guid.NewGuid(), AgentId: "codex");
         var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [plan]));
         if (!reserved.Ok) throw new IOException(reserved.Message);
         var revoked = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: plan.Id));

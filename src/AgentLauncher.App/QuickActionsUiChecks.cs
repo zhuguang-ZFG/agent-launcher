@@ -29,8 +29,8 @@ public partial class MainWindow
         try
         {
             config = new Configuration(); config.Draft.Project = Store.Root;
-            config.Draft.Slots = [new() { AgentId = "pi", Enabled = true }, new() { AgentId = "codex", Enabled = false }];
-            config.Draft.Slots[0].Profiles["pi"] = new() { Arguments = ["SECRET-QUICK-ACTION-ARG"] };
+            config.Draft.Slots = [new() { AgentId = "omp", Enabled = true }, new() { AgentId = "codex", Enabled = false }];
+            config.Draft.Slots[0].Profiles["omp"] = new() { Arguments = ["SECRET-QUICK-ACTION-ARG"] };
             config.RecentProjects = [Store.Root]; config.Theme = "dark";
             var attemptId = Guid.NewGuid(); var queueId = Guid.NewGuid(); var taskId = Guid.NewGuid();
             status = new(true, "navigation fixture", [new() { Plan = new(attemptId, Guid.NewGuid(), 1, "接口服务", Store.Root, PhysicalDirectory.Workspace(Store.Root), false, new("cmd.exe", ["SECRET-COMMAND-ARG"], "exe"), ResourcePolicy.AgentBudget), State = "Started" }]);
@@ -100,7 +100,7 @@ public partial class MainWindow
             var examples = new[]
             {
                 new QuickAction("a", "查看运行记录", "接口服务 · CODEX", () => { executed++; return Task.CompletedTask; }),
-                new QuickAction("b", "查看运行记录", "前端界面 · Pi", () => { executed++; return Task.CompletedTask; })
+                new QuickAction("b", "查看运行记录", "前端界面 · Omp", () => { executed++; return Task.CompletedTask; })
             };
             var cancelDialog = new QuickActionsWindow(this, examples);
             ExerciseDialog(cancelDialog, dialog =>

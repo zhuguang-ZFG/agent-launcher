@@ -27,7 +27,7 @@ public partial class MainWindow
         {
             config = new Configuration { Theme = "dark" };
             config.Draft.Project = Store.Root;
-            config.Draft.Slots = [new() { AgentId = "codex", CustomName = "接口实现", Enabled = true, Directory = Store.Root, Note = "核对请求格式", Profiles = new() { ["codex"] = new() { Arguments = ["--model", "model with spaces"] }, ["pi"] = new() { Arguments = ["--continue"] } } }, new() { AgentId = "pi" }];
+            config.Draft.Slots = [new() { AgentId = "codex", CustomName = "接口实现", Enabled = true, Directory = Store.Root, Note = "核对请求格式", Profiles = new() { ["codex"] = new() { Arguments = ["--model", "model with spaces"] }, ["pi"] = new() { Arguments = ["--continue"] } } }, new() { AgentId = "codex" }];
             readOnly = false; busy = false; closeRequested = false; ApplyTheme(); Render();
             await resize(1120, 800);
             var sourceId = config.Draft.Slots[0].Id; var nextId = config.Draft.Slots[1].Id;

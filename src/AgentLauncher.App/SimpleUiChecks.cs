@@ -16,12 +16,12 @@ public partial class MainWindow
         var tasksBefore = JsonSerializer.Serialize(taskBook, Store.Json);
         try
         {
-            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "omp", Enabled = true }, new() { AgentId = "qoder", Enabled = true }] } };
+            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "omp", Enabled = true }, new() { AgentId = "codex", Enabled = true }] } };
             var sample = new MemorySnapshot(16 * ResourcePolicy.GiB, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 5, DateTimeOffset.UtcNow);
             status = new(true, "simple-ui", [], sample);readOnly = false;Render();
             await commandCheckTask;
             check("ACC-U04 advanced configuration starts collapsed", !ConfigurationToolsExpander.IsExpanded && !LaunchOptionsExpander.IsExpanded);
-            check("ACC-U04 low Omp and Qoder budgets have a direct repair action", LongTaskNotice.Visibility == Visibility.Visible && LongTaskButton.IsEnabled);
+            check("ACC-U04 low Omp and Codex budgets have a direct repair action", LongTaskNotice.Visibility == Visibility.Visible && LongTaskButton.IsEnabled);
             var oldResource = config.Draft.Resource;var oldRevision = config.Draft.Revision;
             readOnly = true;UpdateSimpleStatus();
             check("ACC-U04 read-only cannot apply long-task settings", !LongTaskButton.IsEnabled && !ApplyLongTaskResources(sample) && config.Draft.Revision == oldRevision);
@@ -42,7 +42,7 @@ public partial class MainWindow
             await saveTask;await commandCheckTask;
             LaunchOptionsExpander.IsExpanded = true;ConfigurationToolsExpander.IsExpanded = true;UpdateLayout();
             check("ACC-U04 advanced controls remain reachable", SummaryPanel.IsVisible && DirectoryMode.IsVisible && ScalePresets.IsVisible && Templates.IsVisible);
-            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("qoder.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "qoder");
+            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("omp.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "omp");
             var entry = new ControlEntry { Plan = plan, State = "Started", Detail = "已启动进程；" + ToolRecovery.BlockedMarker + "整机余量不足" };
             status = new(true, "guard-ui", [entry], sample);RenderSessionsNow();
             check("ACC-U05 a denied live tool offers a copy-only recovery action", ReviewFind<System.Windows.Controls.Button>(ActiveSessions).Any(button => Equals(button.Content, "复制继续提示")));
@@ -67,7 +67,7 @@ public partial class MainWindow
             check("ACC-U05 recovered tools remove the stale retry action", !ReviewFind<System.Windows.Controls.Button>(ActiveSessions).Any(button => Equals(button.Content, "复制继续提示")));
             entry.Detail = ToolRecovery.BlockedMarker + "余量不足";entry.State = "Settled";RenderSessionsNow();
             check("ACC-U05 exited sessions never suggest retrying in a live terminal", !ReviewFind<System.Windows.Controls.Button>(Sessions).Any(button => Equals(button.Content, "复制继续提示")) && !ReviewFind<System.Windows.Controls.Button>(ActiveSessions).Any(button => Equals(button.Content, "复制继续提示")));
-            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "custom", Enabled = true, Profiles = new() { ["custom"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe") } } }] } };
+            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "codex", Enabled = true, Profiles = new() { ["codex"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe") } } }] } };
             status = new(true, "low-memory-ui", [], sample with { Available = ResourcePolicy.GiB, At = DateTimeOffset.UtcNow });
             previewOnly = false;
             Render();QueueSave();await saveTask;await commandCheckTask;UpdateLaunch();
@@ -108,7 +108,7 @@ public partial class MainWindow
         Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE", "1");
         try
         {
-            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "custom", Enabled = true, Directory = directory, Profiles = new() { ["custom"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.Tests.exe"), Arguments = ["--echo", output, "中文 with spaces"] } } }] } };
+            config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "codex", Enabled = true, Directory = directory, Profiles = new() { ["codex"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.Tests.exe"), Arguments = ["--echo", output, "中文 with spaces"] } } }] } };
             Render();QueueSave();await saveTask;await commandCheckTask;await RefreshAsync();UpdateLaunch();
             check("ACC-U07 direct launch is ready with an explicit folder", LaunchButton.IsEnabled);
             LaunchButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));

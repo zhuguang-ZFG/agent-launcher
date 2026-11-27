@@ -43,7 +43,7 @@ internal static partial class RemoteExecutionIntegration
             authorityConfig.Draft.Revision = 3;
             authorityConfig.Draft.Project = cwd;
             authorityConfig.Draft.DirectoryMode = "isolated";
-            authorityConfig.Draft.Slots = [new Slot { Enabled = true, AgentId = "pi" }];
+            authorityConfig.Draft.Slots = [new Slot { Enabled = true, AgentId = "omp" }];
             Store.Save(Store.FilePath("configuration.json"), authorityConfig);
             
             await Test("R23 SSH alive keeps Started, exit transitions to Settled", async () =>
@@ -56,7 +56,7 @@ internal static partial class RemoteExecutionIntegration
                     SshPort: 22,
                     SshUser: "testuser",
                     AgentUser: "agent",
-                    AvailableAgents: ["pi"],
+                    AvailableAgents: ["omp"],
                     SshKeyPath: null
                 );
                 
@@ -68,14 +68,15 @@ internal static partial class RemoteExecutionIntegration
                     Cwd: cwd,
                     Workspace: PhysicalDirectory.Workspace(cwd),
                     Shared: false,
-                    Command: new("pi", ["hold=10"], "remote"),  // 与真实 planner 合同一致：远端 Agent 名 + remote adapter
+                    Command: new("omp", ["hold=10"], "remote"),  // 与真实 planner 合同一致：远端 Agent 名 + remote adapter
                     Budget: 0,  // 远程计划不携带本地 Job 预算（ValidateLaunchItem 强制为 0）
+                    AgentId: "omp",
                     RemoteExecution: new RemoteExecutionSpec(
                         Host: remoteHost.Address,
                         SshPort: remoteHost.SshPort,
                         SshUser: remoteHost.SshUser,
                         AgentUser: remoteHost.AgentUser,
-                        AgentType: "pi",
+                        AgentType: "omp",
                         RemoteWorkingDirectory: "/home/agent/work",
                         Arguments: ["hold=10"],
                         MemoryLimitBytes: null,
@@ -144,14 +145,15 @@ internal static partial class RemoteExecutionIntegration
                     Cwd: cwd,
                     Workspace: PhysicalDirectory.Workspace(cwd),
                     Shared: false,
-                    Command: new("pi", ["hold=2", "disconnect"], "remote"),  // fake SSH 等 2 秒后返回 255
+                    Command: new("omp", ["hold=2", "disconnect"], "remote"),  // fake SSH 等 2 秒后返回 255
                     Budget: 0,  // 远程计划不携带本地 Job 预算（ValidateLaunchItem 强制为 0）
+                    AgentId: "omp",
                     RemoteExecution: new RemoteExecutionSpec(
                         Host: "disconnect.example.com",
                         SshPort: 22,
                         SshUser: "testuser",
                         AgentUser: "agent",
-                        AgentType: "pi",
+                        AgentType: "omp",
                         RemoteWorkingDirectory: "/home/agent/work",
                         Arguments: ["disconnect"],
                         MemoryLimitBytes: null,
@@ -218,14 +220,15 @@ internal static partial class RemoteExecutionIntegration
                         Cwd: r25Cwd,
                         Workspace: PhysicalDirectory.Workspace(r25Cwd),
                         Shared: false,
-                        Command: new("pi", ["hold=10"], "remote"),
+                        Command: new("omp", ["hold=10"], "remote"),
                         Budget: 0,
+                        AgentId: "omp",
                         RemoteExecution: new RemoteExecutionSpec(
                             Host: "crash.example.com",
                             SshPort: 22,
                             SshUser: "test",
                             AgentUser: "agent",
-                            AgentType: "pi",
+                            AgentType: "omp",
                             RemoteWorkingDirectory: "/home/agent/work",
                             Arguments: ["hold=10"],
                             MemoryLimitBytes: null,
@@ -289,14 +292,15 @@ internal static partial class RemoteExecutionIntegration
                     Cwd: r28Cwd,
                     Workspace: PhysicalDirectory.Workspace(r28Cwd),
                     Shared: false,
-                    Command: new("pi", ["disconnect"], "remote"),
+                    Command: new("omp", ["disconnect"], "remote"),
                     Budget: 0,
+                    AgentId: "omp",
                     RemoteExecution: new RemoteExecutionSpec(
                         Host: "disconnect.example.com",
                         SshPort: 22,
                         SshUser: "testuser",
                         AgentUser: "agent",
-                        AgentType: "pi",
+                        AgentType: "omp",
                         RemoteWorkingDirectory: "/home/agent/work",
                         Arguments: ["disconnect"],
                         MemoryLimitBytes: null,
@@ -323,7 +327,7 @@ internal static partial class RemoteExecutionIntegration
                 // 本地（非远程）条目同样拒绝：release-remote 只属于远程域。
                 var localCwd = Path.Combine(Store.Root, "remote-release-local-cwd");
                 Directory.CreateDirectory(localCwd);
-                var localPlan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "release-local", localCwd, PhysicalDirectory.Workspace(localCwd), false, new CommandSpec(Environment.ProcessPath!, ["--hold", "1"], "exe"), ResourcePolicy.DefaultJobMemoryLimit);
+                var localPlan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "release-local", localCwd, PhysicalDirectory.Workspace(localCwd), false, new CommandSpec(Environment.ProcessPath!, ["--hold", "1"], "exe"), ResourcePolicy.DefaultJobMemoryLimit, AgentId: "codex");
                 var localReserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [localPlan], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([localPlan]), DraftRevision: 3));
                 Assert(localReserved.Ok, "Local plan reserve failed: " + localReserved.Message);
                 var localRefusal = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: localPlan.Id, Release: new OperatorRelease("Gone", "已核对", true)));
@@ -385,8 +389,8 @@ internal static partial class RemoteExecutionIntegration
                 Assert((await EntryAsync())!.State == "Settled", "second release changed terminal state");
 
                 // 占用已释放：同目录的新远程计划可以再次预约（释放前会被工作目录占用拒绝）。
-                var probe = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "release-probe", r28Cwd, PhysicalDirectory.Workspace(r28Cwd), false, new CommandSpec("pi", [], "remote"), 0,
-                    RemoteExecution: new RemoteExecutionSpec("probe.example.com", 22, "root", "agent", "pi", "/home/agent/work", [], null, null));
+                var probe = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "release-probe", r28Cwd, PhysicalDirectory.Workspace(r28Cwd), false, new CommandSpec("omp", [], "remote"), 0,
+                    AgentId: "omp", RemoteExecution: new RemoteExecutionSpec("probe.example.com", 22, "root", "agent", "omp", "/home/agent/work", [], null, null));
                 var probeReserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [probe], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([probe]), DraftRevision: 3));
                 Assert(probeReserved.Ok, "workspace occupancy was not released: " + probeReserved.Message);
                 var probeRevoked = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: probe.Id));
@@ -438,8 +442,8 @@ internal static partial class RemoteExecutionIntegration
                     var r26Cwd = Path.Combine(Store.Root, "remote-pressure-cwd-" + Guid.NewGuid().ToString("N"));
                     Directory.CreateDirectory(r26Cwd);
                     var remotePlan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "remote-pressure", r26Cwd,
-                        PhysicalDirectory.Workspace(r26Cwd), false, new CommandSpec("pi", [], "remote"), 0,
-                        RemoteExecution: new RemoteExecutionSpec("pressure.example.com", 22, "root", "agent", "pi", "/home/agent/work", [], null, null));
+                        PhysicalDirectory.Workspace(r26Cwd), false, new CommandSpec("omp", [], "remote"), 0,
+                        AgentId: "omp", RemoteExecution: new RemoteExecutionSpec("pressure.example.com", 22, "root", "agent", "omp", "/home/agent/work", [], null, null));
                     var policy = ResourcePolicy.SnapshotFor(pressureConfig.Draft.Resource, sample.Total, sample.CommitLimit);
                     var reserved = (Response)Invoke(fixture, "Handle", new Request("reserve", Guid.NewGuid(), [remotePlan],
                         Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([remotePlan]), DraftRevision: 3))!;
@@ -450,7 +454,7 @@ internal static partial class RemoteExecutionIntegration
                     var localCwd = Path.Combine(Store.Root, "local-pressure-cwd-" + Guid.NewGuid().ToString("N"));
                     Directory.CreateDirectory(localCwd);
                     var localPlan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "local-pressure", localCwd,
-                        PhysicalDirectory.Workspace(localCwd), false, new CommandSpec(Environment.ProcessPath!, ["--hold", "1"], "exe"), ResourcePolicy.DefaultJobMemoryLimit);
+                        PhysicalDirectory.Workspace(localCwd), false, new CommandSpec(Environment.ProcessPath!, ["--hold", "1"], "exe"), ResourcePolicy.DefaultJobMemoryLimit, AgentId: "codex");
                     string? localRefusal = null;
                     try
                     {
@@ -468,7 +472,7 @@ internal static partial class RemoteExecutionIntegration
                     restoreConfig.Draft.Revision = 3;
                     restoreConfig.Draft.Project = cwd;
                     restoreConfig.Draft.DirectoryMode = "isolated";
-                    restoreConfig.Draft.Slots = [new Slot { Enabled = true, AgentId = "pi" }];
+                    restoreConfig.Draft.Slots = [new Slot { Enabled = true, AgentId = "omp" }];
                     Store.Save(Store.FilePath("configuration.json"), restoreConfig);
                 }
             });

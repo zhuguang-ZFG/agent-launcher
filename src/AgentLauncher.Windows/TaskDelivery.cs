@@ -15,13 +15,13 @@ public static class TaskDelivery
     {
         var profile=task.Profile.Copy();
         if(task.DeliveryMode=="manual")return profile;
-        if(task.AgentId is not ("codex" or "claude" or "omp" or "pi" or "qoder"))
+        if(task.AgentId is not ("codex" or "claude" or "omp"))
             throw new IOException("该 Agent 暂无任务交付适配，请选择手动交付或支持的 Agent。");
         if(profile.Arguments.Any(arg=>arg.Split('=')[0] is "resume" or "exec" or "review" or "--resume" or "--continue" or "-c" or "-r" or "--print" or "--" or "--session" or "--session-id" or "--fork" or "--restore" or "--goal" or "--mode" or "--export" or "--help" or "-h" or "--version" || (task.AgentId!="codex"&&arg=="-p")))
             throw new IOException("任务参数已指定执行模式或续接方式，请先移除这些参数，再使用自动交付。");
-        var command=Commands.Resolve(task.AgentId,new AgentProfile{Executable=profile.Executable});
+        var command=Commands.ProbeCommand(task.AgentId,profile);
         var fingerprint=AgentProbe.Fingerprint(command);
-        var bare=QoderMemoryGuard.Detach(OmpMemoryGuard.Detach(command));
+        var bare=OmpMemoryGuard.Detach(command);
         var probe=await AgentProbe.RunAsync(bare with{Arguments=[..bare.Arguments,"--help"]},task.Project,TimeSpan.FromSeconds(8),ct:ct);
         RequireHelp(probe);
         var help=probe.Output+"\n"+probe.Error;
@@ -34,7 +34,8 @@ public static class TaskDelivery
                 var execHelp=await AgentProbe.RunAsync(bare with{Arguments=[..bare.Arguments,"exec","--help"]},task.Project,TimeSpan.FromSeconds(8),ct:ct);
                 RequireHelp(execHelp);
                 if(!(execHelp.Output+execHelp.Error).Contains("[PROMPT]",StringComparison.Ordinal))throw new IOException("当前 Codex 未确认 exec 任务参数。");
-                profile.Arguments=["exec",..profile.Arguments];
+                var programArguments=Commands.ProfileProgramArgumentCount(profile);
+                profile.Arguments=[..profile.Arguments.Take(programArguments),"exec",..profile.Arguments.Skip(programArguments)];
             }
             else
             {

@@ -16,6 +16,7 @@ public sealed class SshRunnerBackend : IDisposable
     private Process? _process;  // 本地 SSH 客户端进程（Start 后才有值）
     private bool _disposed;
     private bool _started;
+    private bool _aborted;
     private Task? _consoleInput;
     private long _creationTime;  // Start 后才有值
 
@@ -109,6 +110,8 @@ public sealed class SshRunnerBackend : IDisposable
             { Console.Error.WriteLine($"警告：SSH 密钥加载进 ssh-agent 失败（{ex.Message}）；将仅用 -i 直接尝试免密连接。"); }
         }
         _process = Process.Start(StartInfo) ?? throw new InvalidOperationException("Failed to start SSH");
+        _started = true;
+        _creationTime = _process.StartTime.ToFileTimeUtc();
         if (!keepStandardInput)
         {
             // 远程 agent 不需要本地 stdin；立即关闭管道给 ssh 一个确定的 EOF，
@@ -121,9 +124,6 @@ public sealed class SshRunnerBackend : IDisposable
             var forwarding=PumpConsoleInput(_process,redirected);
             if(!redirected)_consoleInput=forwarding;
         }
-        _started = true;
-        // 从 Process.StartTime 计算 CreationTime（与 ProtectedProcess.CreationTime 相同的 long 格式）
-        _creationTime = _process.StartTime.ToFileTimeUtc();
     }
     
     // 启动远程 agent 并启动工作区同步（如果启用）
@@ -169,10 +169,11 @@ public sealed class SshRunnerBackend : IDisposable
     // 检查是否是 SSH 连接错误（退出码 255）
     public bool IsSshConnectionError => _started && Process.HasExited && Process.ExitCode == 255;
 
-    // 中止远程 agent（杀死本地 SSH 客户端，远程进程随会话断开而终止）
+    // 中止本地 SSH 客户端；不能证明远程 Agent 已退出，必须保留同步。
     public void Abort()
     {
         if (!_started) return;
+        _aborted = true;
         try
         {
             if (!Process.HasExited)
@@ -185,6 +186,15 @@ public sealed class SshRunnerBackend : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        // 本地 SSH 丢失或被终止时，远端仍可能写文件。Dispose 不得停止它的同步。
+        var canFinishSync = !_started;
+        if (_started && !_aborted)
+        {
+            try { canFinishSync = Process.HasExited && Process.ExitCode != 255; }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { canFinishSync = false; }
+        }
+        if (!canFinishSync) SyncSession = null;
 
         if (_started)
         {

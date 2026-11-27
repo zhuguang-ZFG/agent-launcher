@@ -94,14 +94,14 @@ internal static class PaneLayoutChecks
         });
         Test("ACC-T01 every pane receives its Agent color and old names retain their color",()=>
         {
-            var colors=new Dictionary<string,string>{{"pi","#61AFEF"},{"codex","#E5C07B"},{"claude","#C678DD"},{"gemini","#56B6C2"},{"opencode","#98C379"},{"hermes","#E06C75"},{"omp","#D19A66"},{"kimi","#BE5046"},{"qoder","#528BFF"},{"custom","#ABB2BF"}};
+            var colors=new Dictionary<string,string>{{"omp","#D19A66"},{"codex","#E5C07B"},{"claude","#C678DD"}};
             var items=Items(Agents.All.Length);
             for(var i=0;i<items.Length;i++)items[i]=items[i] with{AgentId=Agents.All[i].Id,Name="Codex"};
             CheckColors(items,colors);
             for(var i=0;i<items.Length;i++)items[i]=items[i] with{AgentId=null,Name=Agents.All[i].Name.ToUpperInvariant()};
             CheckColors(items,colors);
-            var custom=Items(3);custom[0]=custom[0] with{AgentId="custom",Name="Codex"};custom[1]=custom[1] with{AgentId="unknown",Name="Pi"};custom[2]=custom[2] with{AgentId=null,Name="User-defined agent"};
-            Assert(PaneCommands(Commands.ComposeTerminalArguments(custom,"vertical")).All(c=>Value(c,"--tabColor")==colors["custom"]),"explicit/unknown/custom identity was guessed from display name");
+            var unknown=Items(3);unknown[0]=unknown[0] with{AgentId="retired",Name="Codex"};unknown[1]=unknown[1] with{AgentId="unknown",Name="Omp"};unknown[2]=unknown[2] with{AgentId=null,Name="User-defined agent"};
+            Assert(PaneCommands(Commands.ComposeTerminalArguments(unknown,"vertical")).All(c=>Value(c,"--tabColor")=="#ABB2BF"),"explicit/unknown identity was guessed from display name");
         });
         Test("ACC-T01 named profile rides every pane only when supplied",()=>
         {

@@ -27,13 +27,17 @@ public sealed record TerminalSnapshot(
     int TruncatedLines,
     TerminalCell[] Primary,
     TerminalCell[] Alternate,
-    bool GenerationSaturated = false)
+    bool GenerationSaturated = false,
+    bool BracketedPaste = false,
+    int HistoryLines = 0,
+    int? ExitCode = null)
 {
     // 不满足这个条件的快照不得应用：卡片按 Columns*Rows 索引格子。
     [JsonIgnore]
     public bool IsWellFormed =>
-        Columns > 0 && Rows > 0 && Primary is not null && Alternate is not null &&
+        Columns is > 0 and <= TerminalScreen.MaxColumns && Rows is > 0 and <= TerminalScreen.MaxRows && Primary is not null && Alternate is not null &&
         Primary.Length == Columns * Rows && Alternate.Length == Columns * Rows &&
+        HistoryLines is >= 0 and <= TerminalScreen.MaxScrollbackLines && TruncatedLines >= 0 &&
         CursorColumn >= 0 && CursorColumn <= Columns && CursorRow >= 0 && CursorRow < Rows;
 
     [JsonIgnore]
@@ -82,6 +86,7 @@ public sealed class TerminalScreen
     private ScreenId _active = ScreenId.Primary;
     private bool _autoWrap = true;
     private bool _applicationCursor;
+    private bool _bracketedPaste;
     private bool _cursorVisible = true;
     private int _generation;
     private bool _generationSaturated;
@@ -145,7 +150,8 @@ public sealed class TerminalScreen
     {
         AdvanceGeneration();
         return new TerminalSnapshot(_generation, _active, _columns, _rows, Current.CursorColumn, Current.CursorRow,
-            _cursorVisible, _applicationCursor, _truncatedLines, (TerminalCell[])_primary.Cells.Clone(), (TerminalCell[])_alternate.Cells.Clone(), _generationSaturated);
+            _cursorVisible, _applicationCursor, _truncatedLines, (TerminalCell[])_primary.Cells.Clone(), (TerminalCell[])_alternate.Cells.Clone(), _generationSaturated,
+            _bracketedPaste, _active == ScreenId.Primary ? _history.Count : 0);
     }
 
     // 测试和诊断用：把当前屏幕渲染成文本，跳过宽字符占位格并去掉每行尾部空白。
@@ -185,12 +191,68 @@ public sealed class TerminalScreen
         Array.Fill(resized, TerminalCell.Empty);
         for (var row = 0; row < Math.Min(rows, _rows); row++)
             Array.Copy(screen.Cells, row * _columns, resized, row * columns, Math.Min(columns, _columns));
-        // 宽字符被列宽截断后留下孤立占位格，落成空白。
-        for (var index = 0; index < resized.Length; index++)
-            if (resized[index].IsContinuation) resized[index] = TerminalCell.Empty;
+        // 仅清除被截断的半个宽字符；保留有效的主体和续接格。
+        NormalizeWideCells(resized, columns);
         screen.Cells = resized;
         screen.CursorColumn = Math.Min(screen.CursorColumn, columns);
         screen.CursorRow = Math.Min(screen.CursorRow, rows - 1);
+    }
+
+    private static void NormalizeWideCells(TerminalCell[] cells, int columns)
+    {
+        for (var index = 0; index < cells.Length; index++)
+        {
+            var column = index % columns;
+            if (cells[index].IsContinuation && (column == 0 || cells[index - 1].Width != 2)) cells[index] = TerminalCell.Empty;
+            else if (cells[index].Width == 2 && (column == columns - 1 || !cells[index + 1].IsContinuation)) cells[index] = TerminalCell.Empty;
+        }
+    }
+
+    // 按需复制一屏。历史只在模型线程读取，不随每一帧克隆/发送。
+    public TerminalReadback Readback(TerminalReadRequest request)
+    {
+        if (!request.IsWellFormed) throw new ArgumentException("历史读取请求超出边界。", nameof(request));
+        var history = _active == ScreenId.Primary ? _history.ToArray() : [];
+        var first = _active == ScreenId.Primary ? _truncatedLines : 0;
+        var last = first + history.Length;
+        var top = Math.Clamp(request.TopLine, first, last);
+        var matchLine = -1;var matchColumn = -1;var matchLength = 0;
+        ReadOnlySpan<TerminalCell> Line(int index) => index < history.Length ? history[index] : Current.Cells.AsSpan((index - history.Length) * _columns, _columns);
+        if (!string.IsNullOrEmpty(request.Search))
+        {
+            var count = history.Length + _rows;
+            var start = Math.Clamp(request.TopLine - first, 0, count - 1);
+            for (var step = 0; step <= count; step++)
+            {
+                var index = (start + (request.Backward ? -step : step) + count) % count;
+                var cells = Line(index);
+                cells = cells[..Math.Min(cells.Length, _columns)];
+                if (cells.Length > 0 && cells[^1].Width == 2) cells = cells[..^1];
+                var text = TerminalText.ExtractLine(cells);
+                var found = -1;
+                // 首行从上次匹配的下一列继续；回绕后仍检查首行剩余部分。
+                for (var offset = 0; offset <= text.Length - request.Search.Length; offset++)
+                {
+                    if (!text.AsSpan(offset, request.Search.Length).Equals(request.Search.AsSpan(), StringComparison.OrdinalIgnoreCase)) continue;
+                    var column = TerminalText.ColumnAt(cells, offset);
+                    if (step == 0 && request.SearchColumn >= 0 && (request.Backward ? column >= request.SearchColumn : column <= request.SearchColumn)) continue;
+                    found = offset;if (!request.Backward) break;
+                }
+                if (found < 0) continue;
+                matchLine = first + index;
+                matchColumn = TerminalText.ColumnAt(cells, found);
+                matchLength = Math.Max(1, TerminalText.ColumnAt(cells, found + request.Search.Length) - matchColumn);
+                top = Math.Clamp(matchLine, first, last);break;
+            }
+        }
+        var page = new TerminalCell[_columns * _rows];Array.Fill(page, TerminalCell.Empty);
+        for (var row = 0; row < _rows; row++)
+        {
+            var line = Line(top - first + row);
+            line[..Math.Min(line.Length, _columns)].CopyTo(page.AsSpan(row * _columns, _columns));
+        }
+        NormalizeWideCells(page, _columns);
+        return new TerminalReadback(request.RequestId, _active, top, first, history.Length, _columns, _rows, page, matchLine, matchColumn, matchLength, request.Search);
     }
 
     private void AdvanceGeneration()
@@ -331,6 +393,7 @@ public sealed class TerminalScreen
             switch (parameters[i])
             {
                 case 1: _applicationCursor = set; break;
+                case 2004: _bracketedPaste = set; break;
                 case 1049:
                     if (set) EnterAlternate();
                     else LeaveAlternate();

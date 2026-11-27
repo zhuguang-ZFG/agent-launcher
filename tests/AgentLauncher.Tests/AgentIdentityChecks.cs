@@ -10,6 +10,28 @@ internal static class AgentIdentityChecks
         var root = Path.Combine(temp, "command-identity");
         Directory.CreateDirectory(root);
         CommandSpec Node(string script) => new(Environment.ProcessPath!, [script, "--raw", "literal & value"], "node-shim");
+        test("CR-N04 explicit Node entry survives capability delivery and resume probes", () =>
+        {
+            var node=Commands.FindExe("node.exe")??throw new IOException("Node required for explicit-entry regression");
+            var script=Path.Combine(root,"explicit-entry.cjs");
+            File.WriteAllText(script,"const a=process.argv.slice(2);if(a.includes('--version'))console.log('98.76.54');else if(a.includes('--help'))console.log('Usage: fixture [PROMPT] [SESSION_ID]\\n --print  Non-interactive mode\\n --resume <id>');else process.exit(7);");
+            foreach(var agent in new[]{"codex","claude","omp"})
+            {
+                var profile=new AgentProfile{Executable=node,Arguments=[script,"--model","model name"]};
+                var resolved=Commands.Resolve(agent,profile);
+                Assert(resolved.Adapter=="node-shim","explicit script lost its identity adapter");
+                var capability=AgentProbe.ProbeCapabilityAsync(agent,profile,root,TimeSpan.FromSeconds(8)).GetAwaiter().GetResult();
+                Assert(capability.Version=="98.76.54","probe ran Node or forwarded user args instead of the entry");
+                Assert(ResumeCapability.CheckAsync(agent,profile,root,capability).GetAwaiter().GetResult() is not null,"entry resume help unavailable");
+                var task=new TaskCard{AgentId=agent,Profile=profile,Project=root,Name="entry fixture",Description="test prompt",DeliveryMode="automatic"};
+                var delivery=TaskDelivery.PrepareAsync(task).GetAwaiter().GetResult();
+                Assert(delivery.Arguments[0]==script,"automatic mode displaced the Node entry");
+                Assert(agent!="codex"||delivery.Arguments[1]=="exec","Codex command is before the Node entry");
+                var before=AgentProbe.Fingerprint(resolved);
+                File.AppendAllText(script,"\n// upgrade "+agent);
+                Assert(AgentProbe.Fingerprint(Commands.Resolve(agent,profile))!=before,"explicit entry upgrade retained identity");
+            }
+        });
         test("CR-N04 Node identity detects entry changes with unchanged runtime and argv", () =>
         {
             var script = Path.Combine(root, "agent.js");

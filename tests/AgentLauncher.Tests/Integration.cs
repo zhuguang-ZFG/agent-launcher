@@ -28,7 +28,7 @@ internal static class Integration
             throw new Exception("marker timeout: "+path);
         }
         async Task Test(string name,Func<Task> action){try{await action();Console.WriteLine("PASS "+name);evidence.Add(new{name,passed=true});}catch(Exception e){Console.WriteLine("FAIL "+name+": "+e.Message);evidence.Add(new{name,passed=false,error=e.ToString()});}}
-        LaunchItem Item(string name,string[] args,string kind="agent")=>new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),false,new(Environment.ProcessPath!,args,"exe"),kind=="git"?ResourcePolicy.GitBudget:ResourcePolicy.AgentBudget,kind);
+        LaunchItem Item(string name,string[] args,string kind="agent")=>new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),false,new(Environment.ProcessPath!,args,"exe"),kind=="git"?ResourcePolicy.GitBudget:ResourcePolicy.AgentBudget,kind,AgentId:kind=="git"?null:"codex");
         async Task TerminalBatch()
         {
             var terminal=directBatch?"":Commands.Terminal("");
@@ -38,8 +38,8 @@ internal static class Integration
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             try
             {
-                var batch=Guid.NewGuid();var pool=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-8.release");
-                var items=Enumerable.Range(1,ResourcePolicy.MaxConcurrentAgents).Select(n=>Item("Terminal 8-pane fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-8-{n}.json"),release]) with{BatchId=batch,Position=n,Shared=true,PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode,PoolId=pool}).ToArray();
+                var batch=Guid.NewGuid();var pool=Guid.NewGuid();var release=Path.Combine(Store.Root,"terminal-6.release");
+                var items=Enumerable.Range(1,ResourcePolicy.MaxConcurrentAgents).Select(n=>Item("Terminal 6-pane fixture "+n,["--pane-ready",Path.Combine(Store.Root,$"terminal-6-{n}.json"),release]) with{BatchId=batch,Position=n,Shared=true,PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode,PoolId=pool,AgentId="codex"}).ToArray();
                 using var monitor=Process.GetProcessById(Store.Read<int>(Store.FilePath("monitor-pid.json")));_ = monitor.Handle;
                 var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserve.Ok,reserve.Message);
                 int[] missing=[];var runners=new List<Process>();
@@ -47,14 +47,14 @@ internal static class Integration
                 {
                     if(directBatch)foreach(var item in items)runners.Add(Start("run",item.Id));else Commands.SubmitTerminal(terminal,items,"vertical");
                     var deadline=Stopwatch.StartNew();
-                    while(deadline.Elapsed<TimeSpan.FromSeconds(25)&&items.Any(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-8-{item.Position}.json"))))await Task.Delay(100);
+                    while(deadline.Elapsed<TimeSpan.FromSeconds(25)&&items.Any(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-6-{item.Position}.json"))))await Task.Delay(100);
                 }
                 finally
                 {
-                    missing=items.Where(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-8-{item.Position}.json"))).Select(item=>item.Position).ToArray();
+                    missing=items.Where(item=>!File.Exists(Path.Combine(Store.Root,$"terminal-6-{item.Position}.json"))).Select(item=>item.Position).ToArray();
                     var snapshot=new{missing,monitorExited=monitor.HasExited,monitorExitCode=monitor.HasExited?(int?)monitor.ExitCode:null,items=items.Select(item=>new{item.Id,item.Position,claim=File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim")),receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id)),entered=Store.Read<JsonElement?>(Store.FilePath(Path.Combine("attempts",item.Id.ToString("N"),"runner-entered.json"))),error=Store.Read<JsonElement?>(Store.FilePath(Path.Combine("attempts",item.Id.ToString("N"),"runner-error.json")))}).ToArray()};
                     Store.Save(Store.FilePath("terminal-16-diagnostics.json"),snapshot);
-                    Console.WriteLine("Terminal sixteen pane diagnostics: "+JsonSerializer.Serialize(snapshot,Store.Json));
+                    Console.WriteLine("Terminal six pane diagnostics: "+JsonSerializer.Serialize(snapshot,Store.Json));
                     File.WriteAllText(release,"release");
                     var finished=Stopwatch.StartNew();
                     while(finished.Elapsed<TimeSpan.FromSeconds(15)&&items.Any(item=>File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim"))&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase is not("Finished" or "FailedBeforeStart")))await Task.Delay(100);
@@ -63,7 +63,7 @@ internal static class Integration
                     await Ipc.SendAsync(new("status",Guid.NewGuid()));
                     foreach(var runner in runners)runner.Dispose();
                 }
-                Assert(missing.Length==0,"Terminal did not start every 16-pane fixture; missing positions: "+string.Join(",",missing));
+                Assert(missing.Length==0,"Terminal did not start every 6-pane fixture; missing positions: "+string.Join(",",missing));
                 Assert(items.All(item=>File.Exists(Path.Combine(Store.Root,"attempts",item.Id.ToString("N"),"claim"))),"one or more pane claims are missing");
                 Assert(items.All(item=>Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0}),"not every pane completed after the shared release");
             }
@@ -192,49 +192,10 @@ internal static class Integration
         if(terminalOnly)
         {
             if(!directBatch)await Test("Terminal two panes exact child cwd and arguments",TerminalPair);
-            await Test("Terminal eight panes (MaxConcurrentAgents cap) all become ready before any fixture exits",TerminalBatch);
+            await Test("Terminal six panes (MaxConcurrentAgents cap) all become ready before any fixture exits",TerminalBatch);
             Store.Save(Store.FilePath("integration-results.json"),evidence);
             return evidence.Any(e=>e.GetType().GetProperty("passed")?.GetValue(e) is false)?1:0;
         }
-        await Test("ACC-R11 Qoder runner prepares plugin and receives its child hook handshake",async()=>{
-            var ready=Path.Combine(Store.Root,"qoder-hook-ready.json");var release=Path.Combine(Store.Root,"qoder-hook.release");
-            var item=Item("Qoder runner fixture",["--qoder-runner-fixture",ready,release]);
-            item=item with{Command=QoderMemoryGuard.Attach(item.Command)};
-            var before=Environment.GetEnvironmentVariable(OmpMemoryGuard.PipeEnvironment);
-            var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
-            using var runner=Start("run",item.Id);
-            try
-            {
-                var wait=Stopwatch.StartNew();
-                while((!File.Exists(ready)||Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Phase!="Started")&&!runner.HasExited&&wait.Elapsed<TimeSpan.FromSeconds(10))await Task.Delay(25);
-                Assert(File.Exists(ready),"runner did not execute generated hooks");
-                using var result=JsonDocument.Parse(File.ReadAllText(ready));
-                using var hello=JsonDocument.Parse(result.RootElement.GetProperty("Hello").GetString()!);
-                Assert(hello.RootElement.GetProperty("systemMessage").GetString()!.Contains("已连接"),"Runner pipe was not inherited by the hook");
-                using var decision=JsonDocument.Parse(result.RootElement.GetProperty("Decision").GetString()!);
-                Assert(!decision.RootElement.TryGetProperty("hookSpecificOutput",out var blocked)||blocked.GetProperty("permissionDecision").GetString()=="deny","unexpected permission grant");
-                var receipt=Store.Read<Receipt>(Store.ReceiptPath(item.Id));
-                Assert(receipt is{Phase:"Started"}&&!receipt.Detail.Contains("未确认加载"),"Runner did not confirm handshake");
-                var handshakeAt=receipt?.HandshakeAt;var handshakeWait=receipt?.HandshakeWaitMs;
-                Assert(handshakeAt is not null&&handshakeWait is{} waitMs&&waitMs>=0&&waitMs<=5000,"Started 收据缺少握手计时（HandshakeAt 或 HandshakeWaitMs 为空，或等待超过 5000ms 的宽松上限）：字段未落盘即回归");
-                Assert(Environment.GetEnvironmentVariable(OmpMemoryGuard.PipeEnvironment)==before,"child environment leaked");
-                using var job=new Job(Store.JobName(item.Id),openOnly:true);
-                job.SetMemoryLimit(256*ResourcePolicy.MiB);
-                File.WriteAllText(ready+".check1","check");
-                var deadline=Stopwatch.StartNew();
-                while((!File.Exists(ready+".result1")||Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Detail.Contains(ToolRecovery.BlockedMarker)!=true)&&deadline.Elapsed<TimeSpan.FromSeconds(8))await Task.Delay(25);
-                Assert(File.Exists(ready+".result1")&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Detail.Contains(ToolRecovery.BlockedMarker)==true,"tool refusal was not published in the live receipt");
-                var shown=(await Ipc.SendAsync(new("status",Guid.NewGuid()))).Entries!.Single(entry=>entry.Plan.Id==item.Id);
-                Assert(shown.Detail.Contains(ToolRecovery.BlockedMarker),"monitor discarded the live tool refusal");
-                job.SetMemoryLimit(item.Budget);
-                File.WriteAllText(ready+".check2","check");deadline.Restart();
-                while((!File.Exists(ready+".result2")||Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Detail.Contains("最近一次工具已通过")!=true)&&deadline.Elapsed<TimeSpan.FromSeconds(8))await Task.Delay(25);
-                Assert(File.Exists(ready+".result2")&&Store.Read<Receipt>(Store.ReceiptPath(item.Id))?.Detail.Contains("最近一次工具已通过")==true,"healthy recheck did not clear the refusal");
-            }
-            finally{File.WriteAllText(release,"release");await runner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));}
-            Assert(runner.ExitCode==0&&Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0},"runner did not finish normally");
-            await Ipc.SendAsync(new("status",Guid.NewGuid()));
-        });
         await Test("Pane memory warning latches hit history and tracks commit-based recovery and rebound",async()=>{
             var ready=Path.Combine(Store.Root,"alloc-pressure.ready");var go=Path.Combine(Store.Root,"alloc-pressure.go");
             var quiet=Path.Combine(Store.Root,"alloc-pressure.quiet");var released=Path.Combine(Store.Root,"alloc-pressure.released");var rehold=Path.Combine(Store.Root,"alloc-pressure.rehold");
@@ -275,7 +236,7 @@ time.sleep(2)
             var settings=new ResourceSettings{Mode="custom",JobMemoryLimit=1536*ResourcePolicy.MiB,PlanningBytes=ResourcePolicy.MinPlanningBytes,Pool=ResourcePolicy.PoolIndependent};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             var python=(Environment.GetEnvironmentVariable("PATH")??"").Split(';').Select(dir=>Path.Combine(dir,"python.exe")).FirstOrDefault(File.Exists)??throw new Exception("python.exe not on PATH");
-            var item=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"alloc pressure fixture",cwd,PhysicalDirectory.Workspace(cwd),false,new CommandSpec(python,[script,ready,go,quiet,released,rehold,stats],"exe"),1536*ResourcePolicy.MiB) with{PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode};
+            var item=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"alloc pressure fixture",cwd,PhysicalDirectory.Workspace(cwd),false,new CommandSpec(python,[script,ready,go,quiet,released,rehold,stats],"exe"),1536*ResourcePolicy.MiB) with{PlanningBytes=settings.PlanningBytes,ResourceMode=settings.Mode,AgentId="codex"};
             try
             {
             var reserve=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),[item]));Assert(reserve.Ok,reserve.Message);
@@ -405,7 +366,7 @@ else:
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             var python=(Environment.GetEnvironmentVariable("PATH")??"").Split(';').Select(dir=>Path.Combine(dir,"python.exe")).FirstOrDefault(File.Exists)??throw new Exception("python.exe not on PATH");
             var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
-            LaunchItem Make(string which,int position)=>new(Guid.NewGuid(),batch,position,"pool pressure "+which,cwd,PhysicalDirectory.Workspace(cwd),true,new CommandSpec(python,[script,which,which=="a"?readyA:readyB,go,quiet,released,rehold,stats,finish],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:settings.PlanningBytes,ResourceMode:settings.Mode,PoolId:poolId);
+            LaunchItem Make(string which,int position)=>new(Guid.NewGuid(),batch,position,"pool pressure "+which,cwd,PhysicalDirectory.Workspace(cwd),true,new CommandSpec(python,[script,which,which=="a"?readyA:readyB,go,quiet,released,rehold,stats,finish],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:settings.PlanningBytes,ResourceMode:settings.Mode,PoolId:poolId,AgentId:"codex");
             var a=Make("a",1);var b=Make("b",2);
             Receipt? ReceiptOf(LaunchItem item)=>Store.Read<Receipt>(Store.ReceiptPath(item.Id));
             string? aDetail=null,bDetail=null;
@@ -687,13 +648,8 @@ else:
             for(var i=0;i<30&&alive;i++){try{using var child=Process.GetProcessById(pid);alive=!child.HasExited;}catch(ArgumentException){alive=false;}if(alive)await Task.Delay(100);}
             Assert(!alive,"surviving git child was not reaped");
         });
-        await Test("Real Pi version via recognized adapter",async()=>{
-            var found=Commands.FindExe("pi");evidence.Add(new{name="pi-found",path=found});
-            CommandSpec command;try{command=Commands.Resolve("pi",new(){Arguments=["--version"]});}catch(Exception e){throw new Exception($"pi resolved path: {found??"<null>"}; {e.Message}");}
-            var result=await ControlledCommand.RunAsync(command,cwd);Assert(result.Code==0&&result.Output.Trim().Length>0,result.Error);evidence.Add(new{name="pi-version",output=result.Output.Trim()});
-        });
-        await Test("Real Omp Codex and Qoder capability probes gate presets by version",async()=>{
-            foreach(var agent in new[]{"omp","codex","qoder"})
+        await Test("Real Omp Codex and Claude capability probes gate presets by version",async()=>{
+            foreach(var agent in new[]{"omp","codex","claude"})
             {
                 var found=Commands.FindExe(Agents.Get(agent).Command);evidence.Add(new{name=agent+"-found",path=found});
                 if(found==null){evidence.Add(new{name=agent+"-probe",result="not installed"});continue;}
@@ -701,7 +657,7 @@ else:
                 evidence.Add(new{name=agent+"-capability",version=capability.Version,note=capability.Note,fingerprint=capability.Fingerprint[..12]});
                 Assert(capability.Fingerprint.Length==64,$"{agent} fingerprint missing");
                 if(capability.Version==null)continue;
-                var verified=agent switch {"omp"=>capability.Version is AgentPresets.OmpVerifiedVersion or AgentPresets.OmpCurrentVerifiedVersion,"qoder"=>capability.Version==AgentPresets.QoderVerifiedVersion,_=>capability.Version==AgentPresets.CodexVerifiedVersion};
+                var verified=agent switch {"omp"=>capability.Version is AgentPresets.OmpVerifiedVersion or AgentPresets.OmpCurrentVerifiedVersion,"codex"=>capability.Version==AgentPresets.CodexVerifiedVersion,"claude"=>capability.Version==AgentPresets.ClaudeVerifiedVersion,_=>false};
                 Assert(capability.Presets.Count>0==verified&&capability.Presets.All(p=>p.AgentId==agent),$"{agent} presets offered outside its verified version");
                 if(verified)Assert(capability.Note.Contains("版本与预设已按此安装核对"),$"{agent} verified version not reported: {capability.Note}");
             }
@@ -762,7 +718,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             File.WriteAllText(Path.Combine(shim,"node.exe"),"stub");
             var beforeRecords=Directory.CreateDirectory(Store.FilePath("preparations")).GetFiles("*.json").Select(f=>f.FullName).ToHashSet();
             await File.WriteAllTextAsync(Path.Combine(shim,"tool.cmd"),npmShim.Replace("{ENTRY}","old.js").Replace("\r\n","\n"));await File.WriteAllTextAsync(Path.Combine(shim,"old.js"),"// 1");
-            var d=new Draft{Project=cwd,DirectoryMode="shared"};d.Slots.ForEach(s=>s.Enabled=false);d.Slots[0].Enabled=true;d.Slots[0].Profiles["pi"]=new(){Executable=Path.Combine(shim,"tool.cmd")};
+            var d=new Draft{Project=cwd,DirectoryMode="shared"};d.Slots.ForEach(s=>s.Enabled=false);d.Slots[0].Enabled=true;d.Slots[0].Profiles["omp"]=new(){Executable=Path.Combine(shim,"tool.cmd")};
             try
             {
                 var first=await new WorkspacePreparer().PrepareAsync(d,_=>{},_=>Task.FromResult(false),CancellationToken.None);
@@ -855,7 +811,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
         });
         await Test("F09/R23 remote sync endpoints follow their isolated worktrees",async()=>{
             var repo=Path.Combine(Store.Root,"tiny-repo");
-            var host=new RemoteHost(Guid.NewGuid(),"test","first.invalid",22,"root","agent",["pi"],null,WorkspaceSyncMode.Mutagen,MemoryLimitMib:2048);
+            var host=new RemoteHost(Guid.NewGuid(),"test","first.invalid",22,"root","agent",["omp"],null,WorkspaceSyncMode.Mutagen,MemoryLimitMib:2048);
             var config=new Configuration{RemoteHosts=[host]};
             var draft=new Draft{Project=repo,Slots=[new(){Enabled=true,RemoteHostId=host.Id,RemoteDirectory="/work/one"},new(){Enabled=true,RemoteHostId=host.Id,RemoteDirectory="/work/two"}]};
             var preparer=new WorkspacePreparer();
@@ -956,12 +912,12 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             Assert(Store.Read<Receipt>(Store.ReceiptPath(item.Id)) is{Phase:"Finished",ExitCode:0}&&File.Exists(output),"literal title changed Terminal command parsing");await Ipc.SendAsync(new("status",Guid.NewGuid()));
         });
         await Test("Terminal two panes exact child cwd and arguments",TerminalPair);
-        await Test("Terminal eight panes (MaxConcurrentAgents cap) all become ready before any fixture exits",TerminalBatch);
+        await Test("Terminal six panes (MaxConcurrentAgents cap) all become ready before any fixture exits",TerminalBatch);
         await Test("ACC-S3B01 shared pool bills once, keeps kernel caps and launches on a root-pool-item chain",async()=>{
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
-            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId);
+            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId,AgentId:"codex");
             var items=new[]{Shared("pool-a",1),Shared("pool-b",2)};
             var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserved.Ok,reserved.Message);
             var ledger=LedgerMigration.Accept(Store.Read<Ledger>(Store.FilePath("control.json"))!);Assert(ledger.Pools.Count==1&&ledger.Pools[0].MemoryLimit==4*ResourcePolicy.GiB,"shared pool record missing");
@@ -998,7 +954,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
-            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId);
+            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId,AgentId:"codex");
             var items=new[]{Shared("member-a",1),Shared("member-b",2)};
             var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserved.Ok,reserved.Message);
             using var root=new Job(Store.RootJob,openOnly:true);
@@ -1041,7 +997,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
             var poolId=Guid.NewGuid();var batch=Guid.NewGuid();
-            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId);
+            LaunchItem Shared(string name,int position)=>new(Guid.NewGuid(),batch,position,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.GiB,"agent",PlanningBytes:ResourcePolicy.DefaultPlanningBytes,ResourceMode:"practical",PoolId:poolId,AgentId:"codex");
             var items=new[]{Shared("crash-a",1),Shared("crash-b",2)};
             var reserved=await Ipc.SendAsync(new("reserve",Guid.NewGuid(),items));Assert(reserved.Ok,reserved.Message);
             using var root=new Job(Store.RootJob,openOnly:true);
@@ -1083,8 +1039,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTR
         await Test("ACC-S3B04 the real preparation path assigns one shared pool and launches through reserve",async()=>{
             var settings=new ResourceSettings{Pool=ResourcePolicy.PoolShared,JobMemoryLimit=ResourcePolicy.GiB,PoolMemoryLimit=4*ResourcePolicy.GiB,PlanningBytes=ResourcePolicy.DefaultPlanningBytes};
             var config=new Configuration();config.Draft.Project=cwd;config.Draft.Resource=settings;Store.Save(Store.FilePath("configuration.json"),config);
-            var slotA=new Slot{Id=Guid.NewGuid(),Enabled=true,AgentId="custom",CustomName="pool-real-a",Directory=cwd,Profiles=new(){{"custom",new AgentProfile{Executable=Environment.ProcessPath!,Arguments=["--hold","2000"]}}}};
-            var slotB=new Slot{Id=Guid.NewGuid(),Enabled=true,AgentId="custom",CustomName="pool-real-b",Directory=cwd,Profiles=new(){{"custom",new AgentProfile{Executable=Environment.ProcessPath!,Arguments=["--hold","2000"]}}}};
+            var slotA=new Slot{Id=Guid.NewGuid(),Enabled=true,AgentId="codex",CustomName="pool-real-a",Directory=cwd,Profiles=new(){{"codex",new AgentProfile{Executable=Environment.ProcessPath!,Arguments=["--hold","2000"]}}}};
+            var slotB=new Slot{Id=Guid.NewGuid(),Enabled=true,AgentId="codex",CustomName="pool-real-b",Directory=cwd,Profiles=new(){{"codex",new AgentProfile{Executable=Environment.ProcessPath!,Arguments=["--hold","2000"]}}}};
             var draft=new Draft{SchemaVersion=2,Revision=config.Draft.Revision,Project=cwd,DirectoryMode="shared",Layout="vertical",Resource=settings.Copy(),Slots=[slotA,slotB]};
             var preparer=new WorkspacePreparer(config.WorktreeDirectory);
             var plans=(await Task.Run(()=>preparer.PrepareAsync(draft,_=>{},_=>Task.FromResult(true),CancellationToken.None))).ToArray();

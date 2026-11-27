@@ -170,13 +170,15 @@ public partial class MainWindow
         {
             if(running)return;
             var defaultDir=config.Draft.Slots.FirstOrDefault(s=>s.RemoteHostId==host.Id&&s.RemoteDirectory is {Length:>0})?.RemoteDirectory??"";
-            var defaultAgent=host.AvailableAgents.FirstOrDefault()??"pi";
+            var available=host.AvailableAgents.Where(Agents.IsSupported).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if(available.Length==0){MessageBox.Show(owner,"此远程主机没有配置受支持的 Agent（Omp、Codex、Claude Code）。",up?"升级 Agent":"检查版本",MessageBoxButton.OK,MessageBoxImage.Warning);return;}
+            var defaultAgent=available[0];
             var fields=new (string Key,string Label,string Value,bool Multiline)[]
             {
                 ("agent","Agent 类型",defaultAgent,false),
                 ("dir","远程工作目录（如 /home/agent/work）",defaultDir,false)
             };
-            var choices=new Dictionary<string,(string Value,string Label)[]>{["agent"]=[..host.AvailableAgents.Select(a=>(Value:a,Label:a))]};
+            var choices=new Dictionary<string,(string Value,string Label)[]>{["agent"]=[..available.Select(a=>(Value:a,Label:Agents.Get(a).Name))]};
             var caption=up?"升级 Agent":"检查版本";
             var dialog=new FormWindow(owner,caption,fields,up?"将通过免密 SSH 在远程主机上执行升级命令（默认命令可在主机编辑中覆盖）。":"将通过免密 SSH 在远程工作目录执行 --version。",choices:choices);
             if(dialog.ShowDialog()!=true)return;
@@ -225,15 +227,15 @@ public partial class MainWindow
         try{(helpOk,helpMessage)=await SshRemoteCommand.VerifyResumeFlagsAsync(host,slot.AgentId,dir,flags);}
         finally{ProgressText.Text="";}
         if(!helpOk){MessageBox.Show(this,helpMessage,"续接上次远程会话",MessageBoxButton.OK,MessageBoxImage.Warning);return;}
-        var dialog=new FormWindow(this,"续接上次远程会话",[("task","新任务说明（作为最后一个参数传给远程 Agent）","",true)],$"将在「{host.Name}」的 {dir} 续接上次会话：原参数中的 --no-session 替换为 {string.Join(" ",flags)}（无则追加），末尾旧任务说明替换为新说明。\n已通过远程 --help 核对续接参数；启动仍走既有远程预约与终端链路。");
-        if(dialog.ShowDialog()!=true)return;
-        string[] arguments;
-        try
+        var dialog=new FormWindow(this,"续接上次远程会话",[("task","新任务说明（作为最后一个参数传给远程 Agent）","",true)],$"将在「{host.Name}」的 {dir} 继续上次对话：使用 {string.Join(" ",flags)}，已存在的同一续接参数只保留一次，末尾旧任务说明替换为新说明。\n已通过远程 --help 核对续接参数；启动仍走既有远程预约与终端链路。");
+        string[] arguments=[];
+        dialog.ApplyAsync=form=>
         {
-            arguments=RemoteAgentMaintenance.ResumeArguments(previous.Plan.RemoteExecution!.Arguments,flags,dialog.Values["task"].Trim());
+            arguments=RemoteAgentMaintenance.ResumeArguments(previous.Plan.RemoteExecution!.Arguments,flags,form.Values["task"].Trim());
             (previous.Plan.RemoteExecution with{Arguments=arguments}).Validate();
-        }
-        catch(InvalidDataException e){MessageBox.Show(this,e.Message,"续接上次远程会话",MessageBoxButton.OK,MessageBoxImage.Warning);return;}
+            return Task.FromResult(true);
+        };
+        if(dialog.ShowDialog()!=true)return;
         await LaunchResumeCoreAsync(previous.Plan,arguments);
     }
 

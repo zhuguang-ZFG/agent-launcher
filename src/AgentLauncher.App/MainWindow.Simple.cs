@@ -51,7 +51,7 @@ public partial class MainWindow
         RefreshLaunchButton.IsEnabled = !checkingLaunch && !busy && !loading && !closeRequested;
         LongTaskNotice.Visibility = LongTaskResources.Suggested(config.Draft) ? Visibility.Visible : Visibility.Collapsed;
         LongTaskButton.IsEnabled = !busy && !readOnly && !loading && !closeRequested && !launchFinalizing && launchCancellation is null;
-        LongTaskText.Text = $"Omp / Qoder 当前上限 {config.Draft.Resource.JobMemoryLimit / (double)ResourcePolicy.GiB:0.#} GiB，触顶可能中断。扩容可增加余量，仍需限制并发。";
+        LongTaskText.Text = $"Omp 当前上限 {config.Draft.Resource.JobMemoryLimit / (double)ResourcePolicy.GiB:0.#} GiB，触顶可能中断。扩容可增加余量，仍需限制并发。";
         var toolProfile = config.Draft.Resource.JobMemoryLimit >= LongTaskResources.MemoryLimit;
         LaunchOptionsExpander.Header = toolProfile ? $"启动选项 · 上限 {config.Draft.Resource.JobMemoryLimit / (double)ResourcePolicy.GiB:0.#} GiB" : "启动选项 · 目录与分屏";
     }

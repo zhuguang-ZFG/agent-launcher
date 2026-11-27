@@ -10,12 +10,14 @@ internal static class SyncReliabilityIntegration
 {
     public static async Task<int> RunAsync()
     {
+        AgentLauncher.Tests.TestIsolation.Require();
         var testRoot = Environment.GetEnvironmentVariable("AGENT_LAUNCHER_TEST_ROOT") ?? "";
         if (!testRoot.Contains("AgentLauncher-tests-") || Directory.Exists(testRoot))
             throw new IOException("请使用全新隔离的 AgentLauncher-tests- 测试目录（AGENT_LAUNCHER_TEST_ROOT）。");
         if (Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE") != "1")
             throw new IOException("同步可靠性集成需要 AGENT_LAUNCHER_FAKE_SAMPLE=1（Worker 驱动用例）。");
         Directory.CreateDirectory(testRoot);
+        using var monitor = new FixtureMonitor(testRoot);
         var evidence = new List<object>();
         void Assert(bool ok, string why) { if (!ok) throw new Exception(why); }
         async Task Test(string name, Func<Task> action)
@@ -56,7 +58,7 @@ internal static class SyncReliabilityIntegration
             : [];
 
         RemoteExecutionSpec Remote(string host, string local, string remoteDir, WorkspaceSyncSpec sync, string[]? arguments = null) =>
-            new(host, 22, "root", "agent", "pi", remoteDir, arguments ?? [], null, null, sync);
+            new(host, 22, "root", "agent", "omp", remoteDir, arguments ?? [], null, null, sync);
         WorkspaceSyncSpec Spec(string name, string local, string remoteDir) =>
             new(WorkspaceSyncMode.Mutagen, local, remoteDir, name, null);
 
@@ -271,12 +273,12 @@ internal static class SyncReliabilityIntegration
                 var authorityConfig = new Configuration { SchemaVersion = 2 };
                 authorityConfig.Draft.SchemaVersion = 2; authorityConfig.Draft.Revision = 3;
                 authorityConfig.Draft.Project = cwd; authorityConfig.Draft.DirectoryMode = "isolated";
-                authorityConfig.Draft.Slots = [new Slot { Enabled = true, AgentId = "pi" }];
+                authorityConfig.Draft.Slots = [new Slot { Enabled = true, AgentId = "omp" }];
                 Store.Save(Store.FilePath("configuration.json"), authorityConfig);
-                var initial = await Ipc.EnsureMonitorAsync();
+                var initial = await monitor.EnsureAsync();
                 Assert(initial.Ok, "Monitor start failed: " + initial.Message);
                 var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "r42-flush", cwd, PhysicalDirectory.Workspace(cwd), false,
-                    new CommandSpec("pi", ["hold=2"], "remote"), 0,
+                    new CommandSpec("omp", ["hold=2"], "remote"), 0, AgentId: "omp",
                     // 远程工作目录必须是 Unix 路径且与 sync.RemotePath 一致（RemoteExecutionSpec.Validate）；
                     // 模拟器按会话名匹配场景链路，BetaPath 仍是本地夹具 jy，与该名义远程目录解耦。
                     RemoteExecution: Remote("jy.example.com", cwd, "/home/agent/work", Spec(jyName, cwd, "/home/agent/work"), ["hold=2"]));
@@ -310,6 +312,54 @@ internal static class SyncReliabilityIntegration
             {
                 foreach (var w in workerProcesses) { try { if (!w.HasExited) w.Kill(true); } catch { } w.Dispose(); }
                 Environment.SetEnvironmentVariable("PATH", originalPath);
+                WriteScenario(true, true);
+            }
+        });
+
+        await Test("R24 worker SSH 255 preserves sync without flush terminate or final evidence", async () =>
+        {
+            if (File.Exists(callLog)) File.Delete(callLog);
+            var fakeSshDir = AppContext.BaseDirectory;
+            Assert(File.Exists(Path.Combine(fakeSshDir, "ssh.exe")), "fake SSH missing");
+            var originalPath = Environment.GetEnvironmentVariable("PATH");
+            Process? worker = null;
+            try
+            {
+                var cwd = Path.Combine(Store.Root, "r24-sync-cwd"); Directory.CreateDirectory(cwd);
+                var authorityConfig = new Configuration { SchemaVersion = 2 };
+                authorityConfig.Draft.SchemaVersion = 2; authorityConfig.Draft.Revision = 3;
+                authorityConfig.Draft.Project = cwd; authorityConfig.Draft.DirectoryMode = "isolated";
+                authorityConfig.Draft.Slots = [new Slot { Enabled = true, AgentId = "omp" }];
+                Store.Save(Store.FilePath("configuration.json"), authorityConfig);
+                var initial = await monitor.EnsureAsync();
+                Assert(initial.Ok, "Monitor start failed: " + initial.Message);
+                var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "r24-disconnect-sync", cwd, PhysicalDirectory.Workspace(cwd), false,
+                    new CommandSpec("omp", ["disconnect"], "remote"), 0, AgentId: "omp",
+                    RemoteExecution: Remote("jy.example.com", cwd, "/home/agent/work", Spec(jyName, cwd, "/home/agent/work"), ["disconnect"]));
+                var policy = ResourcePolicy.SnapshotFor(new ResourceSettings(), 16 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB);
+                var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [plan], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([plan]), DraftRevision: 3));
+                Assert(reserved.Ok, "reserve failed: " + reserved.Message);
+                // Synchronization stays healthy while only the Agent SSH drops: a flush would succeed and wrongly terminate it.
+                WriteScenario(true, true, jyAlpha: cwd);
+                var start = new ProcessStartInfo(Store.WorkerPath) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+                start.ArgumentList.Add("pane"); start.ArgumentList.Add(plan.Id.ToString());
+                start.Environment["AGENT_LAUNCHER_TEST_ROOT"] = Store.Root;
+                start.Environment["PATH"] = fakeSshDir + Path.PathSeparator + originalPath;
+                start.Environment["AGENT_LAUNCHER_FAKE_SYNC"] = "1";
+                start.Environment["AGENT_LAUNCHER_FAKE_SYNC_SCENARIO"] = scenarioPath;
+                worker = Process.Start(start)!; worker.StandardInput.Close();
+                await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                var receipt = Store.Read<Receipt>(Store.ReceiptPath(plan.Id));
+                Assert(worker.ExitCode == 255 && receipt?.Phase == "Disconnected", "SSH 255 did not preserve Disconnected state");
+                Assert(File.Exists(Store.SyncSessionPath(plan.Id)), "Saved sync session identity was lost");
+                Assert(!File.Exists(Store.SyncFinalPath(plan.Id)), "Disconnect falsely recorded final synchronization evidence");
+                Assert(CallsFor(jyName).Contains("create") && !CallsFor(jyName).Contains("flush") && !CallsFor(jyName).Contains("terminate"), "Disconnect finalized or removed the still-live sync session");
+                var status = await Ipc.SendAsync(new("status", Guid.NewGuid()));
+                Assert(status.Entries?.Single(e => e.Plan.Id == plan.Id).State == "Disconnected", "Disconnected remote lost its retained ledger occupancy");
+            }
+            finally
+            {
+                if (worker is not null) { try { if (!worker.HasExited) worker.Kill(true); } catch { } worker.Dispose(); }
                 WriteScenario(true, true);
             }
         });
@@ -392,6 +442,50 @@ internal static class SyncReliabilityIntegration
         Console.WriteLine($"RESULT {evidence.Count} cases, {evidence.Count(e => e.GetType().GetProperty("passed")?.GetValue(e) is false)} failed. Artifacts: {testRoot}");
         File.WriteAllText(Path.Combine(testRoot, "sync-reliability-results.json"), JsonSerializer.Serialize(evidence));
         return evidence.Any(e => e.GetType().GetProperty("passed")?.GetValue(e) is false) ? 1 : 0;
+    }
+
+    // Own the exact process from startup, including failures before monitor-pid.json is written.
+    // A disconnected fake-SSH fixture intentionally keeps its ledger entry, so the production monitor cannot idle out.
+    private sealed class FixtureMonitor(string testRoot) : IDisposable
+    {
+        private Process? process;
+        private DateTime started;
+
+        public async Task<Response> EnsureAsync()
+        {
+            RequireRoot();
+            if (process is null)
+            {
+                var start = new ProcessStartInfo(Store.WorkerPath, "monitor") { UseShellExecute = false, CreateNoWindow = true };
+                start.Environment["AGENT_LAUNCHER_TEST_ROOT"] = testRoot;
+                process = Process.Start(start) ?? throw new IOException("Fixture monitor did not start.");
+                _ = process.Handle; // Keep the process identity pinned; a later PID reuse cannot become our cleanup target.
+                started = process.StartTime;
+            }
+            return await Ipc.SendAsync(new("status", Guid.NewGuid()));
+        }
+
+        public void Dispose()
+        {
+            if (process is null) return;
+            try
+            {
+                RequireRoot();
+                if (process.HasExited) return;
+                if (process.StartTime != started || !StringComparer.OrdinalIgnoreCase.Equals(process.MainModule?.FileName, Store.WorkerPath))
+                    throw new IOException("Fixture monitor identity changed; cleanup refused.");
+                process.Kill();
+                if (!process.WaitForExit(5000)) throw new IOException("Fixture monitor did not exit during cleanup.");
+            }
+            finally { process.Dispose(); }
+        }
+
+        private void RequireRoot()
+        {
+            AgentLauncher.Tests.TestIsolation.Require();
+            if (!StringComparer.OrdinalIgnoreCase.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(testRoot)), Path.TrimEndingDirectorySeparator(Store.Root)))
+                throw new IOException("Fixture monitor test root changed; process operation refused.");
+        }
     }
 }
 #endif

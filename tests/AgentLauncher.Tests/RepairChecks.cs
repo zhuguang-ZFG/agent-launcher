@@ -22,7 +22,7 @@ internal static class RepairChecks
         var failures=0;var results=new List<object>();
         void Assert(bool ok,string message){if(!ok)throw new Exception(message);}
         void Test(string name,Action action){try{action();Console.WriteLine("PASS "+name);results.Add(new{name,passed=true});}catch(Exception e){failures++;Console.WriteLine("FAIL "+name+": "+e.Message);results.Add(new{name,passed=false,error=e.ToString()});}}
-        LaunchItem Item(string name="repair")=>new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.AgentBudget,SourceSlotId:Guid.NewGuid());
+        LaunchItem Item(string name="repair")=>new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),true,new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.AgentBudget,SourceSlotId:Guid.NewGuid(),AgentId:"codex");
         IDisposable Monitor(Ledger? book=null)
         {
             var monitor=(IDisposable)Activator.CreateInstance(type,true)!;
@@ -326,7 +326,7 @@ internal static class RepairChecks
             var original=Item();var book=new TaskBook();
             if(evidence=="missing-ancestor")original=original with{RetryOf=Guid.NewGuid()};
             if(evidence=="cycle")original=original with{RetryOf=original.Id};
-            if(evidence=="task")original=original with{SourceSlotId=TaskBookOps.Create(book,"queued",cwd,"custom",new AgentProfile(),"",[],"shared",null,0).Id};
+            if(evidence=="task")original=original with{SourceSlotId=TaskBookOps.Create(book,"queued",cwd,"codex",new AgentProfile(),"",[],"shared",null,0).Id};
             if(evidence=="run")book.Attempts.Add(new(){TaskId=Guid.NewGuid(),TaskRevision=1,AttemptId=original.Id,BatchId=original.BatchId,State="Failed",WorkspaceKey=original.Workspace.Key,ProgramFingerprint=new string('A',64)});
             var ledger=new Ledger{BootId=Store.BootId(),Entries=[new(){Plan=original,Digest=Store.Digest(original),State="Revoked"}]};
             if(evidence is "claim" or "ancestor")ledger.TaskClaims.Add(new(Guid.NewGuid(),original.Id));
@@ -352,12 +352,12 @@ internal static class RepairChecks
         {
             var script=Path.Combine(cwd,"legacy-agent.js");File.WriteAllText(script,"legacy identity");
             var command=new CommandSpec(Environment.ProcessPath!,[script],"node-shim");
-            var book=new TaskBook();var task=TaskBookOps.Create(book,"legacy Node",cwd,"custom",new AgentProfile(),"",[],"shared",null,0);
+            var book=new TaskBook();var task=TaskBookOps.Create(book,"legacy Node",cwd,"codex",new AgentProfile(),"",[],"shared",null,0);
             var queued=TaskBookOps.Enqueue(book,task.Id,command,AgentProbe.Fingerprint(command.Executable));
             var taskPath=Store.FilePath("tasks.json");Store.Save(taskPath,book);var taskBytes=File.ReadAllBytes(taskPath);
             try
             {
-                using var monitor=Monitor();var plan=Item() with{SourceSlotId=task.Id,AgentId="custom",Command=command};var sample=Get<MemorySnapshot>(monitor,"sample");
+                using var monitor=Monitor();var plan=Item() with{SourceSlotId=task.Id,AgentId="codex",Command=command};var sample=Get<MemorySnapshot>(monitor,"sample");
                 var policy=ResourcePolicy.SnapshotFor(queued.Resource,sample.Total,sample.CommitLimit);var refused=false;
                 try{Call(monitor,"Handle",new Request("reserve-task",Guid.NewGuid(),[plan],Policy:policy,PolicyHash:ResourcePolicy.PolicyHash(policy),PlanDigest:ResourcePolicy.PlanDigest([plan]),TaskEntryId:queued.Id));}catch(IOException){refused=true;}
                 Assert(refused,"legacy runtime-only identity still authorized Node task");
@@ -370,7 +370,7 @@ internal static class RepairChecks
         {
             var script=Path.Combine(cwd,"upgrade-"+phase+".js");File.WriteAllText(script,"before");
             var command=new CommandSpec(Environment.ProcessPath!,[script],"node-shim");var book=new TaskBook();
-            var task=TaskBookOps.Create(book,"Node activation",cwd,"custom",new AgentProfile(),"",[],"shared",null,0);
+            var task=TaskBookOps.Create(book,"Node activation",cwd,"codex",new AgentProfile(),"",[],"shared",null,0);
             var queued=TaskBookOps.Enqueue(book,task.Id,command,AgentProbe.Fingerprint(command));
             var plan=Item() with{Command=command,SourceSlotId=task.Id};
             var entry=new ControlEntry{Plan=plan,Digest=Store.Digest(plan),State=phase=="begin"?"Pending":"Creating"};
@@ -394,8 +394,8 @@ internal static class RepairChecks
             var taskPath=Store.FilePath("tasks.json");
             foreach(var phase in new[]{"reserve-task","begin"})
             {
-                var book=new TaskBook();var task=TaskBookOps.Create(book,"deferred",cwd,"custom",new AgentProfile(),"",[],"shared",null,0);
-                var plan=Item() with{SourceSlotId=task.Id,AgentId="custom"};
+                var book=new TaskBook();var task=TaskBookOps.Create(book,"deferred",cwd,"codex",new AgentProfile(),"",[],"shared",null,0);
+                var plan=Item() with{SourceSlotId=task.Id,AgentId="codex"};
                 var queued=TaskBookOps.Enqueue(book,task.Id,plan.Command,AgentProbe.Fingerprint(plan.Command));
                 TaskBookOps.SetDeferred(book,queued.Id,true);Store.Save(taskPath,book);var taskBytes=File.ReadAllBytes(taskPath);
                 var entry=new ControlEntry{Plan=plan,Digest=Store.Digest(plan),State="Pending"};

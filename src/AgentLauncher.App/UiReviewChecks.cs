@@ -14,7 +14,7 @@ public partial class MainWindow
     private static ControlEntry ReviewEntry(string name,string state="Pending")
     {
         var path=Path.Combine(Store.Root,name);
-        return new ControlEntry{Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,name,path,new WorkspaceIdentity(path,"review"),false,new CommandSpec(Path.Combine(Environment.SystemDirectory,"cmd.exe"),[],"exe"),ResourcePolicy.AgentBudget),State=state,Detail=name};
+        return new ControlEntry{Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,name,path,new WorkspaceIdentity(path,"review"),false,new CommandSpec(Path.Combine(Environment.SystemDirectory,"cmd.exe"),[],"exe"),ResourcePolicy.AgentBudget,AgentId:"codex"),State=state,Detail=name};
     }
     private static IEnumerable<T> ReviewFind<T>(DependencyObject root)where T:DependencyObject
     {
@@ -36,7 +36,7 @@ public partial class MainWindow
     {
         // CR08: a failed save keeps the latest draft and an explicit retry must persist it after the lock is gone.
         config=new Configuration();config.Draft.Project=Store.Root;config.Draft.Slots.ForEach(s=>s.Enabled=false);
-        config.Draft.Slots[0].Enabled=true;config.Draft.Slots[0].Profiles["pi"]=new(){Executable=Commands.FindExe("node.exe")??Path.Combine(Environment.SystemDirectory,"cmd.exe")};
+        config.Draft.Slots[0].Enabled=true;config.Draft.Slots[0].Profiles["omp"]=new(){Executable=Path.Combine(Environment.SystemDirectory,"cmd.exe")};
         Render();await CheckCommandsAsync();await saveTask;
         using(var hold=new FileStream(configPath,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None))
         {
@@ -51,7 +51,7 @@ public partial class MainWindow
 
         // CR07: effective directories are checked before launch; stale results and uncommitted text cannot turn the gate green.
         config=new Configuration();config.Draft.Project=Store.Root;config.Draft.Slots.ForEach(s=>s.Enabled=false);
-        config.Draft.Slots[0].Enabled=true;config.Draft.Slots[0].Profiles["pi"]=new(){Executable=Commands.FindExe("node.exe")??Path.Combine(Environment.SystemDirectory,"cmd.exe")};
+        config.Draft.Slots[0].Enabled=true;config.Draft.Slots[0].Profiles["omp"]=new(){Executable=Path.Combine(Environment.SystemDirectory,"cmd.exe")};
         Render();await CheckCommandsAsync();
         Check("CR07 valid directory passes preflight",validationError.Length==0);
         var missingDirectory=Path.Combine(Store.Root,"review-missing-"+Guid.NewGuid().ToString("N"));
@@ -172,7 +172,7 @@ public partial class MainWindow
         // CR03: stop revokes the frozen batch through the monitor and late begin is denied; session revoke stays usable while busy.
         ReviewKillMonitor();Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE","1");await RefreshAsync();
         var node=Commands.FindExe("node.exe")!;
-        var cancelItem=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"cr03-cancel",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new CommandSpec(node,["-e","setTimeout(()=>{},4000)"],"exe"),ResourcePolicy.AgentBudget);
+        var cancelItem=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"cr03-cancel",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new CommandSpec(node,["-e","setTimeout(()=>{},4000)"],"exe"),ResourcePolicy.AgentBudget,AgentId:"codex");
         var cancelReserve=await Ipc.ReserveWithCleanupAsync([cancelItem]);
         Check("CR03 cancel reservation admitted ("+cancelReserve.Message+")",cancelReserve.Ok);
         submittedAttempts=[cancelItem.Id];submittedRevision=config.Draft.Revision;launchCancellation=new();

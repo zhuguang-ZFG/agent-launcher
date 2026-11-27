@@ -9,21 +9,22 @@ internal static class RemoteHostEditorChecks
     {
         test("H1 remote host form rejects blank name and address", () =>
         {
-            assert(RemoteHostEditor.Validate("", "10.0.0.1", "22", "pi") == "名称不能为空。", "blank name accepted");
-            assert(RemoteHostEditor.Validate("VPS", "   ", "22", "pi") == "地址不能为空。", "blank address accepted");
+            assert(RemoteHostEditor.Validate("", "10.0.0.1", "22", "omp") == "名称不能为空。", "blank name accepted");
+            assert(RemoteHostEditor.Validate("VPS", "   ", "22", "omp") == "地址不能为空。", "blank address accepted");
         });
 
         test("H2 remote host form rejects out-of-range port and empty agent list", () =>
         {
             foreach (var port in new[] { "0", "65536", "abc", "-1", "" })
-                assert(RemoteHostEditor.Validate("VPS", "10.0.0.1", port, "pi") == "端口必须是 1-65535 的数字。", "bad port accepted: " + port);
+                assert(RemoteHostEditor.Validate("VPS", "10.0.0.1", port, "omp") == "端口必须是 1-65535 的数字。", "bad port accepted: " + port);
             assert(RemoteHostEditor.Validate("VPS", "10.0.0.1", "22", " , , ") == "至少指定一个可用 agent 类型。", "empty agent list accepted");
         });
 
         test("H3 remote host form trims values and accepts port boundaries", () =>
         {
-            assert(RemoteHostEditor.Validate(" VPS ", " 10.0.0.1 ", "65535", "pi, kimi ,, qoder ") is null, "valid form rejected");
-            assert(RemoteHostEditor.ParseAgents("pi, kimi ,, qoder ").SequenceEqual(new[] { "pi", "kimi", "qoder" }), "agent parsing lost entries");
+            assert(RemoteHostEditor.Validate(" VPS ", " 10.0.0.1 ", "65535", "omp, codex, , claude ") is null, "valid form rejected");
+            assert(RemoteHostEditor.ParseAgents("omp, codex, , claude ").SequenceEqual(new[] { "omp", "codex", "claude" }), "agent parsing lost entries");
+            assert(RemoteHostEditor.Validate("VPS", "10.0.0.1", "22", "pi") == "可用 Agent 中含有不支持的类型。", "retired Agent accepted");
         });
 
         test("H4 sync mode round trips all values and preserves fallback on unknown text", () =>
@@ -37,7 +38,7 @@ internal static class RemoteHostEditorChecks
         test("H5 duplicate detection matches name or address and excludes the edited host", () =>
         {
             var id = Guid.NewGuid();
-            var hosts = new[] { new RemoteHost(id, "示例 VPS A", "203.0.113.10", 22, "root", "agent", ["pi"], null) };
+            var hosts = new[] { new RemoteHost(id, "示例 VPS A", "203.0.113.10", 22, "root", "agent", ["omp"], null) };
             assert(RemoteHostEditor.Duplicate(hosts, "示例 VPS A", "10.0.0.2") is not null, "duplicate name accepted");
             assert(RemoteHostEditor.Duplicate(hosts, "Other", "203.0.113.10") is not null, "duplicate address accepted");
             assert(RemoteHostEditor.Duplicate(hosts, "示例 VPS A", "203.0.113.10", id) is null, "editing host flagged as its own duplicate");

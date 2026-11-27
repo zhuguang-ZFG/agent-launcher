@@ -24,7 +24,7 @@ public partial class MainWindow
     {
         var directories = searchDirs ?? Commands.InstallSearchDirs();
         var installs = await Task.Run(() => Agents.All
-            .Where(agent => agent.Id != "custom" && agent.Command.Length > 0)
+            .Where(agent => agent.Command.Length > 0)
             .ToDictionary(agent => agent.Id, agent => Commands.DiscoverInstalls(agent.Command, directories).ToArray()));
         discoveredInstalls = installs;
         RefreshAgentChoices();
@@ -53,7 +53,7 @@ public partial class MainWindow
             .ToArray();
         var targets = new List<(Guid? SlotId, string AgentId)>();
 
-        // 先复用“已经写着这个 Agent”的空白默认槽位（例如默认配置里的 codex/hermes），
+        // 先复用“已经写着这个 Agent”的空白默认槽位（例如默认配置里的 codex/claude），
         // 否则后续 Agent 可能抢占这些槽位，造成同一 Agent 出现两份配置。
         foreach (var agentId in ranked)
         {
@@ -173,11 +173,15 @@ public partial class MainWindow
         if (!CanEditSlot(id)) return;
         var revision = config.Draft.Revision;
         var dialog = CreateSlotNameDialog(config.Draft.Slots.Single(s => s.Id == id));
-        if (dialog.ShowDialog() == true)
+        dialog.ApplyAsync = async form =>
         {
-            try { ApplySlotName(id, dialog.Values["name"], revision); }
-            catch (Exception ex) when (ex is not OutOfMemoryException) { ErrorText.Text = ex.Message; }
-        }
+            var original = config.Draft.Copy(); var manuallyEdited = config.ManuallyEdited; var originalPresetEdits = presetEditedSlots.ToHashSet();
+            if (!ApplySlotName(id, form.Values["name"], revision)) throw new InvalidOperationException(ErrorText.Text.Length > 0 ? ErrorText.Text : "当前配置不可编辑。");
+            revision = config.Draft.Revision;
+            await SaveFormConfigurationAsync(() => { RestoreDraftAfterFailedForm(original, manuallyEdited, originalPresetEdits); revision = config.Draft.Revision; });
+            return true;
+        };
+        dialog.ShowDialog();
     }
 
     private bool ApplySlotName(Guid id, string name, long revision)
@@ -191,9 +195,9 @@ public partial class MainWindow
     {
         var toggle = new CheckBox
         {
-            IsChecked = slot.Enabled, IsEnabled = CanEditSlots, Tag = slot.Id,
+            IsChecked = slot.Enabled, IsEnabled = CanEditSlots && Agents.IsSupported(slot.AgentId), Tag = slot.Id,
             VerticalAlignment = VerticalAlignment.Center, MinHeight = 36,
-            ToolTip = $"{position:00} · {slot.DisplayName} · {Agents.Get(slot.AgentId).Name}\n勾选加入本次启动；取消勾选不结束已运行的会话"
+            ToolTip = $"{position:00} · {slot.DisplayName} · {Agents.Get(slot.AgentId).Name}\n"+(Agents.IsSupported(slot.AgentId)?"勾选加入本次启动；取消勾选不结束已运行的会话":"此 Agent 类型已移除，不能启动；请先改选 Omp、Codex 或 Claude Code。")
         };
         AutomationProperties.SetName(toggle, $"第 {position} 项{(inRail ? "侧栏" : "")}本次启动");
         // UIA TogglePattern raises Checked/Unchecked without Click. Both controls share the same guarded transaction.

@@ -59,7 +59,7 @@ public static class RemoteHostEditor
             var trimmed=line.Trim();
             if(trimmed.Length==0)continue;
             var separator=trimmed.IndexOf('=');
-            if(separator<=0||separator==trimmed.Length-1){error="升级命令覆盖格式应为 agent=命令，每行一条（如 pi=npm install -g …）。";return null;}
+            if(separator<=0||separator==trimmed.Length-1){error="升级命令覆盖格式应为 agent=命令，每行一条（如 omp=npm install -g …）。";return null;}
             var key=trimmed[..separator].Trim();var value=trimmed[(separator+1)..].Trim();
             if(key.Length==0||value.Length==0){error="升级命令覆盖的 agent 名和命令都不能为空。";return null;}
             map[key]=value;

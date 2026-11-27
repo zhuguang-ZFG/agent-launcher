@@ -12,7 +12,6 @@ internal static class Program
     {
         try
         {
-            if(args is ["qoder-memory-hook"])return QoderMemoryHook.RunAsync(Console.OpenStandardInput(),Console.Out,Environment.GetEnvironmentVariable(OmpMemoryGuard.PipeEnvironment)).GetAwaiter().GetResult();
             if(args is ["terminal-host",var hostId,var mode] && Guid.TryParse(hostId,out var hosted) && mode is "start" or "reattach")
                 return new EmbeddedTerminalHost().Run(hosted,mode=="reattach");
             if(args is ["embedded-pane",var paneId] && Guid.TryParse(paneId,out var embedded))return RunPane(embedded,true,false);
@@ -151,7 +150,7 @@ internal static class Program
         // Queue only the spawn transaction; release it as soon as Started is durable, so Agents still run in parallel.
         using var startup=new Mutex(false,Store.RootJob+"-startup");var startupOwned=false;
         ProtectedProcess? child=null;SshRunnerBackend? sshChild=null;Job? root=null;Job? pool=null;Job? job=null;JobMemoryWatch? memoryWatch=null;var resumeIntent=false;var claimCreated=false;int? memoryOffender=null;
-        LaunchItem? plan=null;string? remoteHost=null;bool qoderGuard=false;  // 提升到函数级作用域（wait try 块需要访问 RemoteExecution）
+        LaunchItem? plan=null;string? remoteHost=null;
         OmpMemoryGuard? toolGuard=null;Admission? observedToolDecision=null;var observedHandshake=false;
         JobMemoryEvidence? exitMemory=null;int? poolOffender=null;Guid? panePoolId=null;DateTimeOffset? poolNoticeAt=null;string poolNoticeDetail="";string? memoryNotificationError=null;var poolCheck=Stopwatch.StartNew();
         // Limit recovery: kernel notices fire once per crossing episode (measured: six refusals, one notice),
@@ -172,6 +171,7 @@ internal static class Program
             var grant=Ipc.SendAsync(new("begin",Guid.NewGuid(),Attempt:id)).GetAwaiter().GetResult();
             if(!grant.Ok||grant.Entries is not {Length:1})throw new IOException(grant.Message);
             var entry=grant.Entries[0];plan=entry.Plan;remoteHost=plan.RemoteExecution?.Host;
+            if(plan.Kind!="git"&&!Agents.IsSupported(plan.AgentId))throw new IOException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
             
             // 远程执行：不创建本地 Job/custody（远程进程不受本地资源限制，用 SSH PID/创建时间核验存活）
             if(plan.RemoteExecution is null)
@@ -206,9 +206,7 @@ internal static class Program
             if(plan.RemoteExecution is null)
             {
                 if(job is null)throw new InvalidOperationException("本地执行需要 job（逻辑错误）");
-                qoderGuard=QoderMemoryGuard.IsAttached(plan.Command);
-                if(qoderGuard)QoderMemoryGuard.Prepare();
-                if(OmpMemoryGuard.IsAttached(plan.Command)||qoderGuard)
+                if(OmpMemoryGuard.IsAttached(plan.Command))
                 {
                     toolGuard=new OmpMemoryGuard(job,pool,entry.PhysicalFloor??2*ResourcePolicy.GiB,entry.CommitFloor??2*ResourcePolicy.GiB);
                     guardEnvironment=new(){[OmpMemoryGuard.PipeEnvironment]=toolGuard.PipeName};
@@ -285,7 +283,7 @@ internal static class Program
             // Fail open: an unconfirmed extension load weakens only the pre-limit, never the Job hard caps.
             handshakeWaitBegin=DateTimeOffset.UtcNow;
             if(toolGuard is not null&&!toolGuard.WaitForHandshake(TimeSpan.FromSeconds(3)))
-                startedDetail+=$"；{(qoderGuard?"Qoder":"Omp")} 内存保护未确认加载：工具可能不受提前限流（硬上限仍生效），请核对版本与插件加载提示";
+                startedDetail+="；Omp 内存保护未确认加载：工具可能不受提前限流（硬上限仍生效），请核对版本与插件加载提示";
             Write("Started",(child?.Process??sshChild!.Process).Id,(child?.CreationTime??sshChild!.CreationTime),null,startedDetail);
         }
         catch(Exception error)when(error is not OutOfMemoryException)
@@ -308,29 +306,30 @@ internal static class Program
             sshChild?.WaitForConsoleInput();
             if(pool!=null)try{Ipc.SendAsync(new("status",Guid.NewGuid())).GetAwaiter().GetResult();}catch(Exception e)when(e is IOException or OperationCanceledException or TimeoutException){poolNoticeDetail="共享池通知尚未核对；退出码不能单独证明内存超限。";}
             if(child is not null)ObserveMemory(forcePool:true);var exit=process.ExitCode;
-            // 工作区同步收敛（硬性要求：远程 agent 的改动必须落回本机）。先于 Exited/Finished 回执 flush，
-            // 成功则终止会话；失败/超时保留会话并把原因写入回执，不假装已收敛。覆盖正常退出与 255 断连两条路径。
+            // SSH 255 只证明连接丢失。远端可能继续写文件，不能 flush/terminate 或生成终态同步证据。
+            if(sshChild is not null&&sshChild.IsSshConnectionError)
+            {
+                var preserved=sshChild.SyncSession is not null?" 工作区文件连接已保留，未执行结束 flush 或停止同步。":"";
+                sshChild.SyncSession=null;
+                var disconnected=$"SSH 连接断开（{remoteHost}，退出码 255，不受本地资源限制）：远程进程状态未确认，占用保留。"+preserved;
+                Write("Disconnected",process.Id,sshChild.CreationTime,255,disconnected);
+                if(interactive)Console.WriteLine("\n"+disconnected+"\n请检查网络连接和远程主机状态。");
+                return 255;
+            }
+            // 远程退出已确认后才执行结束 flush/卸载。失败保留会话，不假装已同步。
             var syncNote="";
             if(sshChild?.SyncSession is {} syncToFlush)
             {
                 string? flushError;
                 try{flushError=syncToFlush.TryDisposeAsync().GetAwaiter().GetResult();}
-                catch(Exception ex){flushError="工作区同步结束失败："+ex.Message;}
+                catch(Exception ex)when(ex is not OutOfMemoryException){flushError="工作区同步结束失败："+ex.Message;}
                 sshChild.SyncSession=null;  // 已处置，避免 Dispose 重复 flush
-                syncNote=flushError is null?" 已同步只表示该次结束时的 flush。":" "+flushError;
+                var mutagen=plan?.RemoteExecution?.WorkspaceSync?.Mode==WorkspaceSyncMode.Mutagen;
+                syncNote=flushError is not null?" "+flushError:mutagen?" 已同步只表示该次结束时的 flush。":" SSHFS 挂载已关闭；未上传或回写所选本地项目，也未执行 Mutagen flush。";
                 // A1 终态证据：会话即将终止，App 之后找不到活会话；徽章回退该记录（synced/problem），不再误报「未同步」。
-                TryWriteSyncEvidence(Store.SyncFinalPath(id),new SyncFinalRecord(1,flushError is null?SyncFinalRecord.Synced:SyncFinalRecord.Problem,flushError??"Mutagen flush 成功，会话已终止。已同步只表示该次结束时的 flush。",DateTimeOffset.UtcNow));
+                if(mutagen)TryWriteSyncEvidence(Store.SyncFinalPath(id),new SyncFinalRecord(1,flushError is null?SyncFinalRecord.Synced:SyncFinalRecord.Problem,flushError??"Mutagen flush 成功，会话已终止。已同步只表示该次结束时的 flush。",DateTimeOffset.UtcNow));
             }
             exitMemory=child is not null?MemoryEvidence():null;var detail=ExitDiagnostics.Describe(exit,exitMemory)+syncNote;
-            
-            // SSH 连接错误（255）写 Disconnected，不是 Exited/Finished
-            if(sshChild is not null&&sshChild.IsSshConnectionError)
-            {
-                detail=$"SSH 连接断开（{remoteHost}，退出码 255，不受本地资源限制）：网络错误或主机不可达";
-                Write("Disconnected",process.Id,sshChild.CreationTime,255,detail);
-                if(interactive)Console.WriteLine("\nSSH 连接断开。"+detail+"\n请检查网络连接和远程主机状态。");
-                return 255;
-            }
             
             if(sshChild is not null)detail=$"SSH 远程会话（{remoteHost}，不受本地资源限制）："+detail;
             if(pool is not null)detail+="共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail;
@@ -354,7 +353,7 @@ internal static class Program
                 }
                 if(reapedGit&&job.Members().Length>0)throw new IOException("Git 准备结束后仍有受管进程，已停止等待。");
             }
-            if(child is not null)ObserveMemory(forcePool:true);exitMemory=child is not null?MemoryEvidence():null;detail=ExitDiagnostics.Describe(exit,exitMemory)+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail)+(memoryRecovered?"当前已回落：提交低于上限 85%（历史触及不撤销）。":"")+(reapedGit?"Git 准备留下的后台进程已结束，不再等待。":"");
+            if(child is not null)ObserveMemory(forcePool:true);exitMemory=child is not null?MemoryEvidence():null;detail=ExitDiagnostics.Describe(exit,exitMemory)+syncNote+(pool is null?"":"共享资源池："+ExitDiagnostics.MemoryText(PoolEvidence(),sharedPool:true)+poolNoticeDetail)+(memoryRecovered?"当前已回落：提交低于上限 85%（历史触及不撤销）。":"")+(reapedGit?"Git 准备留下的后台进程已结束，不再等待。":"");
             if(sshChild is not null)detail=$"SSH 远程会话（{remoteHost}，不受本地资源限制）："+detail;
             Write("Finished",process.Id,(child?.CreationTime??sshChild!.CreationTime),exit,"全部受管进程已退出。"+detail);
 #if !INTEGRATION_TESTS
@@ -463,6 +462,7 @@ internal static class Program
             if(!grant.Ok||grant.Entries is not {Length:1})throw new IOException(grant.Message);
             using(var file=new FileStream(claim,FileMode.CreateNew,FileAccess.Write,FileShare.Read)){claimed=true;file.WriteByte(1);file.Flush(true);}
             var plan=grant.Entries[0].Plan;var remote=plan.RemoteExecution??throw new IOException("该条目不是远程执行，不能重新挂接。");
+            if(!Agents.IsSupported(plan.AgentId))throw new IOException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
             if(RemoteReattach.RestoresSync(remote.WorkspaceSync?.Mode)&&remote.WorkspaceSync is {} syncSpec)
             {
                 SyncFinalRecord? final=null;SyncSessionRecord? saved=null;
@@ -471,15 +471,15 @@ internal static class Program
                 if(saved is not null&&final is not {State:SyncFinalRecord.Synced})syncSpec=syncSpec with{MutagenSessionName=saved.Name};
                 else if(final is {State:SyncFinalRecord.Synced})syncSpec=syncSpec with{MutagenSessionName=null};
                 using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                sync=WorkspaceSync.StartAsync(syncSpec,remote,timeout.Token).GetAwaiter().GetResult();
+                sync=WorkspaceSync.RestoreAsync(syncSpec,remote,timeout.Token).GetAwaiter().GetResult();
                 if(sync.SessionName is {} syncSessionName)TryWriteSyncEvidence(Store.SyncSessionPath(id),new SyncSessionRecord(1,syncSessionName,syncSpec.LocalPath,syncSpec.RemotePath,DateTimeOffset.UtcNow));
                 sync.WaitReadyAsync(timeout.Token).GetAwaiter().GetResult();
                 try{if(File.Exists(Store.SyncFinalPath(id)))File.Delete(Store.SyncFinalPath(id));}catch(Exception ex)when(ex is IOException or UnauthorizedAccessException){}
             }
             ssh=SshRunnerBackend.CreateAttachment(remote,id);
             ssh.Start(keepStandardInput:true);
-            var syncNote=RemoteReattach.RestoresSync(remote.WorkspaceSync?.Mode)?"并重新建立双向同步":"未启用同步，不视为已同步";
-            WriteReceipt(id,"Started",ssh.Process.Id,ssh.CreationTime,null,$"已重新挂接本地 SSH（{remote.Host} 的 {remote.RemoteWorkingDirectory}，{syncNote}）。未新启动 Agent，未释放占用。");
+            var syncNote=remote.WorkspaceSync?.Mode switch{WorkspaceSyncMode.Mutagen=>"已恢复或复用 Mutagen 同步",WorkspaceSyncMode.SshfsMount=>"仅恢复 SSHFS 远程目录挂载，未上传本地项目",_=>"未启用文件同步"};
+            WriteReceipt(id,"Started",ssh.Process.Id,ssh.CreationTime,null,$"已打开远程工作 Shell（{remote.Host} 的 {remote.RemoteWorkingDirectory}，{syncNote}）。未恢复原 Agent 的终端或对话，输入会作为 Shell 命令执行；占用保留。");
             started=true;
         }
         catch(Exception error)when(error is not OutOfMemoryException)
@@ -497,8 +497,8 @@ internal static class Program
             ssh.WaitForConsoleInput();
             var exit=ssh.ExitCode;
             var detail=exit==255
-                ?$"重新挂接的本地 SSH 再次断开（{ssh.Spec.Host}，退出码 255）。远程进程可能仍在，占用保留。"
-                :$"重新挂接的本地 SSH 已结束（退出码 {exit}）。这不证明远程进程已退出，也不释放占用。若进程已不在，请使用「核对并确认释放」。";
+                ?$"远程工作 Shell 的 SSH 再次断开（{ssh.Spec.Host}，退出码 255）。远程进程可能仍在，同步与占用保留。"
+                :$"远程工作 Shell 已结束（退出码 {exit}）。这不证明原 Agent 已退出，同步与占用保留。若进程已不在，请使用「核对并确认释放」。";
             WriteReceipt(id,"Disconnected",ssh.Process.Id,ssh.CreationTime,exit,detail);
             Console.WriteLine("\n"+detail);
             return exit==0?0:exit;
@@ -1055,8 +1055,9 @@ internal sealed class Monitor : IDisposable
         if(request.Operation=="begin")
         {
             if(entry.State!="Pending")throw new IOException("授权已撤销或被领取，不能重复启动。");
-            // A ledger written before the 8-pane cap can still hold more Pending agent entries. Refuse the grant without
+            // A ledger written before the six-pane cap can still hold more Pending agent entries. Refuse the grant without
             // consuming it so every extra entry stays revocable; Git preparation is not an Agent pane and is not counted.
+            if(entry.Plan.Kind!="git"&&!Agents.IsSupported(entry.Plan.AgentId))throw new IOException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
             if(ledger.Entries.Count(e=>!Store.IsTerminal(e)&&(e.Plan.Kind is null or "agent"))>ResourcePolicy.MaxConcurrentAgents)throw new IOException($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个；请先结束或撤销部分 Agent 后再启动。");
             if(UnrepresentableReason(ledger.Entries.Where(e=>!Store.IsTerminal(e)&&!Ipc.EntryRepresentable(e)).ToArray()) is {} reason)throw new IOException(reason);
             if(blocked!=null)throw new IOException(blocked);
@@ -1253,12 +1254,12 @@ internal sealed class Monitor : IDisposable
             if(File.Exists(claim))File.Move(claim,claim+".before-reattach",overwrite:true);
             Store.Save(Store.OperatorReattachPath(entry.Plan.Id),new OperatorReattachRecord(1,entry.Plan.Id,remote.Host,remote.RemoteWorkingDirectory,syncMode,session,"ALIVE",true,DateTimeOffset.UtcNow,entry.Digest));
             var previousState=entry.State;var previousDetail=entry.Detail;
-            entry.State="Reattaching";entry.Detail=$"操作员已确认重新挂接：{remote.Host} 的 {remote.RemoteWorkingDirectory}；远程进程仍在。等待本地 SSH 窗格挂上。此操作不释放占用。";
+            entry.State="Reattaching";entry.Detail=$"已确认打开远程工作 Shell：{remote.Host} 的 {remote.RemoteWorkingDirectory}；远程进程仍在。等待新 Shell 打开，未恢复原 Agent 终端，占用保留。";
             try{Save();}catch{entry.State=previousState;entry.Detail=previousDetail;throw;}
         }
         catch(Exception ex)when(ex is not OutOfMemoryException){return new(false,"重新挂接未能写入，账本保持原样："+ex.Message,[entry],sample,epoch);}
         finally{gate.ReleaseMutex();}
-        return new(true,"已授权重新挂接：远程进程仍在，占用未释放。请打开本地 SSH 窗格；此操作不会把条目标为已结束。",[entry],sample,epoch);
+        return new(true,"已授权打开远程工作 Shell：远程进程仍在，占用保留。未恢复原 Agent 终端或对话，也未把条目标为已结束。",[entry],sample,epoch);
     }
     private Response ReattachBegin(ControlEntry entry)
     {
@@ -1518,6 +1519,7 @@ internal sealed class Monitor : IDisposable
         var book=new TaskStore(Store.FilePath("tasks.json")).Load();
         var queued=book.Queue.SingleOrDefault(entry=>entry.Id==entryId)??throw new IOException("队列项已移除或执行，拒绝重复预约。");
         if(queued.Deferred)throw new IOException("排队项已暂缓，请先明确恢复排队。");
+        if(!Agents.IsSupported(queued.AgentId))throw new IOException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
         var task=book.Tasks.Single(entry=>entry.Id==queued.TaskId);
         // A pre-claim ledger cannot prove which queue entry owns a still-unrecorded task reservation. Never infer a new authorization.
         if(ledger.Entries.Any(entry=>entry.Plan.SourceSlotId==task.Id

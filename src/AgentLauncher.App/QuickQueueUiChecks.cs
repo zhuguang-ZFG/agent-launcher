@@ -26,9 +26,9 @@ public partial class MainWindow
         config = new Configuration
         {
             Draft = new Draft { Project = project, DirectoryMode = "shared", Resource = resource, Slots =
-            [new Slot { Enabled = true, AgentId = "custom", Note = "原始说明", Profiles = new() { ["custom"] = new() { Executable = node, Arguments = args } } },
-             new Slot { Enabled = false, AgentId = "custom" },
-             new Slot { Enabled = true, AgentId = "custom", Directory = project, Profiles = new() { ["custom"] = new() { Executable = node, Arguments = args } } }] }
+            [new Slot { Enabled = true, AgentId = "codex", Note = "原始说明", Profiles = new() { ["codex"] = new() { Executable = node, Arguments = args } } },
+             new Slot { Enabled = false, AgentId = "codex" },
+             new Slot { Enabled = true, AgentId = "codex", Directory = project, Profiles = new() { ["codex"] = new() { Executable = node, Arguments = args } } }] }
         };
         queueEnabled = false;
         taskTimer.Stop();
@@ -40,9 +40,9 @@ public partial class MainWindow
         {
             await LoadTasksAsync();
             var localSlot=config.Draft.Slots[0];
-            var host=new RemoteHost(Guid.NewGuid(),"测试 VPS","fake.example",22,"root","agent",["qodercli"],null);
+            var host=new RemoteHost(Guid.NewGuid(),"测试 VPS","fake.example",22,"root","agent",["omp"],null);
             config.RemoteHosts.Add(host);
-            var remoteSlot=new Slot{Enabled=true,AgentId="qoder",RemoteHostId=host.Id,RemoteDirectory="~/work/test",Profiles=new(){["qoder"]=new(){Executable=Path.Combine(project,"missing.exe")}}};
+            var remoteSlot=new Slot{Enabled=true,AgentId="omp",RemoteHostId=host.Id,RemoteDirectory="~/work/test",Profiles=new(){["omp"]=new(){Executable=Path.Combine(project,"missing.exe")}}};
             config.Draft.Slots[0]=remoteSlot;
             Render();
             await CheckFreshCommandsAsync();
@@ -158,9 +158,9 @@ public partial class MainWindow
             var arguments = new[] { "-e", $"require('node:fs').writeFileSync({JsonSerializer.Serialize(marker)}, 'started')" };
             config = new Configuration { Draft = new Draft { Project = project, DirectoryMode = "isolated", Layout = "vertical" } };
             var book = new TaskBook();
-            var first = TaskBookOps.Create(book, "领取恢复甲", project, "custom", new AgentProfile { Executable = node, Arguments = arguments }, "", [], "isolated", null, 5);
-            var second = TaskBookOps.Create(book, "领取恢复乙", project, "custom", new AgentProfile { Executable = node, Arguments = arguments }, "", [], "isolated", null, 1);
-            var command = Commands.Resolve("custom", first.Profile);
+            var first = TaskBookOps.Create(book, "领取恢复甲", project, "codex", new AgentProfile { Executable = node, Arguments = arguments }, "", [], "isolated", null, 5);
+            var second = TaskBookOps.Create(book, "领取恢复乙", project, "codex", new AgentProfile { Executable = node, Arguments = arguments }, "", [], "isolated", null, 1);
+            var command = Commands.Resolve("codex", first.Profile);
             var fingerprint = AgentProbe.Fingerprint(command);
             var firstEntry = TaskBookOps.Enqueue(book, first.Id, command, fingerprint);
             var secondEntry = TaskBookOps.Enqueue(book, second.Id, command, fingerprint);

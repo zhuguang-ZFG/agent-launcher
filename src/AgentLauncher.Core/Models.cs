@@ -5,8 +5,20 @@ namespace AgentLauncher.Core;
 public sealed record AgentDefinition(string Id, string Name, string Command);
 public static class Agents
 {
-    public static readonly AgentDefinition[] All = [new("pi", "Pi", "pi"), new("codex", "Codex", "codex"), new("claude", "Claude Code", "claude"), new("gemini", "Gemini CLI", "gemini"), new("opencode", "OpenCode", "opencode"), new("hermes", "Hermes", "hermes"), new("omp", "Omp", "omp"), new("kimi", "Kimi", "kimi"), new("qoder", "Qoder", "qodercli"), new("custom", "自定义", "")];
-    public static AgentDefinition Get(string id) => All.Single(a => a.Id == id);
+    public static readonly AgentDefinition[] All = [new("omp", "Omp", "omp"), new("codex", "Codex", "codex"), new("claude", "Claude Code", "claude")];
+    // Retired identities remain readable for old configuration and task history; they are never launchable.
+    public static readonly AgentDefinition[] Retired =
+    [
+        new("pi", "Pi", "pi"), new("gemini", "Gemini CLI", "gemini"), new("opencode", "OpenCode", "opencode"),
+        new("hermes", "Hermes", "hermes"), new("kimi", "Kimi", "kimi"), new("qoder", "Qoder", "qodercli"),
+        new("qodercli", "Qoder", "qodercli"), new("custom", "自定义", "")
+    ];
+    public static bool IsSupported(string? id) => All.Any(agent => agent.Id == id);
+    public static bool IsKnown(string? id) => IsSupported(id) || Retired.Any(agent => agent.Id == id);
+    public static AgentDefinition Get(string id) => All.FirstOrDefault(agent => agent.Id == id)
+        ?? Retired.FirstOrDefault(agent => agent.Id == id)
+        ?? throw new InvalidDataException("未知 Agent。");
+    public static int RetiredCount(Draft draft) => draft?.Slots?.Count(slot => slot != null && !IsSupported(slot.AgentId)) ?? 0;
 }
 public sealed class AgentProfile
 {
@@ -18,7 +30,7 @@ public sealed class Slot
 {
     [JsonRequired] public Guid Id { get; set; } = Guid.NewGuid();
     [JsonRequired] public bool Enabled { get; set; }
-    [JsonRequired] public string AgentId { get; set; } = "pi";
+    [JsonRequired] public string AgentId { get; set; } = "omp";
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] public string? CustomName { get; set; }
     [JsonIgnore] public string DisplayName=>!string.IsNullOrWhiteSpace(CustomName)?CustomName:Agents.Get(AgentId).Name;
     [JsonRequired] public string Directory { get; set; } = "";
@@ -46,7 +58,7 @@ public sealed class Draft
     [JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] public bool IsPortableTemplate { get; set; }
     [JsonRequired] public string DirectoryMode { get; set; } = "isolated";
     [JsonRequired] public string Layout { get; set; } = "vertical";
-    [JsonRequired] public List<Slot> Slots { get; set; } = [new() { Enabled = true }, new() { AgentId = "codex" }, new(), new() { AgentId = "hermes" }];
+    [JsonRequired] public List<Slot> Slots { get; set; } = [new() { Enabled = true }, new() { AgentId = "codex" }, new() { AgentId = "claude" }, new()];
     public ResourceSettings Resource { get; set; } = new();
     public Draft Copy() => new() { SchemaVersion = SchemaVersion, Revision = Revision, Project = Project, IsPortableTemplate = IsPortableTemplate, DirectoryMode = DirectoryMode, Layout = Layout, Slots = Slots.Select(s => s.Copy()).ToList(), Resource = (Resource ?? new ResourceSettings()).Copy() };
     public void Validate()
@@ -71,7 +83,7 @@ public sealed class Draft
         if (Resource.CommitFloorOverride is {} commitCeiling && commitCeiling > ResourcePolicy.MaxCustomCommitFloor) throw new InvalidDataException("提交临界余量不能超过 16 GiB。");
         foreach (var slot in Slots)
         {
-            if(!Agents.All.Any(a=>a.Id==slot.AgentId)||slot.Profiles==null||slot.Directory==null||slot.Note==null)throw new InvalidDataException("Agent 配置不完整。");
+            if(!Agents.IsKnown(slot.AgentId)||(slot.Enabled&&!Agents.IsSupported(slot.AgentId))||slot.Profiles==null||slot.Directory==null||slot.Note==null)throw new InvalidDataException("Agent 配置不完整或包含已移除的类型。");
             if(slot.CustomName?.Contains('\0')==true)throw new InvalidDataException("Agent 名称不能包含 NUL。");
             foreach (var p in slot.Profiles.Values) if(p==null||p.Executable==null||p.Arguments==null||p.Arguments.Any(a=>a==null||a.Contains('\0')))throw new InvalidDataException("程序/参数缺失或含 NUL。");
         }

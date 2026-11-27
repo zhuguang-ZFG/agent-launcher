@@ -4,7 +4,7 @@ using AgentLauncher.Windows;
 
 internal static partial class RemoteExecutionIntegration
 {
-    // R33：fake-ssh，不打开真实 VPS。确认才挂接；成功不终态化；进程已不在则拒绝且不释放；没有自动重连；8 名额不变。
+    // R33：fake-ssh，不打开真实 VPS。确认才挂接；成功不终态化；进程已不在则拒绝且不释放；没有自动重连；6 名额不变。
     private static async Task ReattachAsync(Action<bool, string> Assert, Func<string, Func<Task>, Task> Test, List<Process> workerProcesses, string fakeSshDir, string? originalPath)
     {
         await Test("R33 operator-confirmed reattach", async () =>
@@ -32,8 +32,8 @@ internal static partial class RemoteExecutionIntegration
             {
                 var dir = Path.Combine(Store.Root, name);
                 Directory.CreateDirectory(dir);
-                return new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, name, dir, PhysicalDirectory.Workspace(dir), false, new CommandSpec("pi", args, "remote"), 0,
-                    RemoteExecution: new RemoteExecutionSpec(host, 22, "testuser", "agent", "pi", "/home/agent/work", args, null, null, sync));
+                return new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, name, dir, PhysicalDirectory.Workspace(dir), false, new CommandSpec("omp", args, "remote"), 0,
+                    AgentId: "omp", RemoteExecution: new RemoteExecutionSpec(host, 22, "testuser", "agent", "omp", "/home/agent/work", args, null, null, sync));
             }
             async Task ReserveAsync(LaunchItem plan)
             {
@@ -101,10 +101,10 @@ internal static partial class RemoteExecutionIntegration
             var duplicate=StartPane(plan.Id,true,false);
             await duplicate.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
             Assert(duplicate.ExitCode!=0&&Store.Read<Receipt>(Store.ReceiptPath(plan.Id))==receipt,"duplicate pane overwrote live SSH receipt");
-            Assert(attached.Detail.Contains("不视为已同步") && !attached.Detail.Contains("双向同步"), "None sync was described as synced");
+            Assert(attached.Detail.Contains("未启用文件同步") && attached.Detail.Contains("未恢复原 Agent") && !attached.Detail.Contains("双向同步"), "None sync or the working shell was misrepresented");
             Assert(!File.Exists(Store.SyncSessionPath(plan.Id)) && !File.Exists(Store.SyncFinalPath(plan.Id)), "None reattach wrote sync evidence");
             var during = await Ipc.SendAsync(new("status", Guid.NewGuid()));
-            Assert(LiveAgents(during) == beforeCount && during.Entries!.Count(e => e.Plan.Id == plan.Id) == 1 && !Store.IsTerminal(during.Entries!.Single(e => e.Plan.Id == plan.Id)), "reattach changed the 8-pane count or settled the entry");
+            Assert(LiveAgents(during) == beforeCount && during.Entries!.Count(e => e.Plan.Id == plan.Id) == 1 && !Store.IsTerminal(during.Entries!.Single(e => e.Plan.Id == plan.Id)), "reattach changed the 6-pane count or settled the entry");
             var releaseWhileAttached = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: plan.Id, Release: new OperatorRelease("Gone", "已核对", true)));
             Assert(!releaseWhileAttached.Ok && (await EntryAsync(plan.Id))!.State == "Started" && !File.Exists(Store.OperatorReleasePath(plan.Id)), "release while attached settled the entry");
             var ended = await WaitAsync(plan.Id, "Disconnected");
@@ -116,23 +116,25 @@ internal static partial class RemoteExecutionIntegration
             await ReserveAsync(syncPlan);
             var initialSyncPane=StartPane(syncPlan.Id, false, true);
             await WaitAsync(syncPlan.Id, "Disconnected");
-            // 账本可先根据 SSH 退出推断断线；pane 退出才保证 flush 与结束证据写入完成。
+            // 等 pane 完全退出，确认 finally 同样没有终止同步或伪造结束证据。
             await initialSyncPane.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(12));
             Assert(initialSyncPane.ExitCode==255,"initial sync pane did not exit with SSH disconnect");
             var oldSession = Store.Read<SyncSessionRecord>(Store.SyncSessionPath(syncPlan.Id));
             Assert(oldSession is {SchemaVersion:1}, "initial sync session evidence missing");
-            Assert(Store.Read<SyncFinalRecord>(Store.SyncFinalPath(syncPlan.Id)) is {SchemaVersion:1,State:SyncFinalRecord.Synced}, "initial sync final evidence missing or not synced");
+            Assert(!File.Exists(Store.SyncFinalPath(syncPlan.Id)), "disconnected SSH falsely wrote final synchronization evidence");
             Assert(Store.Read<Receipt>(Store.ReceiptPath(syncPlan.Id)) is {Phase:"Disconnected",ExitCode:255}, "initial sync disconnect receipt missing");
             var syncOk = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: syncPlan.Id, Reattach: new OperatorReattach(true)));
             Assert(syncOk.Ok, "sync reattach was refused: " + syncOk.Message);
             var syncReattachPane=StartPane(syncPlan.Id, true, true);
             var synced = await WaitAsync(syncPlan.Id, "Started");
             var newSession = Store.Read<SyncSessionRecord>(Store.SyncSessionPath(syncPlan.Id));
-            Assert(synced.Detail.Contains("双向同步") && newSession is not null && newSession.Name != oldSession!.Name && !File.Exists(Store.SyncFinalPath(syncPlan.Id)), "sync was not re-established, or a finished sync receipt was left in place");
+            Assert(synced.Detail.Contains("Mutagen 同步") && synced.Detail.Contains("未恢复原 Agent") && newSession is not null && newSession.Name == oldSession!.Name && !File.Exists(Store.SyncFinalPath(syncPlan.Id)), "saved sync identity was not reused, or shell receipt pretended to restore the Agent terminal");
             Assert(!File.Exists(Store.OperatorReleasePath(syncPlan.Id)) && !Store.IsTerminal(synced), "sync reattach settled the attempt");
             var syncEnded = await WaitAsync(syncPlan.Id, "Disconnected");
             await syncReattachPane.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(12));
             Assert(!Store.IsTerminal(syncEnded) && !File.Exists(Store.SyncFinalPath(syncPlan.Id)) && !File.Exists(Store.OperatorReleasePath(syncPlan.Id)), "sync attachment exit pretended the session had converged or released the slot");
+            var syncReleased = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: syncPlan.Id, Release: new OperatorRelease("Gone", "fake-ssh 已退出", true)));
+            Assert(syncReleased.Ok, "sync reattach fixture was not released: " + syncReleased.Message);
 
             var gone = Make("reattach-gone", "reattach-gone.example.com", ["disconnect"]);
             await ReserveAsync(gone);
@@ -141,6 +143,8 @@ internal static partial class RemoteExecutionIntegration
             var goneReply = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: gone.Id, Reattach: new OperatorReattach(true)));
             Assert(!goneReply.Ok && goneReply.Message.Contains("已不在"), "gone process was reattached: " + goneReply.Message);
             Assert((await EntryAsync(gone.Id))!.State == "Disconnected" && !File.Exists(Store.OperatorReattachPath(gone.Id)) && !File.Exists(Store.OperatorReleasePath(gone.Id)), "gone refusal changed the ledger or auto-released");
+            var goneReleased = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: gone.Id, Release: new OperatorRelease("Gone", "fake-ssh 已退出", true)));
+            Assert(goneReleased.Ok, "gone reattach fixture was not released: " + goneReleased.Message);
 
             var unsafePlan = Make("reattach-unsafe", "reattach-alive.example.com", ["hold=30"]);
             await ReserveAsync(unsafePlan);
@@ -163,6 +167,8 @@ internal static partial class RemoteExecutionIntegration
             var unsafeReply = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: unsafePlan.Id, Reattach: new OperatorReattach(true)));
             Assert(!unsafeReply.Ok && unsafeReply.Message.Contains("尚未进入已启动"), "creation-interrupted entry was reattached: " + unsafeReply.Message);
             Assert((await EntryAsync(unsafePlan.Id))!.State == "Disconnected" && !File.Exists(Store.OperatorReattachPath(unsafePlan.Id)), "unsafe refusal changed the ledger");
+            var unsafeReleased = await Ipc.SendAsync(new("release-remote", Guid.NewGuid(), Attempt: unsafePlan.Id, Release: new OperatorRelease("Gone", "fake-ssh 未启动", true)));
+            Assert(unsafeReleased.Ok, "unsafe reattach fixture was not released: " + unsafeReleased.Message);
 
             var counted = await Ipc.SendAsync(new("status", Guid.NewGuid()));
             var live = LiveAgents(counted);
@@ -174,15 +180,15 @@ internal static partial class RemoteExecutionIntegration
                 live++;
                 n++;
             }
-            Assert(ResourcePolicy.MaxConcurrentAgents == 8, "cap constant changed");
-            var ninth = Make("reattach-cap-ninth", "cap.example.com", []);
-            var denied = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [ninth], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([ninth]), DraftRevision: 3));
-            Assert(!denied.Ok && denied.Message.Contains("最多 8"), "ninth pane was admitted while disconnected/reattached entries were live: " + denied.Message);
+            Assert(ResourcePolicy.MaxConcurrentAgents == 6, "cap constant changed");
+            var seventh = Make("reattach-cap-seventh", "cap.example.com", []);
+            var denied = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [seventh], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([seventh]), DraftRevision: 3));
+            Assert(!denied.Ok && denied.Message.Contains("最多 6"), "seventh pane was admitted while disconnected/reattached entries were live: " + denied.Message);
             var recount = await Ipc.SendAsync(new("reattach-remote", Guid.NewGuid(), Attempt: plan.Id, Reattach: new OperatorReattach(true)));
             Assert(recount.Ok && recount.Entries![0].State == "Reattaching" && !Store.IsTerminal(recount.Entries[0]), "second confirm reattach settled the entry: " + recount.Message);
             var after = Make("reattach-cap-after", "cap.example.com", []);
             var deniedAgain = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [after], Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy), PlanDigest: ResourcePolicy.PlanDigest([after]), DraftRevision: 3));
-            Assert(!deniedAgain.Ok && deniedAgain.Message.Contains("最多 8"), "reattach freed a pane slot: " + deniedAgain.Message);
+            Assert(!deniedAgain.Ok && deniedAgain.Message.Contains("最多 6"), "reattach freed a pane slot: " + deniedAgain.Message);
             Assert(Store.Read<Ledger>(Store.FilePath("control.json"))!.Entries.Count(e => e.Plan.Id == plan.Id) == 1, "cap reattach duplicated the entry");
         });
     }

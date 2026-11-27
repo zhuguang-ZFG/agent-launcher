@@ -9,17 +9,17 @@ public static class ResumeCapability
     {
         var known=capability.Presets.FirstOrDefault(p=>p.Semantic=="resume-session"&&p.NeedsValue);
         if(known is not null)return known;
-        if(capability.Version is null||agentId is not ("codex" or "claude" or "omp" or "pi" or "qoder"))return null;
-        var command=Commands.Resolve(agentId,new AgentProfile{Executable=profile.Executable});
+        if(capability.Version is null||!Agents.IsSupported(agentId))return null;
+        var command=Commands.ProbeCommand(agentId,profile);
         if(AgentProbe.Fingerprint(command)!=capability.Fingerprint)throw new IOException("Agent 程序已变化，请重新检查。");
-        var bare=QoderMemoryGuard.Detach(OmpMemoryGuard.Detach(command));
+        var bare=OmpMemoryGuard.Detach(command);
         var result=await AgentProbe.RunAsync(bare with{Arguments=[..bare.Arguments,..(agentId=="codex"?new[]{"resume","--help"}:new[]{"--help"})]},cwd,TimeSpan.FromSeconds(8));
         if(result.ExitCode!=0||result.TimedOut||result.Truncated)return null;
         var help=result.Output+"\n"+result.Error;
         var valid=agentId=="codex"?Regex.IsMatch(help,@"\[SESSION_ID\]|<SESSION_ID>"):
-            Regex.IsMatch(help,agentId=="pi"?@"--session(?:\s+|=)[<\[]":@"--resume(?:\s+|=)[<\[]",RegexOptions.CultureInvariant);
+            Regex.IsMatch(help,@"--resume(?:\s+|=)[<\[]",RegexOptions.CultureInvariant);
         if(!valid)return null;
-        if(AgentProbe.Fingerprint(command)!=capability.Fingerprint)throw new IOException("检查期间 Agent 程序已变化，请重试。");
-        return new(agentId,agentId+"-resume-local","恢复指定会话（本机已核对）","resume-session",[agentId=="codex"?"resume":agentId=="pi"?"--session":"--resume",ArgumentPreset.ValueToken],agentId is "omp" or "pi"?"会话文件路径":"会话 ID",capability.Version);
+        if(AgentProbe.Fingerprint(command)!=capability.Fingerprint)throw new IOException("检查期间 Agent 程序已变化，请重新重试。");
+        return new(agentId,agentId+"-resume-local","恢复指定会话（本机已核对）","resume-session",[agentId=="codex"?"resume":"--resume",ArgumentPreset.ValueToken],agentId=="omp"?"会话文件路径":"会话 ID",capability.Version);
     }
 }

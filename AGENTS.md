@@ -48,8 +48,8 @@ powershell -NoProfile -File scripts/build.ps1
 powershell -NoProfile -File scripts/test.ps1            # add -SkipUi and/or -SkipBrowser to shorten
 # Use -RuntimeDirectory artifacts/test-runtime-<unique-name> if an older test monitor still holds the default runtime.
 
-# Fastest loop: model/native tests only
-dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release
+# Isolated native/integration gate (ordinary test builds refuse stateful modes)
+powershell -NoProfile -File scripts/test.ps1 -SkipUi -SkipBrowser
 ```
 
 - There is **no `dotnet test`** — tests are console executables gated by exit code.
@@ -89,7 +89,7 @@ dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Rel
 
 ## Testing & QA
 
-- **Single supported gate**: `scripts/test.ps1`. Phases: model/Win32 tests; sequential `INTEGRATION_TESTS` publishes; repair checks; startup queue, direct 16-Worker, real 16-pane Terminal and full integration suites in separate fresh test roots; WPF checks (30 s without progress, 90 s total maximum); prototype and headless-Edge CDP checks. WPF expects `artifacts/ui/ui-checks.json`; failed CI retains diagnostics.
+- **Single supported gate**: `scripts/test.ps1`. Phases: pure models; sequential `INTEGRATION_TESTS` publishes; isolated model/Win32 tests; repair checks; startup queue, direct 16-Worker, real 16-pane Terminal and full integration suites in separate fresh test roots; WPF checks (30 s without progress, 90 s total maximum); prototype and headless-Edge CDP checks. WPF expects `artifacts/ui/ui-checks.json`; failed CI retains diagnostics.
 - **Never run test-build exes from `artifacts/test-runtime` interactively** (README warning); integration tests require `AGENT_LAUNCHER_TEST_ROOT` containing `AgentLauncher-tests-` as a hard guard.
 - Pi checks use a temporary `PI_CODING_AGENT_DIR` and restore the caller's value; never depend on or write to real user agent configuration.
 - No coverage tooling, no mocking framework; the test exe doubles as a child-process fixture (`--echo`, `--hold`, `--allocate`).

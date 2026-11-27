@@ -3,7 +3,7 @@ using AgentLauncher.Core;
 
 namespace AgentLauncher.Windows;
 
-public sealed record TaskHistoryItem(Guid AttemptId, Guid? TaskId, string Name, string State, DateTimeOffset? At, string Detail, TaskRun? Run = null);
+public sealed record TaskHistoryItem(Guid AttemptId, Guid? TaskId, string Name, string State, DateTimeOffset? At, string Detail, TaskRun? Run = null, ControlEntry? ArchivedEvidence = null);
 public sealed record TaskHistorySnapshot(TaskBook? Book, TaskHistoryItem[] Items, string Notice);
 
 public static class TaskHistoryReader
@@ -18,6 +18,14 @@ public static class TaskHistoryReader
         var items = new Dictionary<Guid, TaskHistoryItem>();
         if (book is not null)
         {
+            foreach (var archive in store.ReadHistoryArchives(book))
+            {
+                foreach (var run in archive.Attempts.Where(run => taskId is null || run.TaskId == taskId))
+                {
+                    var name = archive.Tasks.FirstOrDefault(task => task.Id == run.TaskId)?.Name ?? "已迁移任务";
+                    items[run.AttemptId] = new(run.AttemptId, run.TaskId, name, run.State, run.At, run.Detail, run.Copy(), archive.Evidence.Single(entry => entry.Plan.Id == run.AttemptId));
+                }
+            }
             foreach (var run in book.Attempts.Where(run => taskId is null || run.TaskId == taskId))
             {
                 var name = book.Tasks.FirstOrDefault(task => task.Id == run.TaskId)?.Name ?? "任务记录未保留";
@@ -71,7 +79,8 @@ public static class TaskHistoryReader
         var ledgerNotice = "";
         try { ledger = TaskRecoveryReader.ReadLedger(); }
         catch (Exception e) when (e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException) { ledgerNotice = "控制记录不可读取；以下仅为可验证的历史档案，不授权释放占用。"; }
-        var entry = TaskRecoveryReader.ReadAttempt(item.AttemptId, ledger);
+        var entry = TaskRecoveryReader.ReadAttempt(item.AttemptId, ledger) ?? item.ArchivedEvidence;
+        if (entry is not null && entry.Digest != Store.Digest(entry.Plan)) throw new InvalidDataException("历史启动记录指纹无法核对。");
         if (entry is not null && item.Run is not null && !AttemptIdentity.Matches(item.Run, entry)) throw new InvalidDataException("历史任务与启动记录身份不一致，不能展示为同一次执行。");
         Receipt? receipt = null;
         var receiptNotice = "";
