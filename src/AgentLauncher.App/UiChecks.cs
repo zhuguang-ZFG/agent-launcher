@@ -421,7 +421,7 @@ public partial class MainWindow
         ReviewUiChecks.Run(Check);
         await RunReviewUiChecksAsync(Check);
         await RunMultipaneChecksAsync(Check);
-        await RunWorkbenchUiChecksAsync(Check);
+        await RunWorkbenchUiChecksAsync(Check, ResizeForCheckAsync, folder);
         await RunSimpleUiChecksAsync(Check,folder);
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
         Check("rail index lists every slot with continuous names",Find<Button>(RailSlots).Count()==config.Draft.Slots.Count&&Find<Button>(RailSlots).Select(b=>AutomationProperties.GetName(b)).SequenceEqual(config.Draft.Slots.Select((_,i)=>$"第 {i+1} 项 Agent 行")));

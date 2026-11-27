@@ -2,7 +2,7 @@ namespace AgentLauncher.Core;
 
 public static class StartPageSurface
 {
-    public const string CapDenied = "最多同时 6 个";
+    public static string CapDenied => "最多同时 " + WorkbenchLayout.MaxPanes + " 个";
     public const string StartingButton = "正在启动…";
     public const string BackToStart = "回到起步页";
     public const string RestartPane = "重新启动";

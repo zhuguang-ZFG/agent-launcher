@@ -27,7 +27,7 @@
 
 ## File Structure
 
-- Create: `src/AgentLauncher.Core/WorkbenchLayout.cs` — 窗口模式、窗格状态、网格几何（1/2/2×2/2×3/2×4、窄屏单列、最小 420×240）。
+- Create: `src/AgentLauncher.Core/WorkbenchLayout.cs` — 窗口模式、窗格状态、网格几何（1/2/2×2/2×3、窄屏单列、最小 420×240）。
 - Create: `src/AgentLauncher.Core/StartPageSurface.cs` — 起步页和工作台主路径文案（启动按钮、禁用原因、容量、部分启动、第 7 个拒绝）。
 - Create: `src/AgentLauncher.Core/ThemeTokens.cs` — 深色/浅色色值常量，供 `ApplyTheme` 和测试共用。
 - Create: `tests/AgentLauncher.Tests/WorkbenchLayoutChecks.cs`

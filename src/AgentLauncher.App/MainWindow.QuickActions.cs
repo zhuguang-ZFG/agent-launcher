@@ -155,16 +155,20 @@ public partial class MainWindow
     }
     private void MainKeyDown(object sender, KeyEventArgs e)
     {
-        if(Keyboard.FocusedElement is TerminalCard)return;
-        if (loading || closeRequested || !IsEnabled || quickActionsOpen) return;
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         var modifiers = Keyboard.Modifiers;
+        if (TryHandleWorkbenchFocusKey(key, modifiers, e.IsRepeat))
+        { e.Handled = true; return; }
+        if(Keyboard.FocusedElement is TerminalCard)return;
+        if (loading || closeRequested || !IsEnabled || quickActionsOpen) return;
         if (modifiers == ModifierKeys.Control && key == Key.K)
         { e.Handled = true; if (!e.IsRepeat) QuickActionsClick(this, new()); }
         else if (modifiers == ModifierKeys.Control && key == Key.O)
         { e.Handled = true; if (!e.IsRepeat) ChooseClick(this, new()); }
         else if (modifiers == ModifierKeys.Control && key == Key.Enter)
         { e.Handled = true; if (!e.IsRepeat && LaunchButton.IsEnabled) LaunchClick(this, new()); }
+        else if (TryHandleStartPageKey(key, modifiers, e.IsRepeat))
+        { e.Handled = true; }
         else if (modifiers == ModifierKeys.None && key == Key.F5)
         { e.Handled = true; if (!e.IsRepeat && RefreshLaunchButton.IsEnabled) RefreshLaunchClick(this, new()); }
         else if (modifiers == ModifierKeys.Alt && key >= Key.D1 && key <= Key.D9)

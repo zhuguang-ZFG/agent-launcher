@@ -1,5 +1,7 @@
 # UI 详细设计 v0.6
 
+> **现行主窗口路径（2026-11-27 起）。** 起步页与嵌入式工作台的验收，以 [工作区界面重设计规格](superpowers/specs/2026-11-27-workspace-ui-redesign.md) 和 [实现计划](superpowers/plans/2026-11-27-workspace-ui-redesign.md) 为准。起步页只选项目、最多勾选 6 个 Agent 并启动；启动后主窗口进入最多 6 格的嵌入式工作台，不再把左侧栏、分屏预览或外置 Windows Terminal 当作默认界面。下文关于轨道、布局预览、底部主操作和「最多四项」的描述是历史设计，不再作为现行主路径的验收依据。资源池并发上限 8 与配置保存槽位 16 属于另一套尚未完成的 Phase A 资源策略，不要把它理解成工作台或起步页的可见窗格上限。
+
 状态：完整设计合同，已有 [离线可点击设计稿](prototype.html) 和 WPF 技术预览。主范围见 [SPEC.md](SPEC.md)，实现与截图见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，完整验收见 [ACCEPTANCE.md](ACCEPTANCE.md)。
 
 HTML 仍用示例数据，只用于说明交互；其 3 项已知配置缺陷已通过 5 组模型测试和 5 项 Edge 实际点击断言。WPF 已实现目录选择/拖入、配置增删上移、模板、命令探测、资源和逐项状态、工作目录查看与备份恢复。

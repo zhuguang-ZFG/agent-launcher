@@ -5,6 +5,7 @@ using System.Windows.Input;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
@@ -13,7 +14,7 @@ namespace AgentLauncher.App;
 
 public partial class MainWindow
 {
-    private async Task RunWorkbenchUiChecksAsync(Action<string, bool> check)
+    private async Task RunWorkbenchUiChecksAsync(Action<string, bool> check, Func<double, double, Task> resize, string folder)
     {
         await saveTask;
         await commandCheckTask;
@@ -22,6 +23,8 @@ public partial class MainWindow
         var previousReadOnly = readOnly;
         var previousError = ErrorText.Text;
         var previousTimer = timer.IsEnabled;
+        var previousWidth = Width;
+        var previousHeight = Height;
         timer.Stop();
         try
         {
@@ -107,6 +110,37 @@ public partial class MainWindow
             check("cap denial stays visible after a later refresh",
                 CountReadySelected() == WorkbenchLayout.MaxPanes
                 && LaunchHint.Text.Contains(StartPageSurface.CapDenied));
+
+            var chips = ReviewFind<ToggleButton>(AgentChipPanel).ToArray();
+            var firstChip = chips.FirstOrDefault();
+            check("start page tab order is project, chips, launch, then settings",
+                ChooseProjectButton.TabIndex == 10
+                && firstChip is not null
+                && KeyboardNavigation.GetTabIndex(firstChip) == 20
+                && KeyboardNavigation.GetTabIndex(chips[^1]) == 20 + chips.Length - 1
+                && LaunchButton.TabIndex == 80
+                && LaunchButton.IsDefault
+                && StartPageSettingsButton.TabIndex == 90
+                && ChooseProjectButton.TabIndex < KeyboardNavigation.GetTabIndex(firstChip)
+                && KeyboardNavigation.GetTabIndex(chips[^1]) < LaunchButton.TabIndex
+                && LaunchButton.TabIndex < StartPageSettingsButton.TabIndex);
+
+            var toggleId = config.Draft.Slots.First(slot => slot.Enabled && IsSlotReady(slot)).Id;
+            var seventhId = config.Draft.Slots[6].Id;
+            ToggleButton ChipFor(Guid id) => ReviewFind<ToggleButton>(AgentChipPanel).Single(button => Equals(button.Tag, id));
+            Slot SlotFor(Guid id) => config.Draft.Slots.Single(slot => slot.Id == id);
+            ToggleStartPageChipForChecks(ChipFor(toggleId));
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            var toggledOff = !SlotFor(toggleId).Enabled && ChipFor(toggleId).IsChecked != true;
+            ToggleStartPageChipForChecks(ChipFor(toggleId));
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("Space toggles the current agent chip when selection is allowed",
+                toggledOff && SlotFor(toggleId).Enabled && ChipFor(toggleId).IsChecked == true);
+
+            ToggleStartPageChipForChecks(ChipFor(seventhId));
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("Space does not select the seventh ready agent",
+                !SlotFor(seventhId).Enabled && ChipFor(seventhId).IsChecked != true && CountReadySelected() == WorkbenchLayout.MaxPanes);
 
             var selectedUnready = config.Draft.Slots.First(slot => slot.Enabled);
             chipStatus[selectedUnready.Id] = (false, "命令不可用");
@@ -414,10 +448,91 @@ public partial class MainWindow
                 && WorkbenchPanel.Visibility == Visibility.Visible
                 && StartPagePanel.Visibility == Visibility.Collapsed
                 && ErrorText.Text.Contains("内存不足"));
+
+            foreach (var count in new[] { 1, 2, 4, WorkbenchLayout.MaxPanes })
+            {
+                ResetWorkbenchForChecks();
+                var sized = Enumerable.Range(1, count).Select(index => FakePlan(index, "规格" + count + "-" + index)).ToArray();
+                EnterWorkbench(sized);
+                await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+                check("workbench shows " + count + " real panes instead of a preview",
+                    windowMode == MainWindowMode.Workbench
+                    && VisibleHostTiles() == count
+                    && ReviewFind<TerminalCard>(WorkbenchHost).Count() == count
+                    && PreviewCard.Visibility != Visibility.Visible
+                    && !StartPagePanel.IsVisible);
+            }
+
+            ResetWorkbenchForChecks();
+            var focusA = FakePlan(1, "焦点甲");
+            var focusB = FakePlan(2, "焦点乙");
+            EnterWorkbench([focusA, focusB]);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            FocusWorkbenchPane(workbenchPanes[0]);
+            var moved = HandleWorkbenchFocusKeyForChecks(Key.Tab, ModifierKeys.Control);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("Ctrl+Tab moves focus from the first pane to the second",
+                moved
+                && focusedPaneId == workbenchPanes[1].Id
+                && workbenchPanes[1].Root.BorderThickness == new Thickness(2)
+                && workbenchPanes[0].Root.BorderThickness == new Thickness(1));
+
+            ResetWorkbenchForChecks();
+            var narrowPlans = Enumerable.Range(1, 3).Select(index => FakePlan(index, "窄列" + index)).ToArray();
+            EnterWorkbench(narrowPlans);
+            Width = 700;
+            Height = 560;
+            var deadline = DateTime.UtcNow.AddSeconds(2);
+            var settled = 0;
+            while (DateTime.UtcNow < deadline)
+            {
+                await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
+                RelayoutWorkbench();
+                var ready = Math.Abs(ActualWidth - Width) < 1 && Math.Abs(ActualHeight - Height) < 1
+                    && WorkbenchPanel.IsMeasureValid && WorkbenchScroll.IsMeasureValid;
+                settled = ready ? settled + 1 : 0;
+                if (settled >= 2) break;
+                await Task.Delay(25);
+            }
+            var viewportWidth = WorkbenchScroll.ViewportWidth > 0 ? WorkbenchScroll.ViewportWidth : WorkbenchHost.ActualWidth;
+            var viewportHeight = WorkbenchScroll.ViewportHeight > 0 ? WorkbenchScroll.ViewportHeight : WorkbenchHost.ActualHeight;
+            var narrowLayout = WorkbenchLayout.Layout(viewportWidth, viewportHeight, 3);
+            var narrowRoot = PaneRoot("窄列1");
+            var stopVisible = narrowRoot is not null && ReviewFind<Button>(narrowRoot).Any(button => Equals(button.Content, "停止") && button.IsVisible && button.ActualHeight > 0);
+            var titleVisible = narrowRoot is not null && ReviewFind<FrameworkElement>(narrowRoot).Any(item => AutomationProperties.GetName(item) == "窄列1 标题" && item.IsVisible && item.ActualHeight > 0);
+            check("a narrow workbench stacks three panes in a scrollable single column",
+                WorkbenchLayout.UseSingleColumn(viewportWidth, 3)
+                && narrowLayout.SingleColumn
+                && VisibleHostTiles() == 3
+                && WorkbenchHost.Height > WorkbenchScroll.ViewportHeight
+                && WorkbenchScroll.ExtentHeight > WorkbenchScroll.ViewportHeight
+                && WorkbenchScroll.ComputedVerticalScrollBarVisibility == Visibility.Visible
+                && stopVisible
+                && titleVisible);
+            if (!string.IsNullOrWhiteSpace(folder))
+            {
+                var dpi = VisualTreeHelper.GetDpi(this);
+                var bitmap = new RenderTargetBitmap((int)(ActualWidth * dpi.DpiScaleX), (int)(ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+                bitmap.Render(this);
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(bitmap));
+                using var output = System.IO.File.Create(System.IO.Path.Combine(folder, "native-narrow-workbench.png"));
+                encoder.Save(output);
+            }
+            ResetWorkbenchForChecks();
+            var slashRoot = System.IO.Path.Combine(Store.Root, "slash-root");
+            var slashPlan = FakePlan(1, "斜杠甲") with { SourceSlotId = Guid.NewGuid(), AgentId = "slash", Cwd = slashRoot };
+            EnterWorkbench([slashPlan]);
+            SetWorkbenchPaneStatusForChecks(slashPlan.Id, WorkbenchPaneStatus.Exited, "已退出");
+            var slashSlot = new Slot { Id = Guid.NewGuid(), AgentId = "slash", Directory = slashRoot + System.IO.Path.DirectorySeparatorChar };
+            check("AgentId fallback treats a trailing slash as the same directory",
+                FindExitedWorkbenchPane(slashSlot)?.Id == slashPlan.Id);
         }
         finally
         {
             ResetWorkbenchForChecks();
+            Width = previousWidth;
+            Height = previousHeight;
             ErrorText.Text = previousError;
             capDeniedSticky = false;
             config = previous;

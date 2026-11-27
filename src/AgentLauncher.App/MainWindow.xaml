@@ -39,14 +39,14 @@
       </ContextMenu>
      </Button.ContextMenu>
     </Button>
-    <Button DockPanel.Dock="Right" Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="Settings" Padding="6,2" MinHeight="26" FontSize="12"/>
+    <Button x:Name="StartPageSettingsButton" DockPanel.Dock="Right" Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="Settings" Padding="6,2" MinHeight="26" FontSize="12" KeyboardNavigation.TabIndex="90"/>
     <TextBlock Text="多 Agent 启动器" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
    </DockPanel>
    <ScrollViewer x:Name="StartPageScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalAlignment="Stretch">
     <Grid x:Name="StartPageColumn" MaxWidth="820" MinWidth="0" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="28,8,28,32">
      <StackPanel>
       <DockPanel Margin="0,0,0,16" LastChildFill="True">
-       <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="8,2" MinHeight="26" Margin="12,0,0,0" VerticalAlignment="Center" FontSize="12"/>
+       <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="8,2" MinHeight="26" Margin="12,0,0,0" VerticalAlignment="Center" FontSize="12" KeyboardNavigation.TabIndex="10"/>
        <TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
       </DockPanel>
       <Border x:Name="AgentChipCard" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="12" Padding="16,14">
@@ -56,7 +56,7 @@
        </StackPanel>
       </Border>
       <DockPanel x:Name="StartPageActionRow" Margin="0,16,0,0" LastChildFill="True">
-       <Button DockPanel.Dock="Right" x:Name="LaunchButton" Content="启动 0 个" Style="{StaticResource PrimaryButton}" MinWidth="168" Click="LaunchClick" AutomationProperties.AutomationId="Launch"/>
+       <Button DockPanel.Dock="Right" x:Name="LaunchButton" Content="启动 0 个" Style="{StaticResource PrimaryButton}" MinWidth="168" Click="LaunchClick" AutomationProperties.AutomationId="Launch" IsDefault="True" KeyboardNavigation.TabIndex="80"/>
        <TextBlock x:Name="LaunchHint" Text="先选择项目文件夹" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,16,0"/>
       </DockPanel>
      </StackPanel>

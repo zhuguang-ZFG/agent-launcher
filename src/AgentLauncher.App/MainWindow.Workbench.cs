@@ -59,6 +59,7 @@ public partial class MainWindow
         EmbeddedPanel.Visibility = Visibility.Collapsed;
         ShowTerminalsButton.Visibility = Visibility.Collapsed;
         if (!workbench) ChooseProjectButton.Visibility = Visibility.Visible;
+        if (LaunchButton is not null) LaunchButton.IsDefault = !workbench;
         UpdateWorkbenchChrome();
         if (workbench) RelayoutWorkbench();
     }
@@ -418,13 +419,12 @@ public partial class MainWindow
     {
         var running = workbenchPanes.Where(pane => IsActiveWorkbenchStatus(pane.Status)).ToArray();
         var runningSlots = running.Select(pane => pane.Plan.SourceSlotId).OfType<Guid>().ToHashSet();
-        var runningAgents = running.Select(pane => (pane.Plan.AgentId, pane.Plan.Cwd)).ToHashSet();
         foreach (var slot in config.Draft.Slots)
         {
             if (!IsSlotReady(slot)) continue;
             if (runningSlots.Contains(slot.Id)) continue;
             var directory = string.IsNullOrWhiteSpace(slot.Directory) ? config.Draft.Project : slot.Directory;
-            if (runningAgents.Contains((slot.AgentId, directory))) continue;
+            if (running.Any(pane => string.Equals(pane.Plan.AgentId, slot.AgentId, StringComparison.Ordinal) && MatchesSlotDirectory(pane.Plan, directory))) continue;
             yield return slot;
         }
     }
@@ -451,11 +451,12 @@ public partial class MainWindow
 
     private static bool SameOrContainedPath(string path, string directory)
     {
-        if (string.IsNullOrWhiteSpace(path)) return false;
-        if (string.Equals(path, directory, StringComparison.OrdinalIgnoreCase)) return true;
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(directory)) return false;
         var full = path.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
         var root = directory.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
-        if (root.Length == 0 || full.Length <= root.Length) return false;
+        if (root.Length == 0 || full.Length == 0) return false;
+        if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase)) return true;
+        if (full.Length <= root.Length) return false;
         return full.StartsWith(root + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
             || full.StartsWith(root + System.IO.Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
@@ -486,6 +487,48 @@ public partial class MainWindow
         focusedPaneId = pane.Id;
         ApplyPaneFocusBorders();
         pane.Card.Focus();
+        pane.Root.BringIntoView();
+    }
+
+    private void CycleWorkbenchFocus(bool backward)
+    {
+        if (workbenchPanes.Count == 0) return;
+        var index = focusedPaneId is { } id ? workbenchPanes.FindIndex(pane => pane.Id == id) : -1;
+        if (index < 0) index = backward ? 0 : workbenchPanes.Count - 1;
+        var next = (index + (backward ? -1 : 1) + workbenchPanes.Count) % workbenchPanes.Count;
+        FocusWorkbenchPane(workbenchPanes[next]);
+    }
+
+    private bool TryHandleWorkbenchFocusKey(Key key, ModifierKeys modifiers, bool isRepeat)
+    {
+        if (windowMode != MainWindowMode.Workbench) return false;
+        if (key != Key.Tab || (modifiers & ModifierKeys.Control) == 0) return false;
+        if ((modifiers & ~(ModifierKeys.Control | ModifierKeys.Shift)) != 0) return false;
+        if (!isRepeat) CycleWorkbenchFocus((modifiers & ModifierKeys.Shift) != 0);
+        return true;
+    }
+
+    private bool TryToggleStartPageChip(ToggleButton chip)
+    {
+        if (chip.Tag is not Guid id) return false;
+        TrySetSlotEnabled(id, chip.IsChecked != true, chip);
+        return true;
+    }
+
+    private bool TryHandleStartPageKey(Key key, ModifierKeys modifiers, bool isRepeat)
+    {
+        if (windowMode != MainWindowMode.StartPage || modifiers != ModifierKeys.None) return false;
+        if (key == Key.Space)
+        {
+            if (Keyboard.FocusedElement is not ToggleButton chip || AgentChipPanel is null || !AgentChipPanel.Children.Contains(chip)) return false;
+            if (!isRepeat) TryToggleStartPageChip(chip);
+            return true;
+        }
+        if (key != Key.Enter) return false;
+        if (Keyboard.FocusedElement is TextBox box && !box.IsReadOnly) return false;
+        if (!LaunchButton.IsEnabled) return false;
+        if (!isRepeat) LaunchClick(this, new());
+        return true;
     }
 
     private void ApplyPaneFocusBorders()
@@ -674,6 +717,12 @@ public partial class MainWindow
 #if INTEGRATION_TESTS
     private string? workbenchLaunchFailureForChecks;
 
+    private bool HandleWorkbenchFocusKeyForChecks(Key key, ModifierKeys modifiers) =>
+        TryHandleWorkbenchFocusKey(key, modifiers, false);
+
+    private bool ToggleStartPageChipForChecks(ToggleButton chip) => TryToggleStartPageChip(chip);
+
+
     private void ResetWorkbenchForChecks()
     {
         workbenchLaunchFailureForChecks = null;
@@ -726,6 +775,7 @@ public partial class MainWindow
         try
         {
             AgentChipPanel.Children.Clear();
+            var chipIndex = 0;
             foreach (var slot in config.Draft.Slots)
             {
                 var ready = IsSlotReady(slot);
@@ -758,6 +808,8 @@ public partial class MainWindow
                 chip.Content = body;
                 chip.ToolTip = ready ? place : reason;
                 var id = slot.Id;
+                KeyboardNavigation.SetTabIndex(chip, 20 + chipIndex);
+                chipIndex++;
                 chip.Checked += (_, _) => { if (!rendering) TrySetSlotEnabled(id, true, chip); };
                 chip.Unchecked += (_, _) => { if (!rendering) TrySetSlotEnabled(id, false, chip); };
                 AgentChipPanel.Children.Add(chip);
