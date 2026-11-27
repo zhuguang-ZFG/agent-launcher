@@ -253,6 +253,8 @@ public partial class MainWindow
         Check("settings apply selected theme scale minimize and notify values",settingsDialog.ShowDialog()==true&&settingsDialog.Values["theme"]=="dark"&&settingsDialog.Values["scale"]=="150"&&settingsDialog.Values["minimize"]=="true"&&settingsDialog.Values["notify"]=="true");
         config.Theme="dark";ApplyTheme();Render();var darkInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var darkPage=((SolidColorBrush)Background).Color;
         Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1E2A3F")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#232733")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
+        LaunchOptionsExpander.ApplyTemplate();UpdateLayout();var expanderHeader=Find<System.Windows.Controls.Primitives.ToggleButton>(LaunchOptionsExpander).FirstOrDefault();
+        Check("expander header text follows theme ink",SystemParameters.HighContrast||expanderHeader?.Foreground is SolidColorBrush headerInk&&headerInk.Color==darkInk);
         Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#9AA3B2"));
         var agentCombo=AgentCombo();ComboBoxItem? selectedItem=null;
         for(var i=0;i<20;i++)

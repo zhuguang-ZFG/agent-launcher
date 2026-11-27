@@ -1,6 +1,7 @@
 <Window x:Class="AgentLauncher.App.MainWindow"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:AgentLauncher.App"
  Title="多 Agent 启动器" Width="1120" Height="800" WindowStartupLocation="CenterScreen"
  Icon="pack://application:,,,/Assets/app.ico"
  AllowDrop="True" Drop="OnDrop" DragOver="OnDragOver">
@@ -20,7 +21,7 @@
     <Border DockPanel.Dock="Top" x:Name="ProjectCard" Style="{StaticResource Card}" Padding="12" Margin="0,0,0,10">
      <StackPanel>
       <TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="14" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
-      <TextBox x:Name="ProjectPath" Margin="0,8,0,0" FontFamily="Consolas,Microsoft YaHei" FontSize="12" Visibility="Collapsed" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" ToolTip="输入本地绝对目录，或拖入文件夹"/>
+      <TextBox x:Name="ProjectPath" Margin="0,8,0,0" FontFamily="Consolas,Microsoft YaHei" FontSize="12" Visibility="Collapsed" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" local:Hint.Text="项目的本地绝对路径" ToolTip="输入本地绝对目录，或拖入文件夹"/>
       <DockPanel Margin="0,6,0,0">
        <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" Visibility="Collapsed" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" VerticalAlignment="Top"/>
        <TextBlock x:Name="ProjectGuide" Text="从上方选择项目，或把文件夹拖进窗口；本机 CLI 可点「补齐本机 Agent」。" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"/>
@@ -73,12 +74,12 @@
   </Border>
   <Grid Grid.Column="1">
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-   <Grid Margin="16,8,16,0">
+   <Grid Margin="24,10,24,8">
     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-    <Button x:Name="ProjectSwitchButton" Style="{StaticResource QuietButton}" Click="ProjectSwitchClick" HorizontalContentAlignment="Stretch" Margin="0,0,8,0" AutomationProperties.Name="切换项目和最近项目">
-     <DockPanel><TextBlock DockPanel.Dock="Right" Text=" ▾" VerticalAlignment="Center"/><TextBlock x:Name="ProjectSwitchText" Text="选择项目…" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" VerticalAlignment="Center"/></DockPanel>
+    <Button x:Name="ProjectSwitchButton" Style="{StaticResource ChipButton}" Click="ProjectSwitchClick" HorizontalAlignment="Left" HorizontalContentAlignment="Stretch" Margin="0,0,8,0" AutomationProperties.Name="切换项目和最近项目">
+     <DockPanel><Path DockPanel.Dock="Left" Data="M 0.5 2 L 0.5 10.5 L 13.5 10.5 L 13.5 3.5 L 7 3.5 L 5.5 2 Z" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.2" StrokeLineJoin="Round" VerticalAlignment="Center" Margin="0,0,8,0"/><Path DockPanel.Dock="Right" Data="M 0 0 L 4 4 L 8 0" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" VerticalAlignment="Center" Margin="10,1,0,0"/><TextBlock x:Name="ProjectSwitchText" Text="选择项目…" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" VerticalAlignment="Center"/></DockPanel>
     </Button>
-    <Button x:Name="QuickActionsButton" Grid.Column="1" Style="{StaticResource QuietButton}" Click="QuickActionsClick" ToolTip="Ctrl+K · 搜索操作、Agent、最近项目和活动会话" AutomationProperties.Name="快捷操作 Ctrl+K"><TextBlock x:Name="QuickActionsText" Text="快捷操作  Ctrl+K" TextWrapping="NoWrap"/></Button>
+    <Button x:Name="QuickActionsButton" Grid.Column="1" Style="{StaticResource ChipButton}" Click="QuickActionsClick" ToolTip="Ctrl+K · 搜索操作、Agent、最近项目和活动会话" AutomationProperties.Name="快捷操作 Ctrl+K"><TextBlock x:Name="QuickActionsText" Text="快捷操作  Ctrl+K" TextWrapping="NoWrap"/></Button>
    </Grid>
    <ScrollViewer x:Name="ContentScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <StackPanel x:Name="Editor" Margin="24,16,24,24">
@@ -89,10 +90,10 @@
        <Border Style="{StaticResource Card}" Padding="16" Margin="0,0,0,12">
         <StackPanel>
          <DockPanel Margin="0,0,0,10"><TextBlock x:Name="DetailTitle" Text="要一起启动的 Agent" Style="{StaticResource Heading}" VerticalAlignment="Center"/></DockPanel>
-         <Border Style="{StaticResource Card}" Padding="0"><StackPanel x:Name="SlotList"/></Border>
+         <Border Style="{StaticResource FlatCard}" Padding="0"><StackPanel x:Name="SlotList"/></Border>
         </StackPanel>
        </Border>
-       <Border x:Name="LongTaskNotice" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12" Margin="0,0,0,12" Visibility="Collapsed">
+       <Border x:Name="LongTaskNotice" Style="{StaticResource Notice}" Margin="0,0,0,12" Visibility="Collapsed">
         <DockPanel><Button x:Name="LongTaskButton" DockPanel.Dock="Right" Content="新任务上限改为 4 GiB" Click="LongTaskClick" Margin="12,0,0,0" ToolTip="增加内存余量，不保证任务不退出。新任务采用独立 4 GiB 上限和 1536 MiB 规划量；已有任务和排队计划保持原值"/><TextBlock x:Name="LongTaskText" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{DynamicResource WarningInk}"/></DockPanel>
        </Border>
        <Border x:Name="ActiveNow" Style="{StaticResource Card}" Padding="16" Margin="0,0,0,12" Visibility="Collapsed">
@@ -113,7 +114,7 @@
          </Border>
         </StackPanel>
        </Border>
-       <Border x:Name="SharedDirectoryRisk" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12" Margin="0,12,0,0" Visibility="Collapsed">
+       <Border x:Name="SharedDirectoryRisk" Style="{StaticResource Notice}" Margin="0,12,0,0" Visibility="Collapsed">
         <TextBlock x:Name="SharedDirectoryRiskText" TextWrapping="Wrap" Foreground="{DynamicResource WarningInk}"/>
        </Border>
        <Expander x:Name="LaunchOptionsExpander" Header="启动选项 · 目录与分屏" Margin="0,12,0,0" HorizontalContentAlignment="Stretch" Foreground="{DynamicResource Ink}">
@@ -136,7 +137,7 @@
           <Button Content="16" Tag="16" Click="ScalePresetClick" MinWidth="40" Margin="0,0,4,4" AutomationProperties.Name="规模预设 16"/>
          </WrapPanel>
          <TextBlock Text="只勾选的项会启动；预设用于补齐配置。缩小不会删除已编辑项。" Style="{StaticResource Caption}" Margin="0,0,0,12"/>
-         <Border Style="{StaticResource Card}" Padding="0">
+         <Border Style="{StaticResource FlatCard}" Padding="0">
           <StackPanel>
            <Grid Margin="16,12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <DockPanel VerticalAlignment="Center"><TextBlock Text="组合模板" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,8,0"/><ComboBox x:Name="Templates" SelectionChanged="TemplateChanged" AutomationProperties.Name="恢复组合" MaxWidth="260" HorizontalAlignment="Left"/></DockPanel>
@@ -144,7 +145,7 @@
            </Grid>
            <DockPanel Margin="16,0,16,12">
             <Label Content="筛选下拉选项" Target="{Binding ElementName=AgentSearch}" VerticalAlignment="Center" Padding="0,0,8,0" ToolTip="只筛选各项的 Agent 下拉选项，不隐藏配置行，也不改变勾选"/>
-            <TextBox x:Name="AgentSearch" AutomationProperties.Name="搜索 Agent 名称" AutomationProperties.HelpText="按名称筛选 Agent 下拉选项，不改变已勾选项" ToolTip="按名称筛选下拉选项；不会改变已选择的 Agent" TextChanged="AgentSearchChanged"/>
+            <TextBox x:Name="AgentSearch" AutomationProperties.Name="搜索 Agent 名称" AutomationProperties.HelpText="按名称筛选 Agent 下拉选项，不改变已勾选项" local:Hint.Text="输入 Agent 名称，如 codex" ToolTip="按名称筛选下拉选项；不会改变已选择的 Agent" TextChanged="AgentSearchChanged"/>
            </DockPanel>
            <Button x:Name="DiscoverButton" Content="重新查找本机 CLI" Style="{StaticResource QuietButton}" Click="DiscoverClick" HorizontalAlignment="Left" Margin="16,0,16,12"/>
            <TextBlock x:Name="DiscoveryStatus" Text="正在查找本机 CLI…" Style="{StaticResource Caption}" Margin="16,0,16,12" AutomationProperties.LiveSetting="Polite"/>
@@ -152,13 +153,13 @@
          </Border>
         </StackPanel>
        </Expander>
-       <Expander x:Name="SessionExpander" Margin="0,16,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" ToolTip="展开查看本次与本机运行记录">
-        <Expander.Header><TextBlock x:Name="SessionHeading" Text="运行记录" FontWeight="SemiBold" Margin="4,0" MinHeight="36" VerticalAlignment="Center"/></Expander.Header>
+       <Expander x:Name="SessionExpander" Margin="0,12,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" ToolTip="展开查看本次与本机运行记录">
+        <Expander.Header><TextBlock x:Name="SessionHeading" Text="运行记录" FontWeight="SemiBold" VerticalAlignment="Center"/></Expander.Header>
         <StackPanel Margin="0,12,0,0"><Button Content="查看全部历史与导出…" Click="TaskHistoryClick" HorizontalAlignment="Left" Margin="0,0,0,8"/><StackPanel x:Name="Sessions"/><TextBlock x:Name="ProgressText" Margin="0,8" AutomationProperties.LiveSetting="Polite"/></StackPanel>
        </Expander>
-       <Border x:Name="QueueResumeBanner" Background="{DynamicResource WarningSurface}" Padding="10" Margin="0,8,0,0" Visibility="Collapsed"><DockPanel><Button x:Name="QueueResumeButton" DockPanel.Dock="Right" Content="继续上次队列" Click="QueueContinueClick" Margin="8,0,0,0"/><TextBlock x:Name="QueueResumeText" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/></DockPanel></Border>
-       <Expander x:Name="TaskExpander" Margin="0,8,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" AutomationProperties.Name="任务队列" ToolTip="任务卡片、队列与人工验收">
-        <Expander.Header><TextBlock x:Name="TaskHeading" Text="任务队列" FontWeight="SemiBold" Margin="4,0" MinHeight="36" VerticalAlignment="Center"/></Expander.Header>
+       <Border x:Name="QueueResumeBanner" Style="{StaticResource Notice}" Margin="0,8,0,0" Visibility="Collapsed"><DockPanel><Button x:Name="QueueResumeButton" DockPanel.Dock="Right" Content="继续上次队列" Click="QueueContinueClick" Margin="12,0,0,0"/><TextBlock x:Name="QueueResumeText" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{DynamicResource WarningInk}" AutomationProperties.LiveSetting="Polite"/></DockPanel></Border>
+       <Expander x:Name="TaskExpander" Margin="0,12,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" AutomationProperties.Name="任务队列" ToolTip="任务卡片、队列与人工验收">
+        <Expander.Header><TextBlock x:Name="TaskHeading" Text="任务队列" FontWeight="SemiBold" VerticalAlignment="Center"/></Expander.Header>
         <StackPanel Margin="0,12,0,0">
          <DockPanel Margin="0,0,0,8">
           <Button DockPanel.Dock="Right" x:Name="NewTaskButton" Content="＋ 新建任务" Style="{StaticResource QuietButton}" Click="NewTaskClick" AutomationProperties.AutomationId="NewTask" Margin="8,0,0,0"/>
@@ -174,7 +175,7 @@
          </DockPanel>
          <TextBlock Text="实际等待顺序（优先级高的先执行，同优先级按入队顺序）" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,6"/>
          <StackPanel x:Name="QueueList" Margin="0,0,0,12"/>
-         <DockPanel Margin="0,0,0,8"><ComboBox DockPanel.Dock="Right" x:Name="TaskFilter" SelectedIndex="0" Width="110" Margin="8,0,0,0" SelectionChanged="TaskFilterChanged" AutomationProperties.Name="任务范围"><ComboBoxItem Content="活动任务"/><ComboBoxItem Content="已归档"/><ComboBoxItem Content="全部任务"/></ComboBox><TextBox x:Name="TaskSearch" TextChanged="TaskSearchChanged" AutomationProperties.Name="搜索任务名称或项目" ToolTip="按任务名称、Agent 或项目路径搜索"/></DockPanel>
+         <DockPanel Margin="0,0,0,8"><ComboBox DockPanel.Dock="Right" x:Name="TaskFilter" SelectedIndex="0" Width="110" Margin="8,0,0,0" SelectionChanged="TaskFilterChanged" AutomationProperties.Name="任务范围"><ComboBoxItem Content="活动任务"/><ComboBoxItem Content="已归档"/><ComboBoxItem Content="全部任务"/></ComboBox><TextBox x:Name="TaskSearch" TextChanged="TaskSearchChanged" AutomationProperties.Name="搜索任务名称或项目" local:Hint.Text="搜索任务名称、Agent 或项目路径" ToolTip="按任务名称、Agent 或项目路径搜索"/></DockPanel>
          <TextBlock x:Name="TaskEmptyText" Style="{StaticResource Caption}" TextWrapping="Wrap" Visibility="Collapsed"/>
          <StackPanel x:Name="TaskList"/>
         </StackPanel>
@@ -185,7 +186,7 @@
    </ScrollViewer>
    <Border Grid.Row="2" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
     <StackPanel>
-     <Border x:Name="ErrorBanner" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12,8" Margin="0,0,0,12">
+     <Border x:Name="ErrorBanner" Background="{DynamicResource WarningSurface}" CornerRadius="10" Padding="12,8" Margin="0,0,0,12">
       <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Visible"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ErrorText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>
       <ScrollViewer MaxHeight="96" VerticalScrollBarVisibility="Auto"><TextBox x:Name="ErrorText" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource WarningInk}" AutomationProperties.Name="错误详情，可选择复制" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
      </Border>

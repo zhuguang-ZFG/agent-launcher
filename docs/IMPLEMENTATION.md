@@ -1644,3 +1644,18 @@ powershell -NoProfile -File scripts/test.ps1
 - 后续仅修测试：验收勾选及同类移出队列操作，沿用 50 × 100 ms 等待上限，同时核对内存与磁盘版本一致、两边目标状态均已更新后继续；不重试产品写入或绕过版本保护，原断言保留并强化。配套集成构建通过，两次独立根完整 WPF 均 **540/0、退出 0**，分别 **53.46 / 53.18 秒**，证据 `ui-task-published/` 与 `ui-task-published-repeat/`。没有临时调度钩子或产品改动；main 最终结果以补丁推送后的 CI 为准。
 - main run `46040779862` 的完整 WPF **540/0、64.72 秒**，随后独立 embedded 检查失败。原 CI 未保留 `embedded-ui.json`，不能断定该次的具体失败阶段；现将报告加入上传清单并在脚本失败时输出内容。原构建本机六次复跑均通过，静态检查另发现重连后 `Client` 已赋值但初始化尚未完成时，测试可能先搜索历史，随后初始化的 `ReturnToLive` 丢弃搜索状态。
 - 确定复现：仅临时探针在发布 Client 后延迟 250 ms，旧测试实际失败于「历史搜索未返回已滚出的输出」；测试改为等待新连接首帧及 READY 后，同一延迟探针全部通过。产品源码按原字节恢复，无延迟钩子提交；最终无注入配套构建和真实 embedded 检查也通过，保留原 10 秒等待及 60 秒总限。证据 `embedded-reconnect-red.json`、`embedded-reconnect-green.json`、`embedded-final.json`；六次未复现结果为 `embedded-ci-local.json` 和 `embedded-ci-repeat-1..5.json`。本次仅改测试完成边界和 CI 诊断。
+
+## 105. 界面精美度与易用性调整（2026-11-28，Asia/Shanghai）
+
+只改 `AgentLauncher.App` 的样式与布局标记，不涉及资源保护、启动合同、持久化或 Worker。
+
+- 修复：深色主题下字符串标题的折叠区（「启动选项」「组合与批量设置」）标题沿用系统默认前景色，几乎不可读；标题按钮现继承 Expander 的主题前景并统一为 14 半粗。「运行记录」「任务队列」标题不再因 `MinHeight` 偏上。
+- 右键与下拉菜单项、分隔线改为主题模板（圆角高亮、快捷键提示、最近项目的当前项勾选标记）；菜单标题不再把下划线当作访问键，路径中的 `_` 原样显示。
+- 输入框新增空值提示文字（附加属性 `Hint.Text`，仅外观）：项目路径、Agent 筛选、任务搜索、快捷操作搜索。焦点边框改为内侧描边，不再因边框变粗使内容位移。
+- 顶栏的项目切换与快捷操作改为带边框的入口，并与内容卡片左右对齐；配置行与组合设置的内层卡片去掉第二层阴影；警告条统一 10 圆角与内边距。
+- `ListBox`/`ListBoxItem` 使用主题模板（改动文件、同步链路、冲突清单、快捷操作列表），悬停不再改变边框粗细；对话框默认按钮（应用/关闭）与快捷操作「打开」使用主色。
+- 未处理：窄屏导航栏中「补齐本机 Agent」仍会折行；`RailOverflowMenu` 的菜单项序列由既有检查固定，本次未改。
+
+验证（本机，INTEGRATION_TESTS 构建，独立运行目录 `artifacts/test-runtime-ui-polish`，脚本 `artifacts/ui-polish-check.ps1`）：完整 WPF 检查 **541/0、退出 0**（新增「expander header text follows theme ink」），embedded 检查退出 0、`Passed=true`；证据与截图在 `artifacts/ui-polish/`、`artifacts/ui-polish-embedded.json`。已人工查看浅/深 1040、浅 650、深 16 项、快捷操作 150%、任务表单截图。
+
+限制：未运行 `scripts/test.ps1` 的模型、集成、原型与浏览器阶段（本次未改这些代码）；新增检查未在旧样式上做过失败对照；菜单弹出态、输入框提示文字没有截图或自动断言；高对比度主题未实测。CI 结果以推送后的 `gate` 为准。
