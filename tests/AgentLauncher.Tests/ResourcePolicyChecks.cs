@@ -20,7 +20,7 @@ internal static class ResourcePolicyChecks
             if (accepted.Draft.SchemaVersion != ConfigurationCompatibility.CurrentSchemaVersion) throw new Exception("draft schema not upgraded");
             if (accepted.Draft.Slots.Count != 4) throw new Exception("slot count changed");
             if (accepted.Draft.Slots[1].Directory != @"D:\proj\keep" || accepted.Draft.Slots[1].Note != "keep") throw new Exception("user fields rewritten");
-            if (accepted.Draft.Slots[1].AgentId != "codex" || accepted.Draft.Slots[0].Enabled != true) throw new Exception("slot selection rewritten");
+            if (accepted.Draft.Slots[1].AgentId != "codex" || accepted.Draft.Slots[0].Enabled || accepted.Draft.Slots[0].AgentId != "pi") throw new Exception("retired slot was not disabled safely");
             if (accepted.Draft.Resource.Mode != "practical") throw new Exception("default mode is not practical");
             if (accepted.Draft.Resource.JobMemoryLimit != ResourcePolicy.DefaultJobMemoryLimit) throw new Exception("job cap default lost");
             if (accepted.Draft.Resource.PlanningBytes != ResourcePolicy.DefaultPlanningBytes) throw new Exception("planning default lost");
@@ -187,7 +187,7 @@ internal static class ResourcePolicyChecks
 
         Test("16-slot mixed draft persists and reloads through Accept", () =>
         {
-            var agents = new[] { "pi", "codex", "claude", "gemini", "opencode", "hermes", "omp", "kimi", "qoder", "custom", "pi", "codex", "claude", "gemini", "hermes", "custom" };
+            var agents = new[] { "omp", "codex", "claude", "omp", "codex", "claude", "omp", "codex", "claude", "omp", "codex", "claude", "omp", "codex", "claude", "omp" };
             var config = new Configuration { SchemaVersion = 2 };
             config.Draft.SchemaVersion = 2;
             config.Draft.Project = Path.Combine(temp, "project");
@@ -195,7 +195,7 @@ internal static class ResourcePolicyChecks
             {
                 Enabled = i % 3 == 0,
                 AgentId = agents[i],
-                CustomName = agents[i] == "custom" ? "自定义" + i : null,
+                CustomName = i % 5 == 0 ? "自定义" + i : null,
                 Directory = Path.Combine(temp, "slot-" + i),
                 Note = "note-" + i,
                 Profiles = new() { [agents[i]] = new() { Executable = Path.Combine(temp, agents[i] + i + ".exe"), Arguments = ["--n", i.ToString()] } }
@@ -429,7 +429,7 @@ internal static class ResourcePolicyChecks
         Test("ACC-S3A04 pool identity and limits are part of the launch digest and policy hash", () =>
         {
             var item = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,
-                new("C:\agent.exe", [], "exe"), jobLimit, "agent", PoolId: poolId);
+                new("C:\agent.exe", [], "exe"), jobLimit, "agent", AgentId: "codex", PoolId: poolId);
             var other = item with { PoolId = Guid.NewGuid() };
             if (ResourcePolicy.PlanDigest([item]) == ResourcePolicy.PlanDigest([other])) throw new Exception("plan digest ignored the pool");
             if (ResourcePolicy.PolicyHash(shared) == ResourcePolicy.PolicyHash(shared with { PoolMemoryLimit = 2 * ResourcePolicy.GiB })) throw new Exception("policy hash ignored the pool limit");
@@ -439,7 +439,7 @@ internal static class ResourcePolicyChecks
         Test("ACC-S3A06 ledger migration reads version 1 as independent and rejects unknown pool references", () =>
         {
             var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,
-                new("C:\\agent.exe", [], "exe"), jobLimit, "agent");
+                new("C:\\agent.exe", [], "exe"), jobLimit, "agent", AgentId: "codex");
             var legacy = new Ledger { SchemaVersion = 1 };
             legacy.Entries.Add(new() { Plan = plan });
             var migrated = LedgerMigration.Accept(legacy);
@@ -548,7 +548,7 @@ internal static class ResourcePolicyChecks
         Test("ACC-S3A07 boot rollover settles entries and retires pool records", () =>
         {
             var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,
-                new("C:\\agent.exe", [], "exe"), jobLimit, "agent", PoolId: poolId);
+                new("C:\\agent.exe", [], "exe"), jobLimit, "agent", AgentId: "codex", PoolId: poolId);
             var ledger = new Ledger { SchemaVersion = 2, BootId = "old" };
             ledger.Pools.Add(new() { Id = poolId, MemoryLimit = jobLimit, PolicyHash = "h", BatchId = Guid.NewGuid() });
             ledger.Entries.Add(new() { Plan = plan, State = "Creating" });
@@ -575,7 +575,7 @@ internal static class ResourcePolicyChecks
             if (!rejected) throw new Exception("unknown pool mode accepted");
             draft.Resource.Pool = ResourcePolicy.PoolShared;
             var item = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "pooled", "C:\\p", new WorkspaceIdentity("k", "C:\\p"), false,
-                new("C:\agent.exe", [], "exe"), jobLimit, "agent");
+                new("C:\agent.exe", [], "exe"), jobLimit, "agent", AgentId: "codex");
             rejected = false;
             try { ResourcePolicy.ValidateLaunchItem(item, shared, total); } catch (InvalidDataException) { rejected = true; }
             if (!rejected) throw new Exception("shared mode accepted an item without a pool id");
@@ -602,7 +602,7 @@ internal static class ResourcePolicyChecks
             var directory = cwd ?? planDir;
             return new(Guid.NewGuid(), Guid.NewGuid(), 1, name, directory, PhysicalDirectory.Workspace(directory), shared,
                 new CommandSpec("C:\\exe\\agent.exe", args, "exe"), cap ?? ResourcePolicy.DefaultJobMemoryLimit, "agent",
-                PlanningBytes: planning, ResourceMode: "practical");
+                PlanningBytes: planning, ResourceMode: "practical", AgentId: "codex");
         }
 
         Test("ACC-R01 PlanDigest is unambiguous and includes Shared and Workspace", () =>
@@ -618,14 +618,14 @@ internal static class ResourcePolicyChecks
             var relocated = shared with { Cwd = otherDir, Workspace = PhysicalDirectory.Workspace(otherDir) };
             if (ResourcePolicy.PlanDigest([shared]) == ResourcePolicy.PlanDigest([relocated]))
                 throw new Exception("Workspace/Cwd was omitted from digest");
-            var bound = shared with { SourceSlotId = Guid.NewGuid(), AgentId = "pi" };
+            var bound = shared with { SourceSlotId = Guid.NewGuid(), AgentId = "omp" };
             if (ResourcePolicy.PlanDigest([bound]) == ResourcePolicy.PlanDigest([bound with { SourceSlotId = Guid.NewGuid() }]))
                 throw new Exception("stable source slot was omitted from digest");
             if (ResourcePolicy.PlanDigest([bound]) == ResourcePolicy.PlanDigest([bound with { AgentId = "codex" }]))
                 throw new Exception("AgentId was omitted from digest");
             if (ResourcePolicy.PlanDigest([bound]) == ResourcePolicy.PlanDigest([bound with { Position = 16 }]))
                 throw new Exception("slot position was omitted from digest");
-            var remote = shared with { RemoteExecution = new RemoteExecutionSpec("vps.example.com", 22, "root", "agent", "pi", "/home/agent/work", ["--y"], 2L * 1024 * 1024 * 1024, null) };
+            var remote = shared with { RemoteExecution = new RemoteExecutionSpec("vps.example.com", 22, "root", "agent", "omp", "/home/agent/work", ["--y"], 2L * 1024 * 1024 * 1024, null) };
             if (ResourcePolicy.PlanDigest([shared]) == ResourcePolicy.PlanDigest([remote]))
                 throw new Exception("remote execution identity was omitted from digest");
             if (ResourcePolicy.PlanDigest([remote]) == ResourcePolicy.PlanDigest([remote with { RemoteExecution = remote.RemoteExecution! with { MemoryLimitBytes = 4L * 1024 * 1024 * 1024 } }]))
@@ -672,6 +672,34 @@ internal static class ResourcePolicyChecks
             try { ResourcePolicy.ValidateLaunchItem(Item("mis", ["--a"], planning: ResourcePolicy.DefaultPlanningBytes, cap: 4 * ResourcePolicy.GiB), policy, total); }
             catch (InvalidDataException) { mismatch = true; }
             if (!mismatch) throw new Exception("item cap disagreed with approved policy");
+        });
+
+        Test("ACC-R02 agent plans must name a supported Agent", () =>
+        {
+            var rejected = false;
+            try { ResourcePolicy.ValidateLaunchItem(Item("missing-agent", []) with { AgentId = null }, policy, total); }
+            catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("agent plan without AgentId was accepted");
+            rejected = false;
+            try { ResourcePolicy.ValidateLaunchItem(Item("retired-agent", []) with { AgentId = "pi" }, policy, total); }
+            catch (InvalidDataException) { rejected = true; }
+            if (!rejected) throw new Exception("retired Agent launch was accepted");
+            var git = Item("git", []) with { Kind = "git", Budget = ResourcePolicy.GitJobMemoryLimit, PlanningBytes = ResourcePolicy.DefaultGitPlanningBytes };
+            ResourcePolicy.ValidateLaunchItem(git, policy, total);
+            var remote = Item("remote", []) with
+            {
+                Budget = 0, PlanningBytes = null, ResourceMode = null, AgentId = "omp",
+                RemoteExecution = new RemoteExecutionSpec("remote.example.com", 22, "root", "agent", "omp", "/home/agent/work", [], null, null)
+            };
+            ResourcePolicy.ValidateLaunchItem(remote, policy, total);
+            string? remoteTypeError = null;
+            try { ResourcePolicy.ValidateLaunchItem(remote with { RemoteExecution = remote.RemoteExecution! with { AgentType = "pi" } }, policy, total); }
+            catch (InvalidDataException e) { remoteTypeError = e.Message; }
+            if (remoteTypeError != "Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。") throw new Exception("retired remote Agent type did not hit its own guard: " + remoteTypeError);
+            string? mismatchError = null;
+            try { ResourcePolicy.ValidateLaunchItem(remote with { AgentId = "codex" }, policy, total); }
+            catch (InvalidDataException e) { mismatchError = e.Message; }
+            if (mismatchError != "执行计划的 Agent 类型与远程执行身份不一致。") throw new Exception("remote plan Agent identity mismatch did not hit its own guard: " + mismatchError);
         });
 
         Test("ACC-R02 nondefault custom planning cannot use legacy request omission", () =>

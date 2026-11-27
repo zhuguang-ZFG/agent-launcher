@@ -438,9 +438,9 @@ internal static class SyncReliabilityChecks
 
         test("R43 resource boundaries unchanged and single link never means all converged", () =>
         {
-            assert(ResourcePolicy.MaxConcurrentAgents == 8, "8 窗格名额被改动");
+            assert(ResourcePolicy.MaxConcurrentAgents == 6, "6 窗格名额被改动");
             assert(ResourcePolicy.MaxSlots == 16, "16 保存槽位被改动");
-            var remote = new ControlEntry { Plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "r", "D:\\fixture", new("D:\\fixture", "k"), false, new("pi", [], "remote"), 0, RemoteExecution: new RemoteExecutionSpec("jy.example.com", 22, "root", "agent", "pi", "/home/agent/work", [], null, null)), State = "Disconnected" };
+            var remote = new ControlEntry { Plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "r", "D:\\fixture", new("D:\\fixture", "k"), false, new("omp", [], "remote"), 0, AgentId: "omp", RemoteExecution: new RemoteExecutionSpec("jy.example.com", 22, "root", "agent", "omp", "/home/agent/work", [], null, null)), State = "Disconnected" };
             assert(!ControlEntryStates.IsTerminal(remote), "远程 Disconnected 被当成终态（会腾出名额）");
             assert(SyncReliability.OverallLabel(new[] { SyncLinkState.Converged }) != "全部已收敛", "单链路被写成全部已收敛");
         });
@@ -507,7 +507,7 @@ internal static class SyncReliabilityChecks
         test("R42 create arguments use two-way-safe and keep the exact ignore list", () =>
         {
             var spec = new WorkspaceSyncSpec(WorkspaceSyncMode.Mutagen, "D:\\fixture\\hub", "/home/agent/work", null, null);
-            var remote = new RemoteExecutionSpec("jy.example.com", 22, "root", "agent", "pi", "/home/agent/work", [], null, null, spec);
+            var remote = new RemoteExecutionSpec("jy.example.com", 22, "root", "agent", "omp", "/home/agent/work", [], null, null, spec);
             var args = AgentLauncher.Windows.WorkspaceSync.BuildCreateArguments(spec, remote, "agent-launcher-test0001");
             var modeIndex = Array.IndexOf(args, "--sync-mode");
             assert(modeIndex >= 0 && args[modeIndex + 1] == "two-way-safe", "新建会话不是 two-way-safe");
@@ -637,14 +637,14 @@ internal static class SyncReliabilityChecks
             Directory.CreateDirectory(temp);
             try
             {
-                var host = new RemoteHost(Guid.NewGuid(), "R41 VPS", "r41.example.com", 22, "root", "agent", ["pi"], null, WorkspaceSyncMode.None);
+                var host = new RemoteHost(Guid.NewGuid(), "R41 VPS", "r41.example.com", 22, "root", "agent", ["omp"], null, WorkspaceSyncMode.None);
                 var configuration = new Configuration { SchemaVersion = 2, RemoteHosts = [host] };
                 var draft = new Draft
                 {
                     SchemaVersion = 2,
                     Project = temp,
                     DirectoryMode = "isolated",
-                    Slots = [new Slot { Enabled = true, AgentId = "pi", RemoteHostId = host.Id, RemoteDirectory = "/home/agent/work" }]
+                    Slots = [new Slot { Enabled = true, AgentId = "omp", RemoteHostId = host.Id, RemoteDirectory = "/home/agent/work" }]
                 };
                 var preparer = new AgentLauncher.Windows.WorkspacePreparer(Path.Combine(temp, "worktrees"));
                 var rejected = false;

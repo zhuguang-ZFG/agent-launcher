@@ -4,9 +4,9 @@ internal static class LongTaskResourceChecks
 {
     internal static void Run(Action<string, Action> test)
     {
-        test("ACC-R10 Omp and Qoder low limits suggest a long-task profile only when enabled", () =>
+        test("ACC-R10 Omp low limits suggest a long-task profile only when enabled", () =>
         {
-            foreach (var agent in new[] { "omp", "qoder" })
+            foreach (var agent in new[] { "omp" })
             {
                 var draft = new Draft { Slots = [new() { AgentId = agent, Enabled = true }] };
                 Assert(LongTaskResources.Suggested(draft), "missing low-limit advice for " + agent);

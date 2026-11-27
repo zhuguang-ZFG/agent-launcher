@@ -74,11 +74,23 @@ public static class ConfigurationCompatibility
         Upgrade(config.Draft);
         if (config.LastEdited != null) Upgrade(config.LastEdited);
         if (config.Templates != null) foreach (var template in config.Templates.Values) Upgrade(template);
+        RetireUnsupported(config.Draft);
+        if (config.LastEdited != null) RetireUnsupported(config.LastEdited);
+        if (config.Templates != null) foreach (var template in config.Templates.Values) RetireUnsupported(template);
         config.SchemaVersion = CurrentSchemaVersion;
         config.Draft.Validate();
         config.LastEdited?.Validate();
         if (config.Templates != null) foreach (var template in config.Templates.Values) template.Validate();
         return config;
+    }
+
+    private static void RetireUnsupported(Draft draft)
+    {
+        if (draft.Slots is null) return;
+        foreach (var slot in draft.Slots)
+        {
+            if (slot != null && !Agents.IsSupported(slot.AgentId)) slot.Enabled = false;
+        }
     }
 
     private static void EnsureSupported(Draft draft)
@@ -183,7 +195,7 @@ public static class ResourcePolicy
     public const int MaxSlots = 16;
     // Ray-style fixed concurrency pool: cap how many agent panes run at once instead of
     // refusing launches when readings dip; the kernel Job cap stays the hard wall per process.
-    public const int MaxConcurrentAgents = 8;
+    public const int MaxConcurrentAgents = 6;
     public const string PoolIndependent = "independent";
     public const string PoolShared = "shared";
     public const ulong AgentBudget = 2 * GiB;
@@ -439,8 +451,17 @@ public static class ResourcePolicy
     public static void ValidateLaunchItem(LaunchItem item, ResourcePolicySnapshot policy, ulong totalPhysical)
     {
         if (item is null) throw new InvalidDataException("执行计划不支持。");
+        if (item.Kind is not (null or "agent" or "git"))
+            throw new InvalidDataException("执行计划不支持。");
+        // Git 准备不是 Agent 窗格；其余计划必须携带三种可启动 Agent 之一，缺省 AgentId 不得绕过白名单。
+        if (item.Kind != "git" && !Agents.IsSupported(item.AgentId))
+            throw new InvalidDataException(item.AgentId is null
+                ? "执行计划缺少 Agent 身份，仅支持 Omp、Codex 和 Claude Code。"
+                : "Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
         if (item.RemoteExecution is {} remote)
         {
+            if(!Agents.IsSupported(remote.AgentType))throw new InvalidDataException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
+            if(!string.Equals(item.AgentId,remote.AgentType,StringComparison.Ordinal))throw new InvalidDataException("执行计划的 Agent 类型与远程执行身份不一致。");
             remote.Validate();
             if(remote.WorkspaceSync is {Mode:not WorkspaceSyncMode.None} sync&&
                 !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(sync.LocalPath)),Path.TrimEndingDirectorySeparator(Path.GetFullPath(item.Cwd)),StringComparison.OrdinalIgnoreCase))
@@ -457,8 +478,6 @@ public static class ResourcePolicy
                 throw new InvalidDataException("规划估算必须在允许范围内且不超过 Job 上限。");
             return;
         }
-        if (item.Kind is not (null or "agent"))
-            throw new InvalidDataException("执行计划不支持。");
         var maxJob = totalPhysical < MaxJobMemoryLimit ? totalPhysical : MaxJobMemoryLimit;
         if (item.Budget < MinJobMemoryLimit || item.Budget > maxJob)
             throw new InvalidDataException(item.Budget > totalPhysical ? "Job 内存上限不能超过可用机器总量。" : "Job 内存上限不能超过 8 GiB。");

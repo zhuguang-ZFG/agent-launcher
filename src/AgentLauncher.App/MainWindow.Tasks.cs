@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
@@ -91,6 +91,7 @@ public partial class MainWindow
         }
         var book = taskBook;
         TaskHeading.Text = $"任务队列 · {book.Tasks.Count(task => !task.Archived)} 张 · 待执行 {book.Queue.Count} · 归档 {book.Tasks.Count(task => task.Archived)}";
+        if (book.Attempts.Count >= 900) TaskHeading.Text += $" · 尝试记录 {book.Attempts.Count}/{TaskSchema.MaxAttempts}，可从历史与诊断迁移";
         TaskEmptyText.Text = "还没有任务。新建任务后加入队列，启动器会按优先级依次交给 Terminal。";
         TaskEmptyText.Visibility = book.Tasks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         var hold = TaskUsability.OrderedQueue(book).FirstOrDefault(entry => InQueueScope(entry.TaskId) && !entry.Deferred && entry.Detail.Length > 0);
@@ -259,87 +260,89 @@ public partial class MainWindow
         if (queueEnabled) await PumpQueueAsync();
     }
 
+    private AgentProfile ConfiguredTaskProfile(string agentId) =>
+        config.Draft.Slots.OrderByDescending(slot => slot.Enabled && slot.AgentId == agentId)
+            .Select(slot => slot.Profiles.GetValueOrDefault(agentId)).FirstOrDefault(profile => profile is not null && (profile.Executable.Length > 0 || profile.Arguments.Length > 0))?.Copy() ?? new();
+
     private async Task NewTaskAsync()
     {
         if (taskBook is null) { ErrorText.Text = taskLoadError; return; }
         if (taskBook.Tasks.Count(task => !task.Archived) >= TaskSchema.MaxTasks) { ErrorText.Text = "活动任务已达 200 张，请用任务卡片的「归档」释放名额；历史会保留。"; return; }
-        var dialog = new FormWindow(this, "新建任务",
-            [("name", "任务名称", "", false), ("project", "项目目录", config.Draft.Project, false), ("agent", "Agent", "omp", false),
-             ("priority", "优先级 0–100", "0", false), ("mode", "目录策略", "isolated", false),
-             ("delivery", "任务交付方式", "manual", false), ("description", "任务说明", "", true), ("acceptance", "验收项（每行一项）", "", true)],
-            "自动交付会将说明和验收项作为初始任务发送给选定 Agent。非交互执行结束后队列继续；工具权限仍由 Agent 决定，结果需要人工验收。说明会保存在本地启动记录中，请勿填写密钥。",
-            choices: new()
-            {
-                ["agent"] = [.. AgentChoices().Select(choice => (choice.Id, choice.Label))],
-                ["delivery"] = DeliveryChoices,
-                ["mode"] = [("isolated", "独立工作目录（可并行）"), ("shared", "共享项目目录")]
-            },
-            suggestions: new() { ["project"] = [.. config.RecentProjects] });
-        if (dialog.ShowDialog() != true) return;
-        var project = dialog.Values["project"].Trim();
-        if (!Path.IsPathFullyQualified(project) || !Directory.Exists(project)) { ErrorText.Text = "任务项目必须是存在的本地绝对目录。"; return; }
-        var priority = int.TryParse(dialog.Values["priority"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? Math.Clamp(parsed, 0, 100) : 0;
-        var acceptance = dialog.Values["acceptance"].Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).ToArray();
-        var name = dialog.Values["name"];
-        var agent = dialog.Values["agent"];
-        var description = dialog.Values["description"];
-        var mode = dialog.Values["mode"];
-        var resource = config.Draft.Resource;
-        TaskCard? created = null;
-        var delivery=dialog.Values["delivery"];
-        if (!await UpdateTasksAsync(book => {created = TaskBookOps.Create(book, name, project, agent, new AgentProfile(), description, acceptance, mode, resource, priority);created.DeliveryMode=delivery;}, "任务保存失败")) return;
-        QueueStatusText.Text = created is null ? "任务已保存。" : $"已创建任务：{created.Name}。加入队列后才会启动。";
+        var agent = config.Draft.Slots.FirstOrDefault(slot => slot.Enabled && Agents.IsSupported(slot.AgentId))?.AgentId ?? "omp";
+        await EditTaskFormAsync(null, agent, ConfiguredTaskProfile(agent));
     }
 
     private static readonly (string,string)[] DeliveryChoices=[("manual","手动交付：打开 Agent 后粘贴"),("interactive","发送任务：保留交互终端"),("automatic","自动执行：发送任务并在完成后退出")];
 
-    private async Task EditTaskAsync(Guid id)
+    private Task EditTaskAsync(Guid id)
     {
-        if (taskBook is null) return;
-        var task = taskBook.Tasks.SingleOrDefault(candidate => candidate.Id == id);
-        if (task is null) return;
-        var dialog = new FormWindow(this, "任务 · " + task.Name,
-            [("name", "任务名称", task.Name, false), ("project", "项目目录", task.Project, false), ("agent", "Agent", task.AgentId, false),
-             ("priority", "优先级 0–100", task.Priority.ToString(CultureInfo.InvariantCulture), false), ("mode", "目录策略", task.DirectoryMode, false),
-             ("delivery", "任务交付方式", task.DeliveryMode, false), ("description", "任务说明", task.Description, true), ("acceptance", "验收项（每行一项）", string.Join(Environment.NewLine, task.Acceptance.Select(item => item.Text)), true),
-             ("args", "Agent 参数", "", false)],
-            "修改启动配置或自动交付内容后需重新入队。自动交付会发送说明和验收要求，续接时不会重发。说明会保存在本地启动记录中，请勿填写密钥。",
+        var task = taskBook?.Tasks.SingleOrDefault(candidate => candidate.Id == id);
+        return task is null ? Task.CompletedTask : EditTaskFormAsync(task, task.AgentId, task.Profile.Copy());
+    }
+
+    private Task EditTaskFormAsync(TaskCard? task, string agentId, AgentProfile initialProfile)
+    {
+        var modeChoices = new List<(string,string)> { ("isolated", "独立工作目录（可并行）"), ("shared", "共享项目目录") };
+        if (task?.DirectoryMode == "prepared") modeChoices.Add(("prepared", "沿用此任务已准备的工作目录"));
+        var dialog = new FormWindow(this, task is null ? "新建任务" : "任务 · " + task.Name,
+            [("name", "任务名称", task?.Name ?? "", false), ("project", "项目目录", task?.Project ?? config.Draft.Project, false), ("agent", "Agent", agentId, false),
+             ("exe", "Agent 程序（留空自动查找）", initialProfile.Executable, false), ("args", "Agent 参数", "", false),
+             ("priority", "优先级 0–100", (task?.Priority ?? 0).ToString(CultureInfo.InvariantCulture), false), ("mode", "目录策略", task?.DirectoryMode ?? "isolated", false),
+             ("delivery", "任务交付方式", task?.DeliveryMode ?? "manual", false), ("description", "任务说明", task?.Description ?? "", true),
+             ("acceptance", "验收项（每行一项）", string.Join(Environment.NewLine, task?.Acceptance.Select(item => item.Text) ?? []), true)],
+            "程序和参数可从当前槽位继承，也可单独选择。切换 Agent 后请点击「继承所选 Agent 配置」。独立任务会创建 worktree，后续在该目录续接和验收。自动交付内容会保存在本地记录，请勿填写密钥。",
             choices: new()
             {
                 ["agent"] = [.. AgentChoices().Select(choice => (choice.Id, choice.Label))],
                 ["delivery"] = DeliveryChoices,
-                ["mode"] = [("isolated", "独立工作目录（可并行）"), ("shared", "共享项目目录")]
+                ["mode"] = [.. modeChoices]
             },
-            suggestions: new() { ["project"] = [.. config.RecentProjects] },
-            argumentLists: new() { ["args"] = task.Profile.Arguments });
-        if (dialog.ShowDialog() != true) return;
-        var project = dialog.Values["project"].Trim();
-        if (!Path.IsPathFullyQualified(project) || !Directory.Exists(project)) { ErrorText.Text = "任务项目必须是存在的本地绝对目录。"; return; }
-        var priority = int.TryParse(dialog.Values["priority"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? Math.Clamp(parsed, 0, 100) : task.Priority;
-        var acceptance = dialog.Values["acceptance"].Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).ToArray();
-        var arguments = dialog.ArgumentValues["args"];
-        var agent = dialog.Values["agent"];
-        var name = dialog.Values["name"].Trim();
-        var mode = dialog.Values["mode"];
-        var description = dialog.Values["description"];
-        var delivery=dialog.Values["delivery"];
-        await UpdateTasksAsync(book =>
-        {
-            var previous = book.Tasks.Single(candidate => candidate.Id == id);
-            var checkedTexts = previous.Acceptance.Where(item => item.Checked).Select(item => item.Text).ToHashSet(StringComparer.Ordinal);
-            TaskBookOps.Edit(book, id, draft =>
+            suggestions: new() { ["project"] = [.. config.RecentProjects], ["exe"] = (discoveredInstalls.GetValueOrDefault(agentId) ?? []).Append(initialProfile.Executable).Where(path => path.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() },
+            argumentLists: new() { ["args"] = initialProfile.Arguments },
+            actions: new() { ["继承所选 Agent 配置"] = owner =>
             {
-                draft.Name = name;
-                draft.Project = Path.GetFullPath(project);
-                if (agent != draft.AgentId) { draft.AgentId = agent; draft.Profile = new AgentProfile(); }
-                else draft.Profile.Arguments = [.. arguments];
-                draft.Priority = priority;
-                draft.DirectoryMode = mode;
-                draft.Description = description;
-                draft.DeliveryMode = delivery;
-                draft.Acceptance = acceptance.Select(text => new AcceptanceItem { Id = Guid.NewGuid().ToString("N"), Text = text, Checked = checkedTexts.Contains(text) }).ToList();
-            });
-        }, "任务保存失败");
+                var form = (FormWindow)owner; var profile = ConfiguredTaskProfile(form.ReadValue("agent"));
+                form.SetValue("exe", profile.Executable); form.SetArguments("args", profile.Arguments);
+                form.SetNote("已继承当前槽位的所选 Agent 程序和参数。保存前可继续修改；留空程序会自动查找。");
+            } });
+        dialog.ApplyAsync = async form =>
+        {
+            var project = form.Values["project"].Trim();
+            if (!Path.IsPathFullyQualified(project) || !Directory.Exists(project)) throw new InvalidDataException("任务项目必须是存在的本地绝对目录。");
+            if (!int.TryParse(form.Values["priority"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var priority) || priority is < 0 or > 100) throw new InvalidDataException("优先级必须是 0–100 的整数。");
+            var executable = form.Values["exe"].Trim();
+            if (executable.Length > 0 && (!Path.IsPathFullyQualified(executable) || !File.Exists(executable))) throw new InvalidDataException("Agent 程序必须是存在的绝对文件路径，或留空自动查找。");
+            var profile = new AgentProfile { Executable = executable, Arguments = [.. form.ArgumentValues["args"]] };
+            var acceptance = form.Values["acceptance"].Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).ToArray();
+            var name = form.Values["name"].Trim(); var agent = form.Values["agent"]; var mode = form.Values["mode"];
+            var description = form.Values["description"]; var delivery = form.Values["delivery"];
+            if (!Agents.IsSupported(agent)) throw new InvalidDataException("请选择受支持的 Agent。");
+            var saved = await UpdateTasksAsync(book =>
+            {
+                if (task is null)
+                {
+                    var created = TaskBookOps.Create(book, name, Path.GetFullPath(project), agent, profile, description, acceptance, mode, config.Draft.Resource, priority);
+                    created.DeliveryMode = delivery;
+                }
+                else
+                {
+                    var previous = book.Tasks.Single(candidate => candidate.Id == task.Id);
+                    if (previous.Revision != task.Revision) throw new IOException("任务已被其他操作修改，请核对后重新打开编辑；当前输入仍保留。");
+                    var checkedTexts = previous.Acceptance.Where(item => item.Checked).Select(item => item.Text).ToHashSet(StringComparer.Ordinal);
+                    TaskBookOps.Edit(book, task.Id, draft =>
+                    {
+                        draft.Name = name; draft.Project = Path.GetFullPath(project); draft.AgentId = agent; draft.Profile = profile;
+                        draft.Priority = priority; draft.DirectoryMode = mode; draft.Description = description; draft.DeliveryMode = delivery;
+                        draft.Acceptance = acceptance.Select(text => new AcceptanceItem { Id = Guid.NewGuid().ToString("N"), Text = text, Checked = checkedTexts.Contains(text) }).ToList();
+                    });
+                }
+            }, "任务保存失败");
+            if (!saved) form.SetError(ErrorText.Text);
+            else QueueStatusText.Text = task is null ? $"已创建任务：{name}。加入队列后才会启动。" : "任务修改已保存。";
+            return saved;
+        };
+        dialog.ShowDialog();
+        return Task.CompletedTask;
     }
 
     private async Task EnqueueTaskAsync(Guid id)
@@ -460,6 +463,15 @@ public partial class MainWindow
     {
         var book = taskBook!;
         if (book.Queue.Count == 0) { QueueStatusText.Text = "队列为空。"; return; }
+        if (book.Attempts.Count >= TaskSchema.MaxAttempts) { QueueStatusText.Text = TaskBookOps.AttemptCapacityMessage; queueEnabled = false; taskTimer.Stop(); return; }
+        try
+        {
+            var ledger = await Task.Run(TaskRecoveryReader.ReadLedger, cancellationToken);
+            if (ledger?.TaskClaims.Count >= LedgerMigration.MaxTaskClaims)
+            { QueueStatusText.Text = "领取证据已达 1200 条上限，尚未准备工作目录或新增预约。迁移任务历史不会减少领取证据；请导出记录后联系维护者迁移控制账本。"; queueEnabled = false; taskTimer.Stop(); return; }
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
+        { QueueStatusText.Text = "领取记录无法核对，尚未准备或预约：" + e.Message; return; }
         await RefreshAsync();
         cancellationToken.ThrowIfCancellationRequested();
         if (status?.Ok != true || status.Memory is null) { QueueStatusText.Text = "监控状态不可用，队列暂不启动。"; return; }
@@ -480,6 +492,7 @@ public partial class MainWindow
         }
         var entry = book.Queue.Single(candidate => candidate.Id == decision.Next.EntryId);
         var task = book.Tasks.Single(candidate => candidate.Id == entry.TaskId);
+        if(!Agents.IsSupported(task.AgentId)){await HoldEntryAsync(entry,"Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code；请编辑任务改选受支持 Agent 后重新入队。");return;}
         if (task.Revision != entry.TaskRevision) { await HoldEntryAsync(entry, "任务已被修改，请重新入队。"); return; }
         // The latch is global, but it only stops the entry whose own frozen settings ask for a conservative policy; a
         // practical/custom entry proceeds to prepare and is re-authorized (or refused) by the monitor's reserve.
@@ -555,7 +568,7 @@ public partial class MainWindow
             await HoldEntryAsync(entry, "任务资源设置无效：" + e.Message);
             return;
         }
-        var forceIsolated = entry.QuickLaunch?.IsolateWorkspace == true;
+        var forceIsolated = TaskBookOps.RequiresIsolatedWorkspace(entry);
         var pendingBudget = new BudgetItem(entry.Id, "agent", policy.PlanningBytes, policy.JobMemoryLimit,
             policy.PoolMode == ResourcePolicy.PoolShared ? entry.Id : null,
             policy.PoolMode == ResourcePolicy.PoolShared ? policy.PoolMemoryLimit : null);
@@ -645,14 +658,7 @@ public partial class MainWindow
             cancellationToken.ThrowIfCancellationRequested();
             recorded = await UpdateTasksAsync(editor =>
             {
-                TaskBookOps.StartRun(editor, entry, plan.Id, plan.BatchId, plan.Workspace.Key, entry.ResumeOf, entry.SessionRef);
-                if (forceIsolated)
-                {
-                    var bound = editor.Tasks.Single(candidate => candidate.Id == entry.TaskId);
-                    bound.Project = plan.Cwd;
-                    bound.DirectoryMode = "prepared";
-                    bound.QuickLaunch = entry.QuickLaunch! with { WorkspaceKey = plan.Workspace.Key, IsolateWorkspace = false };
-                }
+                TaskBookOps.StartRun(editor, entry, plan.Id, plan.BatchId, plan.Workspace.Key, entry.ResumeOf, entry.SessionRef, plan.Cwd);
             }, "启动记录失败");
             if (!recorded) return;
             cancellationToken.ThrowIfCancellationRequested();
@@ -671,6 +677,21 @@ public partial class MainWindow
         {
             if (!submitted) await RevokeQueueReservationAsync(plan.Id, recorded, cancellationToken.IsCancellationRequested);
         }
+    }
+
+    private async Task ArchiveTaskHistoryAsync()
+    {
+        if (queuePumping || queueEditing || closeRequested) throw new IOException("正在核对派发，请稍后再迁移历史。");
+        using var gate = taskStore.TryAcquireQueueGate() ?? throw new IOException("另一个窗口正在派发，请稍后重试。");
+        queueEnabled = false; taskTimer.Stop(); queueEditing = true;
+        try
+        {
+            var fresh = await Task.Run(taskStore.Load);
+            var ledger = await Task.Run(TaskRecoveryReader.ReadLedger);
+            taskBook = await Task.Run(() => taskStore.ArchiveHistory(fresh.Revision, id => TaskRecoveryReader.ReadAttempt(id, ledger)));
+            QueueStatusText.Text = $"已迁移 {fresh.Attempts.Count - taskBook.Attempts.Count} 条已结束历史，当前活动尝试 {taskBook.Attempts.Count}/{TaskSchema.MaxAttempts}。历史仍可搜索与验收，队列保持暂停。";
+        }
+        finally { queueEditing = false; RenderTasks(); }
     }
 
     private async Task RevokeQueueReservationAsync(Guid attemptId, bool recorded, bool cancelled)
@@ -802,16 +823,21 @@ public partial class MainWindow
         if (preset is null) { ErrorText.Text = $"当前 {Agents.Get(task.AgentId).Name} 版本（{capability.Version ?? "未知"}）没有已验证的续接参数。"; return; }
         var sessions=await Task.Run(()=>SessionDiscovery.Find(task.AgentId,task.Project));
         var actions=new Dictionary<string,Action<Window>>();
-        if(task.AgentId is "omp" or "pi")actions["选择会话文件…"]=owner=>{var pick=new Microsoft.Win32.OpenFileDialog{Title="选择原会话文件",Filter="会话文件 (*.jsonl)|*.jsonl",CheckFileExists=true};if(pick.ShowDialog(owner)==true)((FormWindow)owner).SetValue("session",pick.FileName);};
+            if(task.AgentId=="omp")actions["选择会话文件…"]=owner=>{var pick=new Microsoft.Win32.OpenFileDialog{Title="选择原会话文件",Filter="会话文件 (*.jsonl)|*.jsonl",CheckFileExists=true};if(pick.ShowDialog(owner)==true)((FormWindow)owner).SetValue("session",pick.FileName);};
         var ask = new FormWindow(this, changedProgram?"重新核对程序并登记会话":"登记会话", [("session", preset.ValueLabel ?? "会话标识", run.SessionRef ?? "", false)],
             (changedProgram?"Agent 程序已经升级或更换。当前版本的续接参数已重新检查；点击登记表示确认使用当前程序打开原会话。原始启动指纹仍保留。\n\n":"")+sessions.Note+"\n"+string.Join("\n",sessions.Sessions.Take(8).Select(s=>$"{s.Modified.LocalDateTime:g} · {s.Reference}"))+"\n\n"+TaskUsability.SessionGuide(task.AgentId) + $"\n\n对应尝试：{run.AttemptId.ToString("N")[..8]}；已验证版本 {capability.Version}。登记前请确认原会话已经结束。",
             suggestions:new(){["session"]=sessions.Sessions.Select(s=>s.Reference).ToArray()},actions:actions,applyLabel: changedProgram?"确认当前程序并登记":"核对并登记");
-        if (ask.ShowDialog() != true) return;
-        var session = ask.Values["session"].Trim();
-        if (SessionProblem(session) is { Length: > 0 } problem) { ErrorText.Text = problem; return; }
-        if(AgentProbe.Fingerprint(await Task.Run(()=>Commands.Resolve(task.AgentId,profile)))!=fingerprint)throw new IOException("登记期间程序已变化，请重新核对。");
-        if (await UpdateTasksAsync(book => TaskBookOps.RegisterSession(book, run.AttemptId, session, workspace.Key, fingerprint,reverified:changedProgram), "会话登记失败"))
-            QueueStatusText.Text = "已登记会话；续接会核对工作目录、程序指纹和已验证版本。";
+        ask.ApplyAsync = async form =>
+        {
+            var session = form.Values["session"].Trim();
+            if (SessionProblem(session) is { Length: > 0 } problem) throw new InvalidDataException(problem);
+            if (AgentProbe.Fingerprint(await Task.Run(() => Commands.Resolve(task.AgentId, profile))) != fingerprint) throw new IOException("登记期间程序已变化，请重新核对。");
+            var saved = await UpdateTasksAsync(book => TaskBookOps.RegisterSession(book, run.AttemptId, session, workspace.Key, fingerprint, reverified: changedProgram), "会话登记失败");
+            if (!saved) form.SetError(ErrorText.Text);
+            else QueueStatusText.Text = "已登记会话；续接会核对工作目录、程序指纹和已验证版本。";
+            return saved;
+        };
+        ask.ShowDialog();
     }
 
     private async Task ResumeTaskAsync(Guid id)
@@ -848,23 +874,26 @@ public partial class MainWindow
         var ask = new FormWindow(this, "续接会话", [("session", preset.ValueLabel ?? "会话标识", registered, false), ("scope", "执行范围", "batch", false)],
             TaskUsability.SessionGuide(task.AgentId) + $"\n\n续接会核对原工作目录和程序；已验证版本 {capability.Version}。默认只执行这次续接，其他等待项暂停。修改会话标识后，将与本次入队一起保存。",
             choices: new() { ["scope"] = [("batch", "只续接此任务"), ("all", "续接并执行整个队列")] }, applyLabel: "续接并入队");
-        if (ask.ShowDialog() != true) return;
-        var session = ask.Values["session"].Trim();
-        var resumeWholeQueue = ask.Values["scope"] == "all";
-        if (SessionProblem(session) is { Length: > 0 } problem) { ErrorText.Text = problem; return; }
-        try { profile.Arguments = [.. profile.Arguments, .. preset.Fill(session).Arguments]; }
-        catch (InvalidDataException e) { ErrorText.Text = e.Message; return; }
-        CommandSpec resumeCommand;
-        try { resumeCommand = await Task.Run(() => Commands.Resolve(task.AgentId, profile)); }
-        catch (Exception e) when (e is not OutOfMemoryException) { ErrorText.Text = "无法准备续接命令：" + e.Message; return; }
-        var resumeFingerprint = await Task.Run(() => AgentProbe.Fingerprint(resumeCommand));
-        if (!string.Equals(resumeFingerprint, fingerprint, StringComparison.Ordinal)) { ErrorText.Text = "准备续接命令期间 Agent 程序已变化，请稍后重试。"; return; }
-        if (!await UpdateTasksAsync(book =>
+        ask.ApplyAsync = async form =>
         {
-            TaskBookOps.RegisterSession(book, previous.AttemptId, session, workspace.Key, resumeFingerprint);
-            TaskBookOps.Enqueue(book, id, resumeCommand, resumeFingerprint, previous.AttemptId, session);
-            book.LastDispatchTaskIds = resumeWholeQueue ? null : [id];
-        }, "续接入队失败")) return;
+            var session = form.Values["session"].Trim();
+            var resumeWholeQueue = form.Values["scope"] == "all";
+            if (SessionProblem(session) is { Length: > 0 } problem) throw new InvalidDataException(problem);
+            var resumeProfile = profile.Copy();
+            resumeProfile.Arguments = [.. resumeProfile.Arguments, .. preset.Fill(session).Arguments];
+            var resumeCommand = await Task.Run(() => Commands.Resolve(task.AgentId, resumeProfile));
+            var resumeFingerprint = await Task.Run(() => AgentProbe.Fingerprint(resumeCommand));
+            if (!string.Equals(resumeFingerprint, fingerprint, StringComparison.Ordinal)) throw new IOException("准备续接命令期间 Agent 程序已变化，请稍后重试。");
+            var saved = await UpdateTasksAsync(book =>
+            {
+                TaskBookOps.RegisterSession(book, previous.AttemptId, session, workspace.Key, resumeFingerprint);
+                TaskBookOps.Enqueue(book, id, resumeCommand, resumeFingerprint, previous.AttemptId, session);
+                book.LastDispatchTaskIds = resumeWholeQueue ? null : [id];
+            }, "续接入队失败");
+            if (!saved) form.SetError(ErrorText.Text);
+            return saved;
+        };
+        if (ask.ShowDialog() != true) return;
         queueScopeTaskIds = taskBook!.LastDispatchTaskIds?.ToHashSet();
         if (!queueEnabled) { queueEnabled = true; taskTimer.Start(); RenderTasks(); }
         QueueStatusText.Text = "续接已入队；执行队列会重新核对登记会话、工作目录与程序指纹。";

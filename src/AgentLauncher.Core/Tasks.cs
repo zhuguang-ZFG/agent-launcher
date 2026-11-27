@@ -4,8 +4,8 @@ namespace AgentLauncher.Core;
 
 public static class TaskSchema
 {
-    // Version 4 adds explicit prompt delivery and program re-verification for session resume.
-    public const int Current = 4;
+    // Version 5 links immutable history archives; older writers must not overwrite those links.
+    public const int Current = 5;
     public const int MaxNameLength = 120;
     public const int MaxDescriptionLength = 20000;
     public const int MaxAcceptanceItems = 32;
@@ -33,7 +33,7 @@ public sealed class TaskCard
     [JsonRequired] public long Revision { get; set; }
     [JsonRequired] public string Name { get; set; } = "";
     [JsonRequired] public string Project { get; set; } = "";
-    [JsonRequired] public string AgentId { get; set; } = "pi";
+    [JsonRequired] public string AgentId { get; set; } = "omp";
     [JsonRequired] public AgentProfile Profile { get; set; } = new();
     public string Description { get; set; } = "";
     public string DeliveryMode { get; set; } = "manual";
@@ -66,7 +66,7 @@ public sealed class TaskCard
         if (string.IsNullOrWhiteSpace(Project) || Project.Contains('\0')) throw new InvalidDataException("任务项目缺失。");
         if (Description.Length > TaskSchema.MaxDescriptionLength || Description.Contains('\0')) throw new InvalidDataException("任务说明过长或含 NUL。");
         if (DeliveryMode is not ("manual" or "interactive" or "automatic")) throw new InvalidDataException("未知任务交付方式。");
-        if (Agents.All.All(agent => agent.Id != AgentId)) throw new InvalidDataException("未知 Agent。");
+        if (!Agents.IsKnown(AgentId)) throw new InvalidDataException("未知 Agent。");
         if (DirectoryMode is not ("shared" or "isolated" or "prepared")) throw new InvalidDataException("未知目录策略。");
         if (Profile.Executable.Contains('\0') || Profile.Arguments.Any(argument => argument.Contains('\0'))) throw new InvalidDataException("任务参数含 NUL。");
         if (Acceptance.Count > TaskSchema.MaxAcceptanceItems) throw new InvalidDataException("验收项过多。");
@@ -126,12 +126,14 @@ public sealed class TaskRun
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public Guid? ResumeOf { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? SessionRef { get; set; }
     [JsonRequired] public string WorkspaceKey { get; set; } = "";
+    public string WorkspacePath { get; set; } = "";
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public Guid? SourceSlotId { get; set; }
     [JsonRequired] public string ProgramFingerprint { get; set; } = "";
     public bool Terminal => State is "Review" or "Completed" or "Failed" or "Cancelled";
     public TaskRun Copy() => new()
     {
         TaskId = TaskId, TaskRevision = TaskRevision, AttemptId = AttemptId, BatchId = BatchId, State = State, At = At,
-        Detail = Detail, ResumeOf = ResumeOf, SessionRef = SessionRef, WorkspaceKey = WorkspaceKey, ProgramFingerprint = ProgramFingerprint, ReverifiedFingerprint = ReverifiedFingerprint
+        Detail = Detail, ResumeOf = ResumeOf, SessionRef = SessionRef, WorkspaceKey = WorkspaceKey, WorkspacePath = WorkspacePath, SourceSlotId = SourceSlotId, ProgramFingerprint = ProgramFingerprint, ReverifiedFingerprint = ReverifiedFingerprint
     };
 }
 
@@ -147,12 +149,13 @@ public sealed class TaskBook
     [JsonRequired] public int MaxRunning { get; set; } = 1;
     [JsonRequired] public long NextSequence { get; set; }
     public List<Guid>? LastDispatchTaskIds { get; set; }
+    public List<TaskHistoryReference> HistoryArchives { get; set; } = [];
 
     public TaskBook Copy() => new()
     {
         SchemaVersion = SchemaVersion, Revision = Revision, Tasks = Tasks.Select(task => task.Copy()).ToList(),
         Queue = Queue.Select(entry => entry.Copy()).ToList(), Attempts = Attempts.Select(run => run.Copy()).ToList(),
-        MaxRunning = MaxRunning, NextSequence = NextSequence, LastDispatchTaskIds = LastDispatchTaskIds is null ? null : [.. LastDispatchTaskIds]
+        MaxRunning = MaxRunning, NextSequence = NextSequence, LastDispatchTaskIds = LastDispatchTaskIds is null ? null : [.. LastDispatchTaskIds], HistoryArchives = [.. HistoryArchives]
     };
 
     public void Validate()
@@ -179,8 +182,12 @@ public sealed class TaskBook
         if (Attempts.Any(run => run is null) || Attempts.Select(run => run.AttemptId).Distinct().Count() != Attempts.Count) throw new InvalidDataException("尝试身份重复。");
         if (Tasks.Any(task => task.Archived && Attempts.Any(run => run.TaskId == task.Id && !run.Terminal))) throw new InvalidDataException("结果未确认的任务不能归档。");
         if (LastDispatchTaskIds is { } selection && (selection.Count > TaskSchema.MaxTasks || selection.Distinct().Count() != selection.Count || selection.Any(id => !Tasks.Any(task => task.Id == id)))) throw new InvalidDataException("上次批次范围无效。");
+        if (HistoryArchives is null || HistoryArchives.Count > 10000 || HistoryArchives.Any(archive => archive is null || archive.Id == Guid.Empty || archive.Count is < 1 or > TaskSchema.MaxAttempts || archive.Sha256 is null || archive.Sha256.Length != 64 || archive.Sha256.Any(ch => !Uri.IsHexDigit(ch))) || HistoryArchives.Select(archive => archive.Id).Distinct().Count() != HistoryArchives.Count)
+            throw new InvalidDataException("任务历史归档索引无效。");
     }
 }
+
+public sealed record TaskHistoryReference(Guid Id, string Sha256, int Count);
 
 /// <summary>Pure queue ordering and admission-free scheduling. Resource admission stays with the monitor.</summary>
 public sealed record QueueCandidate(Guid EntryId, Guid TaskId, long TaskRevision, int Priority, long Sequence, DateTimeOffset EnqueuedAt, Guid[] DependsOn, bool Deferred = false);
@@ -248,7 +255,8 @@ public static class TaskBookOps
 {
     public static TaskCard Create(TaskBook book, string name, string project, string agentId, AgentProfile profile, string description, IEnumerable<string> acceptance, string directoryMode, ResourceSettings? resource, int priority)
     {
-        EnsureTaskCapacity(book, 1);
+        EnsureTaskCapacity(book,1);
+        if (!Agents.IsSupported(agentId)) throw new InvalidDataException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
         var task = new TaskCard
         {
             Id = Guid.NewGuid(), Revision = 1, Name = (name ?? "").Trim(), Project = (project ?? "").Trim(), AgentId = agentId, Profile = profile.Copy(),
@@ -294,11 +302,12 @@ public static class TaskBookOps
     }
 
     /// <summary>Edits bump the revision. Launch-relevant edits drop the queued entry because its frozen command no longer matches the task.</summary>
-    public static TaskCard Edit(TaskBook book, Guid taskId, Action<TaskCard> change)
+    public static TaskCard Edit(TaskBook book, Guid taskId, Action<TaskCard> change, long? expectedRevision = null)
     {
         var index = book.Tasks.FindIndex(task => task.Id == taskId);
         if (index < 0) throw new InvalidDataException("任务不存在。");
         var current = book.Tasks[index];
+        if (expectedRevision is { } expected && current.Revision != expected) throw new InvalidDataException("任务已被其他操作修改，请核对后重新打开编辑；当前输入仍保留。");
         if (current.Archived) throw new InvalidDataException("请先从归档恢复任务，再编辑。");
         var draft = current.Copy();
         change(draft);
@@ -325,6 +334,7 @@ public static class TaskBookOps
     {
         var task = book.Tasks.SingleOrDefault(candidate => candidate.Id == taskId) ?? throw new InvalidDataException("任务不存在。");
         if (task.Archived) throw new InvalidDataException("请先从归档恢复任务，再加入队列。");
+        if (!Agents.IsSupported(task.AgentId)) throw new InvalidDataException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
         if (!QueuePolicy.CanEnqueue(book.Queue, taskId)) throw new InvalidDataException("该任务已在队列中。");
         if (book.Queue.Count >= TaskSchema.MaxQueueEntries) throw new InvalidDataException("队列已满。");
         if (programFingerprint.Length != 64) throw new InvalidDataException("程序指纹无效，请重新检查 Agent。");
@@ -355,10 +365,21 @@ public static class TaskBookOps
 
     public static void Dequeue(TaskBook book, Guid taskId) => book.Queue.RemoveAll(entry => entry.TaskId == taskId);
 
-    public static TaskRun StartRun(TaskBook book, QueueEntry entry, Guid attemptId, Guid batchId, string workspaceKey, Guid? resumeOf = null, string? sessionRef = null)
+    public const string AttemptCapacityMessage = "任务尝试已达 1000 条，尚未预约或启动。请在「历史与诊断」中迁移已结束历史以释放活动记录名额；原始证据和领取记录会保留。";
+
+    public static void EnsureAttemptCapacity(TaskBook book)
     {
+        if (book.Attempts.Count >= TaskSchema.MaxAttempts) throw new InvalidDataException(AttemptCapacityMessage);
+    }
+
+    public static bool RequiresIsolatedWorkspace(QueueEntry entry) => entry.DirectoryMode == "isolated" && entry.ResumeOf is null && (entry.QuickLaunch is null || entry.QuickLaunch.IsolateWorkspace);
+
+    public static TaskRun StartRun(TaskBook book, QueueEntry entry, Guid attemptId, Guid batchId, string workspaceKey, Guid? resumeOf = null, string? sessionRef = null, string workspacePath = "")
+    {
+        EnsureAttemptCapacity(book);
         if (book.Attempts.Count(run => !run.Terminal) >= book.MaxRunning) throw new InvalidDataException("并发上限已满，稍后再试。");
         if (book.Attempts.Any(run => run.AttemptId == attemptId)) throw new InvalidDataException("尝试身份重复。");
+        if (!Agents.IsSupported(entry.AgentId)) throw new InvalidDataException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
         var queued = book.Queue.SingleOrDefault(candidate => candidate.Id == entry.Id) ?? throw new InvalidDataException("队列项已被移除，不能再次派发。");
         if (queued.Deferred) throw new InvalidDataException("该排队项已暂缓，不能派发。");
         if (!SameIntent(queued, entry)) throw new InvalidDataException("队列项已变化，请重新确认。");
@@ -373,10 +394,19 @@ public static class TaskBookOps
         var run = new TaskRun
         {
             TaskId = entry.TaskId, TaskRevision = entry.TaskRevision, AttemptId = attemptId, BatchId = batchId, State = "Running",
-            At = DateTimeOffset.UtcNow, ResumeOf = entry.ResumeOf, SessionRef = entry.SessionRef, WorkspaceKey = workspaceKey, ProgramFingerprint = entry.ProgramFingerprint
+            At = DateTimeOffset.UtcNow, ResumeOf = entry.ResumeOf, SessionRef = entry.SessionRef, WorkspaceKey = workspaceKey, WorkspacePath = workspacePath,
+            SourceSlotId = entry.QuickLaunch?.SlotId, ProgramFingerprint = entry.ProgramFingerprint
         };
         book.Attempts.Add(run);
         book.Queue.RemoveAll(candidate => candidate.Id == entry.Id);
+        if (RequiresIsolatedWorkspace(entry) && !string.IsNullOrEmpty(workspacePath))
+        {
+            task.Project = workspacePath;
+            task.DirectoryMode = "prepared";
+            if (entry.QuickLaunch is { } quick) task.QuickLaunch = quick with { WorkspaceKey = workspaceKey, IsolateWorkspace = false };
+            task.Revision = checked(task.Revision + 1);
+            task.UpdatedAt = DateTimeOffset.UtcNow;
+        }
         return run;
     }
 

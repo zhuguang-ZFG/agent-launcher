@@ -7,20 +7,17 @@ namespace AgentLauncher.Core;
 // 升级默认值按各 CLI 的已知安装渠道给出；主机可通过 RemoteHost.AgentUpgradeCommands 逐项覆盖。
 public static class RemoteAgentMaintenance
 {
-    // 每-AgentType 默认升级命令（npm/pip 包管理器更新；qodercli 兼容目录 Id "qoder"）。
+    // 每-AgentType 默认升级命令；主机可通过 RemoteHost.AgentUpgradeCommands 逐项覆盖。
     public static readonly IReadOnlyDictionary<string,string> DefaultUpgradeCommands=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["pi"]="npm install -g @earendil-works/pi-coding-agent@latest",
-        ["kimi"]="python3 -m pip install --upgrade kimi-cli",
-        ["qodercli"]="npm install -g @qoder-ai/qodercli@latest",
-        ["qoder"]="npm install -g @qoder-ai/qodercli@latest",
         ["omp"]="npm install -g @oh-my-pi/pi-coding-agent@latest",
-        ["codex"]="npm install -g @openai/codex@latest"
+        ["codex"]="npm install -g @openai/codex@latest",
+        ["claude"]="npm install -g @anthropic-ai/claude-code@latest"
     };
 
     // 远程主机上的 agent CLI 命令名（与 SshRunnerBackend.Create 的 AgentType 键一致）。
     public static string CatalogId(string id)=>id=="qodercli"?"qoder":id;
-    public static string? AgentCommand(string agentType)=>Agents.All.FirstOrDefault(agent=>agent.Id==CatalogId(agentType)&&agent.Id!="custom")?.Command;
+    public static string? AgentCommand(string agentType)=>Agents.IsSupported(agentType)?Agents.Get(agentType).Command:null;
 
     public static string? VersionCommandFor(string agentType)=>AgentCommand(agentType) is {} command?command+" --version":null;
 
@@ -29,16 +26,16 @@ public static class RemoteAgentMaintenance
     // 主机覆盖优先；无覆盖回退默认表；未知 agent 返回 null（调用方 fail-closed 报错）。
     public static string? UpgradeCommandFor(RemoteHost host,string agentType)
     {
+        if(!Agents.IsSupported(agentType))return null;
         if(host.AgentUpgradeCommands?.GetValueOrDefault(agentType) is {Length:>0} overrideCommand)return overrideCommand;
         if(AgentCommand(agentType) is {} command&&host.AgentUpgradeCommands?.GetValueOrDefault(command) is {Length:>0} aliasCommand)return aliasCommand;
         return DefaultUpgradeCommands.GetValueOrDefault(agentType);
     }
 
-    // C1 远程续接：实测 pi/kimi/qodercli 的 --help 均含 --continue（qoder 是 qodercli 的目录别名）。
-    // 其余 agent 未实测，返回 null（fail-closed）；使用前仍须经远程 --help 核对（HelpContainsFlag）。
+    // 只保留已核对的续接参数；未知或已移除类型返回 null（fail-closed）。
     public static string[]? ResumeFlagsFor(string agentType)=>agentType switch
     {
-        "pi" or "kimi" or "qodercli" or "qoder"=>["--continue"],_=>null
+        "omp" or "claude"=>["--continue"],_=>null
     };
 
     // 单词边界核对：--continue 不匹配 --continue-session / --no-continue，-c 不匹配 x-c 或 --continue 内部。
@@ -46,20 +43,20 @@ public static class RemoteAgentMaintenance
         flag.Length>0&&Regex.IsMatch(helpOutput,@"(?<![\w-])"+Regex.Escape(flag)+@"(?![\w-])");
 
     // 续接参数推导：仅支持 -p 任务模式；末尾旧任务说明被新说明替换，--no-session 替换为续接 flag（无则追加）。
-    // 原参数已含续接/会话参数时拒绝（避免双重续接），fail-closed。
+    // 已有相同的续接 flag 可复用；其他会话选择参数拒绝，避免改接另一会话。
     public static string[] ResumeArguments(string[] original,string[] resumeFlags,string task)
     {
         if(string.IsNullOrWhiteSpace(task)||task.Contains('\0'))throw new InvalidDataException("新任务说明不能为空或含控制字符。");
         if(resumeFlags.Length==0)throw new InvalidDataException("没有可用的续接参数。");
         if(!original.Contains("-p"))throw new InvalidDataException("远程续接仅支持 -p 任务模式的会话；交互式会话请在终端内自行续接。");
         string[] resumeTokens=["--continue","-c","--resume","-r","--session"];
-        if(original.Any(a=>resumeTokens.Contains(a.Split('=')[0])))throw new InvalidDataException("原启动参数已包含续接/会话参数，无法再次续接；请先在此项「详情」中移除后再试。");
+        if(original.Any(a=>resumeTokens.Contains(a.Split('=')[0])&&!resumeFlags.Contains(a)))throw new InvalidDataException("上次远程会话使用了不同的续接或会话选择参数，无法自动判断应继续哪段对话。请在远程工作 Shell 中按 Agent 的会话记录手动续接，或从此项发起新会话。");
         var source=original;
         // 末尾非 flag 参数是旧任务说明；但其前一项若是取值 flag（--model 等），末尾是 flag 值而非说明，保留。
         string[] valueFlags=["--model","-m","--name","-n","--session-dir","--agent"];
         if(source.Length>0&&!source[^1].StartsWith('-')&&(source.Length<2||!valueFlags.Contains(source[^2])))source=source[..^1];
         var result=new List<string>();var replaced=false;
-        foreach(var arg in source){if(arg=="--no-session"){if(!replaced){result.AddRange(resumeFlags);replaced=true;}}else result.Add(arg);}
+        foreach(var arg in source){if(arg=="--no-session"||resumeFlags.Contains(arg)){if(!replaced){result.AddRange(resumeFlags);replaced=true;}}else result.Add(arg);}
         if(!replaced)result.AddRange(resumeFlags);
         result.Add(task);
         return [..result];

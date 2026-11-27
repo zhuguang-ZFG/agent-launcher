@@ -53,7 +53,7 @@ internal static class RuntimeReviewChecks
         var project=Path.Combine(root,"shared-project");Directory.CreateDirectory(project);
         var command=new CommandSpec(Environment.ProcessPath!,["--hold","1"],"exe");
         var book=new TaskBook { MaxRunning=2 };
-        var task=TaskBookOps.Create(book,"claim race",project,"custom",new AgentProfile{Executable=command.Executable,Arguments=command.Arguments},"",[],"shared",new ResourceSettings(),0);
+        var task=TaskBookOps.Create(book,"claim race",project,"codex",new AgentProfile{Executable=command.Executable,Arguments=command.Arguments},"",[],"shared",new ResourceSettings(),0);
         var entry=TaskBookOps.Enqueue(book,task.Id,command,AgentProbe.Fingerprint(command.Executable));
         Store.Save(Path.Combine(root,"tasks.json"),book);
         Store.Save(Path.Combine(root,"configuration.json"),new Configuration());
@@ -326,9 +326,9 @@ internal static class RuntimeReviewChecks
         foreach(var slot in config.Draft.Slots)slot.Enabled=true;
         Store.Save(Path.Combine(monitor.Root,"configuration.json"),config);
         var batch=Guid.NewGuid();
-        // Nine panes exceed the fixed 8-pane ceiling, so every reserve is refused for a stable reason while
+        // Seven panes exceed the fixed 6-pane ceiling, so every reserve is refused for a stable reason while
         // real CPU sampling keeps status and reply frames readable. No child is ever started.
-        while(config.Draft.Slots.Count<9)config.Draft.Slots.Add(new(){Enabled=true});
+        while(config.Draft.Slots.Count<7)config.Draft.Slots.Add(new(){Enabled=true});
         var items=config.Draft.Slots.Select((slot,index)=>new LaunchItem(Guid.NewGuid(),batch,index+1,slot.DisplayName,cwd,PhysicalDirectory.Workspace(cwd),true,
             new(Environment.ProcessPath!,["--hold","1"],"exe"),ResourcePolicy.AgentBudget,SourceSlotId:slot.Id,AgentId:slot.AgentId)).ToArray();
         for(var i=0;i<50;i++)
@@ -346,7 +346,7 @@ internal static class RuntimeReviewChecks
     private static LaunchItem Item(string name,string[] arguments,string cwd)
     {
         Directory.CreateDirectory(cwd);
-        return new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),false,new(Environment.ProcessPath!,arguments,"exe"),ResourcePolicy.AgentBudget);
+        return new(Guid.NewGuid(),Guid.NewGuid(),1,name,cwd,PhysicalDirectory.Workspace(cwd),false,new(Environment.ProcessPath!,arguments,"exe"),ResourcePolicy.AgentBudget,AgentId:"codex");
     }
 
     private static async Task RevokeRollbackAsync(string cwd)

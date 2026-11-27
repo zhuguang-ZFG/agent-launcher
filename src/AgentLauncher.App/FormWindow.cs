@@ -15,7 +15,14 @@ public sealed class FormWindow : Window
     private readonly Dictionary<string,Action<string>> writers=[];
     private readonly Dictionary<string,Button> actionButtons=[];
     private TextBlock? noteBlock;
+    private readonly TextBlock errorBlock=new(){TextWrapping=TextWrapping.Wrap,Margin=new(0,8,0,8),Visibility=Visibility.Collapsed};
+    private bool applying;
+    /// <summary>Validates and persists the captured values before closing. False or an exception leaves the draft open.</summary>
+    public Func<FormWindow,Task<bool>>? ApplyAsync { get; set; }
+    public string ApplyError=>errorBlock.Text;
+    public void SetError(string text){errorBlock.Text=text;errorBlock.Visibility=string.IsNullOrWhiteSpace(text)?Visibility.Collapsed:Visibility.Visible;}
     public string ReadValue(string key)=>readers.TryGetValue(key,out var read)?read():Values.GetValueOrDefault(key)??"";
+    public string[] ReadArguments(string key)=>argumentEditors.TryGetValue(key,out var editor)?editor.Arguments:[..ArgumentValues.GetValueOrDefault(key)??[]];
     public void SetNote(string text){if(noteBlock is not null)noteBlock.Text=text;}
     public void SetValue(string key,string value){if(writers.TryGetValue(key,out var write))write(value);else throw new ArgumentException("该字段不能直接填写："+key);}
     public void SetActionEnabled(string label,bool enabled){if(actionButtons.TryGetValue(label,out var button))button.IsEnabled=enabled;}
@@ -34,6 +41,7 @@ public sealed class FormWindow : Window
         // Actions are docked outside the scrolling form so Enter/Esc keep the same reachable buttons at large text scales.
         var footer=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new(0,16,0,0)};DockPanel.SetDock(footer,Dock.Bottom);
         var cancel=new Button{Content="取消",IsCancel=true,Margin=new(0,0,8,0),MinWidth=88};var apply=new Button{Content=applyLabel,IsDefault=true,MinWidth=88};footer.Children.Add(cancel);footer.Children.Add(apply);root.Children.Add(footer);
+        DockPanel.SetDock(errorBlock,Dock.Bottom);AutomationProperties.SetName(errorBlock,"表单保存错误");root.Children.Add(errorBlock);
         var panel=new StackPanel();
         noteBlock=new TextBlock{Text=note,TextWrapping=TextWrapping.Wrap,Margin=new(0,0,0,16),Foreground=(Brush)FindResource("Muted")};panel.Children.Add(noteBlock);
         if(actions!=null){var actionRow=new WrapPanel{Margin=new(0,0,0,12)};foreach(var action in actions){var button=new Button{Content=action.Key,Margin=new(0,0,8,4)};button.Click+=(_,_)=>action.Value(this);actionButtons[action.Key]=button;actionRow.Children.Add(button);}panel.Children.Add(actionRow);}
@@ -53,13 +61,14 @@ public sealed class FormWindow : Window
                 if(selected<0){combo.Items.Add(new ComboBoxItem{Content=f.Value,Tag=f.Value});selected=combo.Items.Count-1;}
                 combo.SelectedIndex=selected;
                 AutomationProperties.SetName(combo,f.Label);readers[f.Key]=()=>(combo.SelectedItem as ComboBoxItem)?.Tag as string??f.Value;
+                writers[f.Key]=value=>combo.SelectedItem=combo.Items.OfType<ComboBoxItem>().FirstOrDefault(item=>Equals(item.Tag,value))??throw new ArgumentException("未知选项："+value);
                 panel.Children.Add(FieldLabel(f.Label,combo));panel.Children.Add(FieldRow(combo));first??=combo;continue;
             }
             if(bools?.Contains(f.Key)==true)
             {
                 var check=new CheckBox{Content=Wrapping(f.Label),IsChecked="true".Equals(f.Value,StringComparison.OrdinalIgnoreCase),Margin=new(0,4,0,12)};
                 AutomationProperties.SetName(check,f.Label);
-                readers[f.Key]=()=>check.IsChecked==true?"true":"false";panel.Children.Add(check);first??=check;continue;
+                readers[f.Key]=()=>check.IsChecked==true?"true":"false";writers[f.Key]=value=>check.IsChecked=string.Equals(value,"true",StringComparison.OrdinalIgnoreCase);panel.Children.Add(check);first??=check;continue;
             }
             if(suggestions?.TryGetValue(f.Key,out var found)==true)
             {
@@ -68,7 +77,7 @@ public sealed class FormWindow : Window
                 foreach(var path in found)combo.Items.Add(path);
                 AutomationProperties.SetName(combo,f.Label);readers[f.Key]=()=>combo.Text;writers[f.Key]=value=>combo.Text=value;
                 panel.Children.Add(FieldLabel(f.Label,combo));
-                if(f.Key is "exe" or "terminal" or "cwd" or "worktree")panel.Children.Add(FieldRow(combo,Picker(f.Label,f.Key is "cwd" or "worktree",path=>combo.Text=path)));
+                if(f.Key is "exe" or "terminal" or "cwd" or "worktree" or "project")panel.Children.Add(FieldRow(combo,Picker(f.Label,f.Key is "cwd" or "worktree" or "project",path=>combo.Text=path)));
                 else panel.Children.Add(FieldRow(combo));
                 first??=combo;continue;
             }
@@ -76,13 +85,29 @@ public sealed class FormWindow : Window
             AutomationProperties.SetName(box,f.Label);readers[f.Key]=()=>box.Text;writers[f.Key]=value=>box.Text=value;
             var rowButtons=new List<Button>();
             if(f.Key=="cwd")rowButtons.Add(InheritButton(box));
-            if(f.Key is "exe" or "terminal" or "cwd" or "worktree")rowButtons.Add(Picker(f.Label,f.Key is "cwd" or "worktree",path=>box.Text=path));
+            if(f.Key is "exe" or "terminal" or "cwd" or "worktree" or "project")rowButtons.Add(Picker(f.Label,f.Key is "cwd" or "worktree" or "project",path=>box.Text=path));
             if(f.Key=="note")rowButtons.Add(CopyButton(box));
             panel.Children.Add(FieldLabel(f.Label,box));panel.Children.Add(FieldRow(box,rowButtons.ToArray()));first??=box;
         }
         root.Children.Add(new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled});Content=root;
         UiScale.Apply(this);
-        apply.Click+=(_,_)=>{foreach(var pair in readers)Values[pair.Key]=pair.Value();foreach(var pair in argumentEditors)ArgumentValues[pair.Key]=pair.Value.Arguments;DialogResult=true;};
+        apply.Click+=async(_,_)=>
+        {
+            if(applying)return;
+            applying=true;apply.IsEnabled=false;cancel.IsEnabled=false;panel.IsEnabled=false;SetError("");
+            var saved=false;
+            try
+            {
+                foreach(var pair in readers)Values[pair.Key]=pair.Value();
+                foreach(var pair in argumentEditors)ArgumentValues[pair.Key]=pair.Value.Arguments;
+                saved=ApplyAsync is null||await ApplyAsync(this);
+                if(!saved&&ApplyError.Length==0)SetError("尚未保存，请检查填写内容后重试。");
+            }
+            catch(Exception e)when(e is not OutOfMemoryException){SetError(e.Message);}
+            finally{applying=false;apply.IsEnabled=true;cancel.IsEnabled=true;panel.IsEnabled=true;}
+            if(saved)DialogResult=true;
+        };
+        Closing+=(_,e)=>{if(applying)e.Cancel=true;};
         Loaded+=(_,_)=>first?.Focus();
         Label FieldLabel(string text,Control? target)=>new(){Target=target,Padding=new(0,4,0,0),Content=Wrapping(text)};
         Grid FieldRow(Control input,params Button[] buttons)

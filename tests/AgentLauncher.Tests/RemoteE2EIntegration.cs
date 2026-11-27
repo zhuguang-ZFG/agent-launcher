@@ -47,7 +47,7 @@ internal static class RemoteE2EIntegration
                 SshPort: 22,
                 SshUser: "testuser",
                 AgentUser: "agent",
-                AvailableAgents: ["pi"],
+                AvailableAgents: ["omp"],
                 SshKeyPath: null,
                 WorkspaceSyncMode: WorkspaceSyncMode.Mutagen);  // None 在准备层被拒收（三台同权）；假同步后端代替真实 Mutagen，这里只验启动链
             var configuration = new Configuration { SchemaVersion = 2 };
@@ -58,11 +58,11 @@ internal static class RemoteE2EIntegration
             configuration.RemoteHosts = [host];
             var slot = configuration.Draft.Slots[0];
             slot.Enabled = true;
-            slot.AgentId = "pi";
-            slot.CustomName = "E2E Remote Pi";
+            slot.AgentId = "omp";
+            slot.CustomName = "E2E Remote Omp";
             slot.RemoteHostId = host.Id;
             slot.RemoteDirectory = "/home/agent/work/e2e";
-            slot.Profiles["pi"] = new AgentProfile { Executable = Environment.ProcessPath!, Arguments = ["hold=8"] };
+            slot.Profiles["omp"] = new AgentProfile { Executable = Environment.ProcessPath!, Arguments = ["hold=8"] };
             foreach (var other in configuration.Draft.Slots.Skip(1)) other.Enabled = false;
 
             // 先把权威配置落盘，PolicyHash/DraftRevision 才能与 reserve 绑定一致。
@@ -82,7 +82,7 @@ internal static class RemoteE2EIntegration
                 var remote = plan.RemoteExecution!;
                 Assert(remote.Host == host.Address && remote.SshUser == host.SshUser && remote.AgentUser == host.AgentUser,
                     "RemoteExecution host identity mismatch");
-                Assert(remote.AgentType == "pi" && remote.RemoteWorkingDirectory == slot.RemoteDirectory,
+                Assert(remote.AgentType == "omp" && remote.RemoteWorkingDirectory == slot.RemoteDirectory,
                     "RemoteExecution agent/working directory mismatch");
                 Assert(remote.Arguments.Contains("hold=8"), "Planner lost resolved agent arguments");
                 Assert(plan.PlanningBytes is null && plan.ResourceMode is null && plan.PoolId is null && plan.Budget == 0,
@@ -168,7 +168,7 @@ internal static class RemoteE2EIntegration
                 Directory.CreateDirectory(localCwd);
                 var local = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "local-zero-budget", localCwd,
                     PhysicalDirectory.Workspace(localCwd), false,
-                    new(Environment.ProcessPath!, ["--hold", "1"], "exe"), 0);
+                    new(Environment.ProcessPath!, ["--hold", "1"], "exe"), 0, AgentId: "codex");
                 var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [local],
                     Policy: policy, PolicyHash: ResourcePolicy.PolicyHash(policy),
                     PlanDigest: ResourcePolicy.PlanDigest([local]), DraftRevision: 3));

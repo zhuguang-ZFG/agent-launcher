@@ -15,6 +15,8 @@ public static class TerminalWire
     public const string SnapshotKind = "snapshot";
     public const string InputKind = "input";
     public const string ResizeKind = "resize";
+    public const string ReadKind = "read";
+    public const string ReadbackKind = "readback";
     public const int MaxCells = TerminalScreen.MaxColumns * TerminalScreen.MaxRows;
 
     public static readonly JsonSerializerOptions Json = new()
@@ -25,6 +27,11 @@ public static class TerminalWire
     private sealed record SnapshotFrame(string Kind, TerminalSnapshot Snapshot);
     private sealed record InputFrame(string Kind, string Base64);
     private sealed record ResizeFrame(string Kind, int Columns, int Rows);
+    private sealed record ReadFrame(string Kind, TerminalReadRequest Request);
+    private sealed record ReadbackFrame(string Kind, TerminalReadback Readback);
+
+    public static byte[] EncodeRead(TerminalReadRequest request) => JsonSerializer.SerializeToUtf8Bytes(new ReadFrame(ReadKind, request), Json);
+    public static byte[] EncodeReadback(TerminalReadback readback) => JsonSerializer.SerializeToUtf8Bytes(new ReadbackFrame(ReadbackKind, readback), Json);
 
     public static byte[] EncodeSnapshot(TerminalSnapshot snapshot)
     {
@@ -51,6 +58,12 @@ public static class TerminalWire
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("Kind", out var kind) || kind.ValueKind != JsonValueKind.String) return null;
             switch (kind.GetString())
             {
+                case ReadKind:
+                    var request = root.TryGetProperty("Request", out var requestValue) ? requestValue.Deserialize<TerminalReadRequest>(Json) : null;
+                    return request is { IsWellFormed: true } ? new TerminalMessage(ReadKind, null, null, Request: request) : null;
+                case ReadbackKind:
+                    var readback = root.TryGetProperty("Readback", out var readbackValue) ? readbackValue.Deserialize<TerminalReadback>(Json) : null;
+                    return readback is { IsWellFormed: true } ? new TerminalMessage(ReadbackKind, null, null, Readback: readback) : null;
                 case SnapshotKind:
                     var snapshot = root.TryGetProperty("Snapshot", out var value) ? value.Deserialize<TerminalSnapshot>(Json) : null;
                     return snapshot is null ? null : new TerminalMessage(SnapshotKind, snapshot, null);
@@ -105,7 +118,8 @@ public static class TerminalWire
     }
 }
 
-public sealed record TerminalMessage(string Kind, TerminalSnapshot? Snapshot, byte[]? Input, int? Columns = null, int? Rows = null);
+public sealed record TerminalMessage(string Kind, TerminalSnapshot? Snapshot, byte[]? Input, int? Columns = null, int? Rows = null,
+    TerminalReadRequest? Request = null, TerminalReadback? Readback = null);
 
 public sealed class TerminalCellArrayConverter : JsonConverter<TerminalCell[]>
 {

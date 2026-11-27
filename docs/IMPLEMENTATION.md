@@ -1572,3 +1572,71 @@ powershell -NoProfile -File scripts/test.ps1
 - 补充可见入口（2026-11-21）：侧栏在「＋ 添加 Agent」下新增常驻按钮 `InstalledAgentsButton`（文案「补齐本机 Agent」），空项目时的引导文案同步改为「选择项目，点「补齐本机 Agent」，然后启动。」；按钮仍走同一条 `AddInstalledAgentsAsync`，不会自动启动任何 Agent。`Render`/`SetConfigLocked` 同步维护其启用态，只读或忙碌时禁用。UX13 增加第 9 项断言该按钮在侧栏可见且 AutomationId 一致；上一轮集成版真实 WPF `--ui-check` **465 项通过、0 失败、退出 0**（`artifacts/ui-installed-button/ui-checks.json`），九项 UX13 全部通过。
 - 默认槽位防重（2026-11-21）：`InstalledAgentsUiChecks.cs` 增加默认配置回归，断言安装 codex/hermes 后各自仍只有一个槽位、原空白槽位被复用并启用；补齐实现同步改为先匹配同名 Agent 的空白默认槽位，再分配其余空槽位。另在 `UiChecks.cs` 增加测试夹具窗口规范化：后台/非交互启动若把窗口置为最小化，焦点断言前恢复 `WindowState.Normal` 并 `Activate()`；不修改生产启动路径或断言条件。
 - 完整门禁（2026-11-21）：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test.ps1` 全量执行，未使用 SkipUi/SkipBrowser，**762.04 秒**且各阶段 0 失败。原生/模型 **292/0**、同步评审 **6/0**、TerminalModel **13/0**、ManualRelay 通过、修复 **36/0**、admission **0 失败**、integration **138 条记录 / 129 项测试，0 失败**（9 条环境/能力元数据不计为测试）、sync-reliability **11/0**；WPF `--ui-check` **466 项通过、0 失败**（`artifacts/ui/ui-checks.json`，含 10 条 UX13 前缀检查）、embedded `Passed=true`、原型 **5/5**、Omp **6/6**、浏览器 **5 项 PASS**。日志 `artifacts/gate-installed-agents-fill.log`。新增测试与 `UiChecks` 夹具改动仍待评审，不把本机门禁冒充独立评审。
+
+## 99. 窗口位置与大小记忆（2026-11-21，Asia/Shanghai）
+
+- 行为：主窗口关闭时把正常状态下的 `Left/Top/Width/Height` 和是否最大化写入 `%LOCALAPPDATA%\AgentLauncher\window-placement.json`，下次启动在 `Show()` 前恢复。该文件与业务配置分离，不改变 `Configuration` schema，也不影响只读配置启动。
+- 边界：记录损坏、非有限数值、小于最小窗口尺寸或与当前虚拟桌面完全不相交时回退到原有居中默认尺寸；恢复尺寸不超过当前虚拟桌面，左上角夹到可见区域。普通 bounds 只在 WPF 状态与原生 HWND 均确认是 normal 时更新；minimize 时保留最后非最小化状态。
+- 实现位置：`src/AgentLauncher.App/MainWindow.WindowPlacement.cs`，`SourceInitialized` 缓存 HWND，`SizeChanged` / `LocationChanged` 通过 `IsZoomed`、`IsIconic` 排除最大化转换窗口边框；构造函数在 `Show()` 前恢复，`Closed` 保存。根因已由集成版事件追踪确认：native maximize 已生效但 WPF `WindowState` 尚为 Normal 时触发 `LocationChanged`，旧缓存把 `(200,120)` 覆盖成 `(-7.2,-7.2)`。
+- 回归：`src/AgentLauncher.App/UiChecks.cs` 新增 UX16，隔离保存并恢复 `window-placement.json`、`.bak`、原窗口几何/状态及内部 bounds 缓存；最大化→最小化后断言位置、尺寸和最大化标志。固定版 `--ui-check` **476/476 通过、退出 0**。旧版相同原生探针写出 `Left/Top=-7.2`，重开 native normal rect 为 `0,0 1400x950`；修复版写出 `(200,120,1120,760,Maximized=true)`，重开 native normal rect 正确为 `250,150 1400x950`，进程退出 0。
+- 验证限制：`dotnet build AgentLauncher.sln -c Release -m:1 --nologo` 0 警告/0 错误；固定版 `--ui-check` 476/476 通过，UX16 已获用户评审通过。旧版 UI 检查在 `fake-sample monitor healthy` 提前失败，未运行到 UX16；旧行为的失败证据来自同场景原生矩形探针，不声称已对旧二进制运行 UX16。`task_verify` 仍为 `unverified`（项目/Git 基线不可用、无已配置检查）；当时未运行完整 `scripts/test.ps1`（最终全量门禁见 §100）。
+- 交付：`artifacts/preview` 已基于本修复重新发布，`distribution.json` 为 `SourceDirty=false`、20 个文件，`Launch.ps1 -CheckOnly` 通过；桌面快捷方式继续指向该目录。构建前一包保留在 `artifacts/preview.before-*`。
+
+## 100. 托盘状态与显示器工作区修复（2026-11-21，Asia/Shanghai）
+
+- 行为：`RestoreBackground()` 在 `Show()` 前取得原状态；普通窗口仍为普通，最大化窗口仍为最大化，最小化窗口按最后非最小化状态恢复。托盘的「退出并暂停队列」继续走原关闭流程，不再因恢复窗口而把 `Maximized` 写成 false。
+- 工作区：构造阶段仍校验保存记录；`SourceInitialized` 在 HWND 和其 DPI 已确定、首次显示之前，使用目标显示器的 `rcWork` 约束普通 bounds。坐标转换使用该 `HwndSource.CompositionTarget.TransformFromDevice`，不混用主屏 DPI 与目标显示器像素；实时重新应用记录也走同一裁剪路径。小工作区同时收紧最小窗口尺寸，离屏/损坏记录仍安全回退；JSON 格式不变。
+- 根因：两项均是跨层契约/隐含假设。后台入口只隐藏窗口，旧恢复入口却无条件改 Normal；虚拟桌面外包矩形包含任务栏区域，不能作为可用工作区。窗口记忆必须在真实 HWND 初始化后核对工作区，不能只在构造函数中查询尚不存在的 HWND。
+- 旧失败/新通过：新增的同一 UX16 断言先在旧恢复逻辑上失败于 `background restore and tray exit preserve maximized placement`；只修复托盘后，该断言通过，随后失败于 `restored normal bounds fit the selected monitor work area`。两项修复后，真实 WPF `--ui-check` **483/483 通过，退出 0**，含新增 7 条 UX16 及原有窗口记忆回归；未弱化旧断言。
+- 独立端到端：实际新进程启动探针覆盖超高普通、超高最大化、部分离屏、完全离屏和损坏 JSON，五项均正常退出。当前 120 DPI 显示器工作区为 `0,0 1920x1140`；超高普通窗口被还原为 `125,0 1250x1140`，启动按钮底边 1109，在工作区内。实际托盘菜单退出探针对普通/最大化分别保存 false/true，普通 bounds 均保留 `120,80 1000x700`。
+- 测试评审：`UiChecks.cs` 的 7 条新增检查及夹具清理已获用户批准；夹具还会恢复原最小尺寸，并关闭仅创建 HWND、未显示的检查窗口。未修改测试运行器或验证策略。
+- 补充评审验证：工作区检查已从包含关系强化为精确位置/宽高匹配；最大化前切换为不同尺寸，另新增“已最大化时应用另一组 compact bounds”断言，防止复用旧的合法矩形也通过。生产实现未改；全部精确断言在原实现上通过，定向 WPF **484/484、退出 0**。用户已批准本轮测试强化及后续夹具时序加固。真实最小化启动→单实例重新激活→关闭保存探针也通过；初始化时 HWND 尚未创建，`lastNonMinimizedState` 保持 Normal，未证实反馈所述最小化循环。
+- 门禁瞬态与处置：首次全量在原生阶段 290/292，两条 ACC-R07/R11「健康内核计数」首查被拒。失败用例只断言 `allowed`，未保留 `LastDecision.Reason`，因此该轮结果不能断定具体分支。事后只读探针在当次环境（`jobCurrentCommit=0`、采样有效）遍历了拒绝字符串：Job 余量不足、整机物理下限、整机提交下限；整机下限的文本为「整机内存不足以…」，与「内存读数暂不可用」不同。据此只能说失败**与整机下限分支一致**，且后续探针排除了当次的空记账读数；不能证明历史失败原因。关闭 build server 后原生复跑 **292/0**，仍只是与内存压力窗口一致的旁证。第二次全量在 `UX10 rail session opens and focuses the exact record` 失败：`quick-session-focus.json` 为 `WindowState=Minimized`、`IsActive=false`；同一运行时单独复跑 4 次均 484/484，3 次外部窗口状态观察显示最小化只发生在 UX16 内部，且原生 `IsIconic` 比 WPF 代码滞后约 100–300 ms。夹具因此加入「最小化后等原生 `IsIconic=true`、恢复后等 `IsIconic=false` 且最大化状态匹配」的有界等待（上限 3 秒，断言未改，已获评审）。
+- 验证边界：Release solution build 0 警告/0 错误；`task_verify` 为 **unverified**（项目/Git 基线不可用，无已配置检查），不是通过。完整 `scripts/test.ps1`（未使用 SkipUi/SkipBrowser）在最终代码上 **790.44 秒、退出 0**：原生/模型 **292/0**、同步评审 **6/0**、TerminalModel **13/0**、ManualRelay 通过、修复 **36/0**、八个集成套件 0 失败（admission 0 失败，sync-reliability **11/0**）、WPF `--ui-check` **484/484**、embedded `Passed=true`、原型 **5/0**、Omp 守卫 **6/0**、浏览器全部 PASS。日志 `artifacts/gate-final-run.log`。实际多显示器/混合 DPI 硬件未覆盖，当前真机 DPI 为 125%。
+- 交付入口：仓库 `Start-AgentLauncher.cmd` 与桌面快捷方式使用 `artifacts/preview`；配套 App/Worker 经 `scripts/build.ps1` 一起发布，源码提交与 `SourceDirty` 以最终 `distribution.json` 为准。
+
+## 101. 6 窗格、三 Agent 与桌面入口（2026-11-27，Asia/Shanghai）
+
+- 产品变更：同时运行的 Agent 窗格上限由 8 改为 **6**，`MaxSlots=16` 不变；可启动 Agent 仅 **Omp / Codex / Claude Code**。其他历史身份保留在只读目录中，旧配置槽位自动停用但保留 `AgentId`、Profiles、目录、备注和远程绑定，不静默改写成 Omp。新任务、入队、预约和 Worker begin 均拒绝已移除类型或缺少 AgentId 的非 Git 计划；远程计划的 `LaunchItem.AgentId` 必须与 `RemoteExecutionSpec.AgentType` 一致。
+- 执行适配：删除 Qoder 专用内存 guard/hook 与 Pi/Kimi/Qoder 搜索目录；会话发现、续接、任务交付、能力探测、远程维护和预设收敛到三种 Agent。界面下拉、远程候选、补齐本机 Agent 和并发提示同步收敛；旧槽位显示「已移除，不能启动」且勾选框禁用。
+- 实测（隔离根，Release + `INTEGRATION_TESTS`）：原生/模型 **283/0**；admission 集成 **0 失败**，含第 6 个允许、第 7 个拒绝、Git 不计入、7 条旧 Pending 账本在 begin 拒绝而 6 条可开始；Terminal 六窗格检查通过；远程执行集成 **6/0**（含 R33 在 6 名额下的清理与重新挂接）；真实 WPF `--ui-check` **471/471、退出 0**。`task_verify run` 返回 **unverified / project-or-git-baseline-unavailable**，没有已配置检查，不能记为通过。
+- 生产交付：`scripts/build.ps1` 成功发布 `artifacts/preview`，包内 `Launch.ps1 -CheckOnly` 通过；桌面已建立 `D:\Desktop\多 Agent 启动器.lnk`，读回目标为 `artifacts\preview\Start-AgentLauncher.cmd`，工作目录为 `artifacts\preview`，图标为同包 `AgentLauncher.App.exe,0`。
+- 测试改动：迁移了大量 `pi/custom/qoder` 夹具、6/7 边界断言和远程计划 AgentId；修复 R33 在 6 名额下残留 Disconnected 夹具导致的容量泄漏，清理改用操作员确认释放而非对 Disconnected 执行 revoke。新增「非 Git 计划必须带受支持 AgentId」回归。独立只读复审指出 UX14 的 AgentId 派生分支覆盖变空、远程 AgentType/身份一致性缺少负例；已分别改为云主机仅提供 Omp 以强制派生，并补远程 retired AgentType 与 mismatched AgentId 拒绝用例。复审无阻塞问题；所有测试/UI 检查改动仍待用户评审，不以本机通过代替评审。
+- 真实状态事故与恢复边界：本轮曾误用未定义 `INTEGRATION_TESTS` 的 Debug 集成程序，`Store.Root` 因此指向真实 `%LOCALAPPDATA%\AgentLauncher`，测试改写了 configuration/tasks/control/monitor-pid。已确认无遗留 App/Worker 进程，将合成 JSON、备份和夹具目录隔离到 `recovery-quarantine-20261127-1850`；从 2026-11-20 的只读快照恢复 `configuration.json` 与 `.bak`，SHA-256 分别为 `6b27ee3291b3887e1d9600b77b7031feadbc68223b8dda991cae47b16df1c5e5`、`8819aff2ddbee348dcee656048fe7d24e4a07c68135a63cd6b7b322b4bbadf18`。**原始 tasks.json 与 control ledger 未找到字节完整备份，不能声称完整恢复**；已从归档诊断保留 13 个真实任务的清单线索（实际打印 12 个）到隔离目录 `task-inventory-from-archive.txt`，未伪造新任务账本。后续集成测试只用带 `INTEGRATION_TESTS` 的发布运行时和 `AgentLauncher-tests-` 隔离根。
+
+## 102. 剩余实用性问题检查（2026-11-27，Asia/Shanghai）
+
+- 范围：`fix/window-placement`、HEAD `2178750` 及当前未提交改动；检查没有修改产品代码、正式测试或真实用户配置。详细问题、位置、建议与探针在 `artifacts/usability-review-20261127/REVIEW.md`。独立代码审查为 REQUEST CHANGES，架构审查为 WATCH。
+- 已复现但未修复：普通任务的 isolated 单项准备仍返回原目录；终端中文横向/纵向 resize 后出现额外空格；远程第二次续接被已有 `--continue` 拒绝；WPF 新建任务路径校验失败后，重开表单丢失已输入说明。另经静态追踪确认内置终端回看/复制缺口、组合键退化、失效标签不能直接重连、槽位查看改动未绑定实际 worktree、自定义 CLI 在任务路径中的配置/探针不一致，以及 SSH 255 前同步清理可能停止仍在运行的远程任务的同步。真实数据目录只读检查仍未发现 tasks.json、其 .bak 和 control.json，§101 的恢复不完整状态继续开放。
+- 验证：显式 Release + `INTEGRATION_TESTS` 发布到独立运行时；本机原生/模型 **283 通过、0 失败**；真实 WPF **484 通过、0 失败、退出 0**（120 DPI），证据分别为该目录下 `native.log` 与 `ui-outside-repo/ui-checks.json`。首次 UI 隔离根在仓库内部，因向上识别父 Git 仓库而使“非 Git 目录”夹具断言失败（339/1）；改用系统临时目录后通过，未改断言。最小探针结果见 `AgentLauncher-tests-probes/probe-results.json` 与 `AgentLauncher-tests-form/form-results.json`；临时 WPF 探针资源装配和退出流程曾调整，不计为产品缺陷。
+- 边界：没有执行完整 `scripts/test.ps1`、真实 VPS 断线、真实 Agent 长稳或完整键盘/输入法验收；静态审查不等同于这些场景已实测。现有测试通过不关闭本节发现的问题。
+
+## 103. 实用性修复与恢复保护（2026-11-27，Asia/Shanghai）
+
+- 已实现：普通隔离任务准备独立 worktree，冻结并保存实际尝试目录；任务继承所选 Agent 的 CLI 路径与结构化参数，支持直接选择程序。槽位查看改动优先使用实际尝试目录，多个目录明确选择；任务审阅可从结果归档与保存的工作区路径恢复身份。
+- 表单：任务、新建会话、详情、设置、重命名、组合、远程主机和参数预设采用校验/持久化成功后关闭。失败显示在原窗口，保留输入；配置保存失败时回滚当前字段、待保存快照及规模预设编辑标记，取消后再点全局重试不会保存已取消的内容。显式 Node 配置的探测、交付、续接、预设均保留入口脚本；身份指纹包含入口内容，不能只用相同 node.exe 判断 Agent 未变化。
+- 终端：中文宽字符缩放修复；主屏最多 2000 行/2 MiB 有界历史，按需回看、选择复制、搜索、修饰键、标签切换和同标签重连。多行粘贴按真实 bracketed-paste 协商处理；未协商先显示确认。任务结束后当前视图仍可回看、搜索、缩放，关闭视图释放已结束宿主。具体协议和输入边界见 `EMBEDDED-TERMINAL.md`。
+- 远程：SSH 255 或退出状态不明时保留 Mutagen；工作 Shell 重挂接校验并复用已有同步会话。重复续接替换既有 continue 标记而保留其他参数。界面明确工作 Shell 不恢复原交互终端、SSHFS 不上传本地项目；Mutagen 标准模式与收敛检查统一为 two-way-safe。远程故障回归使用本地 SSH/同步夹具，没有操作真实 VPS。
+- 任务历史：schema 5 增加不可变历史归档引用，迁移前核对尝试身份和退出证据，每批最多 200 条，保留最新尝试、依赖成功记录和续接引用。每次覆盖前按内容指纹原子保存原始快照；恢复前展示具体任务并确认，保留 `.bak` 和控制账本、保持队列暂停。原子暂存和损坏旧快照保留回归已加入。1000 条活动尝试及独立 1200 条领取记录上限仍有效；历史迁移不清除领取证据，也不保证总能释放名额。
+- 测试隔离：发现普通无参数原生套件也会进入 WorkspacePreparer 写入 `Store.Root`，故不仅集成子模式，默认原生、同步、终端夹具和未知参数回退均在任何状态访问前要求集成构建与明确独立根。拒绝正式目录、设备路径、目录链接及 8.3 别名；子进程回归验证拒绝时不创建状态。门禁先隔离发布，再执行原生测试，恢复调用者环境，不再按目录年龄删除其他测试根。
+- 整合专项验证：原生 **299/0**，真实 WPF **510/0**（含 11 项任务/快照回归，90 秒门限内），证据 `artifacts/usability-fixes-20261127/task-daily-native.log`、`task-daily-ui/ui-checks.json`。终端模型 **20/0**；真实 ConPTY 回归覆盖 90 行输出、搜索复制、重连、中文 ACK、退出后回看/缩放和宿主退出，证据 `artifacts/terminal-model-usability/embedded-ui-post-exit.json`。远程专项执行 **6/0**、同步可靠性 **12/0**、维护 **12/0**、启动表面 **7/0**，见 `artifacts/remote-fixes-20261127/`。最终整合门禁另行记录，不能用这些分项替代。
+- 历史数据限制：§101 事故前的原始任务文件和控制账本仍未找到完整备份，未伪造任务身份或执行历史。恢复线索、已保留证据和之后的恢复入口见 `RECOVERY-20261127.md`；此项保持未恢复。
+- 整合复审补齐：快速队列尝试冻结 `TaskRun.SourceSlotId`，任务后续编辑不会清除原槽位关联；槽位查看改动可读取已校验的结果归档，已知运行缺少目录证据时不回退源项目。紧凑布局把运行位置与 Agent 选择独立排列，650px、125%/150% 下三种 Agent 名称的 6 项可读性检查通过，截图与实测 JSON 在 `artifacts/compact-agent-ui/ui-labels/`。
+- 门禁失败处置：首轮完整门禁原生 **299/0**、同步评审 **6/0**，修复检查 **31/5**；五条失败都在新增 Agent 身份校验前置处，尚未进入原断言。已为 RepairChecks、RuntimeReviewChecks、Integration 的 6 处成功启动夹具补 `AgentId="codex"`，保持断言不变，修复专项复跑 **36/0**。UI 整合的临时身份夹具补齐计划摘要；分代理 UI 在 `CodexSandboxDesktop-*` 无系统托盘时按原断言失败，临时 native 诊断确认桌面差异后移除，未修改产品托盘逻辑或放宽验收。
+- 完整门禁：`scripts/test.ps1 -RuntimeDirectory artifacts/usability-fixes-20261127/gate-verified-runtime` 未使用 Skip，最终 **退出 0**。原生 **300/0**、同步评审 **6/0**、终端模型 **20/0**、ManualRelay **16/0**、修复 **36/0**；admission、startup queue、parallel batch、真实 Terminal、完整本机集成、远程执行/启动和同步可靠性均无失败（同步可靠性 **12/0**）。WPF **533/0** 且在 90 秒硬门限内，embedded `Passed=true`，原型 **5/0**、Omp 守卫 **6/0**、浏览器 **5 项 PASS**。原始日志 `artifacts/usability-fixes-20261127/gate-verified.log`，稳定结果副本在同目录 `verified/`。
+- 收尾与验证范围：本次门禁全部断言已通过后，同步故障套件遗留的隔离监控进程仍持有父日志管道；核对测试根、可执行文件、PID 和无夹具子进程后停止该监控，父门禁实际退出 0，总耗时 **1023.92 秒**（含收尾诊断）。这不是无人干预完成的门禁；已定位并补测试自身的退出清理，专项结果另记。正式 configuration/tasks/control 六个主/备份路径的存在状态和 SHA-256 前后一致；门禁期间被检查的 95 个源码文件没有变化，证据 `production-state-after-final-gate.json` 和 `verified-source-files.json`。未执行真实 VPS 网络故障、真实 Agent 长稳和混合 DPI 多显示器硬件验收。
+- 交付：生产 `scripts/build.ps1` 已重新发布 App/Worker 配套 20 文件包，`Launch.ps1 -CheckOnly` 通过；包内测试钩子扫描通过，清单 `SourceDirty=true` 如实记录本轮尚未提交源码。旧包保留于 `artifacts/preview.before-93ebab791421461c971bc4db3ac7b672`，现入口 `Start-AgentLauncher.cmd` 与桌面「多 Agent 启动器」快捷方式均指向 `artifacts/preview`。未自动启动生产 App 或修改真实任务数据。
+- 测试清理复验：同步套件改为持有自己创建的监控进程句柄，启动/清理均要求同一隔离根、文件路径与启动时间；通过 `using/finally` 在成功或失败时清理自身进程，保留证据文件。带输出管道的专项复跑 **12/0、退出 0、11.71 秒**；注入首次握手断开时按预期 **1 项失败、退出 1、9.58 秒**，两条路径都确认监控退出且正常返回管道 EOF。证据 `artifacts/remote-fixes-20261127/sync-cleanup-piped.log`、`sync-cleanup-result.json` 及 `sync-cleanup-failure-*`。该变更仅影响测试，未改生产 App/Worker。
+- UI 测试清理：部分夹具在 custody 的下一次 Reap 前恢复旧 ledger，已结束 Git 尝试的身份记录因此从夹具账本移除；生产保管器按保守策略保留未知空 Job 句柄。新增仅集成构建的 teardown，核对本轮隔离根、boot/PID/程序路径/创建时间，证明 scope 根 Job 已空后停止精确保管进程。专项完整 WPF **534/0、退出 0、83.87 秒**，仍满足 90 秒门限，`ui-fixture-cleanup.json` 为 `Passed=true / stopped-after-empty-root`；见 `artifacts/usability-fixes-20261127/ui-cleanup-final/`。不修改生产 retain-unknown 行为。
+- 清理边界补验：最后补齐根 Job 已自然消失时的清理路径，无额外等待。直接编译同一 `UiFixtureCleanup.cs`，使用真实 Worker custody 和受管 `Tests --hold` 子进程，**3/3** 验证根不存在即时退出、根非空拒绝并保留 custody、子进程自然退出后清理空根；证据 `artifacts/ui-fixture-cleanup-probe/targeted-results.json`。此后只重编 App 和执行定向清理检查，未重复完整 WPF/门禁；生产代码与已交付包不受影响。
+
+## 104. PR #13 的 CI 测试时序修复（2026-11-28，Asia/Shanghai）
+
+- CI run `46025890188` 在原生和集成阶段通过后，WPF 的 `ACC-B10 resume creates a linked new attempt` 失败；续接表单仍可见，之后触发 30 秒无进度超时。原诊断没有表单内错误及队列快照，不能据此断定具体保存失败原因。检查发现测试在点击异步应用后只等待一次 Dispatcher 调度，并可能选中上一个仍可见的表单。
+- 测试修复：只选择本次新建的表单，按原 100 × 50 ms 界限等待关闭或表单错误，再继续后续操作；原关联尝试及真实 Terminal 断言保留。失败时写出 `task-session-diagnostic.json`，包含表单错误、保存按钮状态、队列及尝试身份，已结束保存的错误表单会关闭。
+- 本机首次复验通过会话检查，随后在 UX10 精确焦点断言失败；诊断为窗口最小化。相同运行时第二次完整复跑 **538/0、退出 0、72.81 秒**，不能据此证明最小化的来源。快捷导航夹具现于点击前建立窗口可见、激活、非最小化的前提，记录进入状态及待完成任务；点击后不修正焦点，原精确焦点断言不变。
+- 最终集成构建零警告、零错误；完整 WPF **539/0、退出 0、68.72 秒**，清理 `Passed=true / stopped-after-empty-root`。证据 `artifacts/commit-20261127/ui-ci-final/`；前两次结果保留在 `ui-session-fix/`、`ui-session-repeat/`。本次只改测试夹具和诊断，未改生产逻辑、30 秒无进度限制或 90 秒总时限；远端全门禁以本次提交后的 CI 结果为准。
+- 第二轮 CI `46030265772` 通过会话续接及全部原生/集成检查，WPF 在第 360 项触发 **90 秒总时限**（最后进度距终止约 9 秒，非 30 秒停滞）。新增进度耗时记录后，本机相同旧逻辑完整 **539/0、75.16 秒**；直接启动短命令占 **10.29 秒**，四次 Omp shim 各约 **3.5 秒**。证据 `ui-timing-baseline/ui-progress.json`。
+- 两处产品修复：启动观察循环在本批每个精确尝试 ID 均有已确认终态时退出，不再漏掉短命令而等满十轮；缺失记录仍保持原有界等待，启动确认和最小化分支不变。Omp 握手等待在受保护主进程已确认退出时及时返回未确认，仍显示警告，不伪造 hello，也不停止 guard 服务、提前写 Finished、跳过 Job 子树排空或改变硬限制。存活进程保留三秒握手期限。
+- 真实进程回归：旧握手逻辑对 150 ms 子进程仍等待 **3.0897 秒**，新增断言失败；修复后三项通过，覆盖短命退出且服务仍可接收后续 hello、存活无 hello 等满三秒且 Job 限制保留、真实 hello 成功。日志 `omp-handshake-red.log` / `omp-handshake-green.log`。新增定向入口也要求隔离构建和独立测试根。
+- 最终本机验证：配套集成构建通过；完整原生 **303/0**，完整 WPF **540/0、退出 0、53.19 秒**，相同断言基线减少约 **22 秒**。直接启动实测 **1.12 秒**，收到 Finished 后 **0.50 秒**内结束观察；新增三秒以内的终态观察断言通过，清理仍通过。证据 `ci-fast-native.log`、`ui-fast-final/`。CI 移除三 Agent 收敛后已无测试用途的旧 Pi 全局 npm 安装，真实 Omp 门禁保留；没有放宽 UI 或作业超时。

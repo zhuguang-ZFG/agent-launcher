@@ -15,6 +15,9 @@ public partial class MainWindow
 {
     private async Task RunUiChecksAsync(string folder)
     {
+        var fixtureStarted=DateTimeOffset.UtcNow;
+        var fixtureClock=Stopwatch.StartNew();long previousBoundary=0;
+        var slowIntervals=new List<(string Name,long Milliseconds)>();
         System.IO.Directory.CreateDirectory(folder);var checks=new List<string>();
         // The harness owns an isolated, possibly non-existent test root. The app's preview-first startup no longer writes
         // monitor state there, so create it before the first configuration write (a missing root surfaces as a silent UI-only error).
@@ -26,10 +29,92 @@ public partial class MainWindow
         Activate();
         void Check(string name,bool value)
         {
-            if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name});throw new Exception("UI regression: "+name);}
+            var elapsed=fixtureClock.ElapsedMilliseconds;var interval=elapsed-previousBoundary;previousBoundary=elapsed;
+            if(interval>=100)slowIntervals.Add((name,interval));
+            if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name,diagnostic=new{WindowState=WindowState.ToString(),IsVisible,loading,closeRequested,OwnedWindows=OwnedWindows.Cast<Window>().Where(w=>w.IsVisible).Select(w=>w.Title).ToArray(),Error=ErrorText.Text}});throw new Exception("UI regression: "+name);}
             checks.Add(name);
             // Record every boundary so a later layout stall is attributed to the actual last completed check.
-            System.IO.File.WriteAllText(System.IO.Path.Combine(folder,"ui-progress.json"),System.Text.Json.JsonSerializer.Serialize(new{LastPassed=name,Count=checks.Count,At=DateTimeOffset.UtcNow}));
+            System.IO.File.WriteAllText(System.IO.Path.Combine(folder,"ui-progress.json"),System.Text.Json.JsonSerializer.Serialize(new{LastPassed=name,Count=checks.Count,At=DateTimeOffset.UtcNow,ElapsedMilliseconds=elapsed,SlowIntervals=slowIntervals.OrderByDescending(item=>item.Milliseconds).Take(15).Select(item=>new{item.Name,item.Milliseconds}).ToArray()}));
+        }
+        async Task CheckWindowPlacementRoundTripAsync()
+        {
+            // Native WM_SIZE transitions lag the WPF property under load. Wait for the HWND state so a late
+            // minimize message cannot land after the fixture restores the window and break later focus checks.
+            async Task WaitForNativeStateAsync(bool iconic,bool zoomed=false)
+            {
+                var deadline=Stopwatch.StartNew();
+                while(deadline.Elapsed<TimeSpan.FromSeconds(3))
+                {
+                    if(windowHandle!=IntPtr.Zero&&WindowPlacementNative.IsIconic(windowHandle)==iconic&&WindowPlacementNative.IsZoomed(windowHandle)==zoomed)return;
+                    await Task.Delay(25);
+                }
+            }
+            var path=Store.FilePath("window-placement.json");var backupPath=path+".bak";
+            var savedPlacement=System.IO.File.Exists(path)?System.IO.File.ReadAllBytes(path):null;
+            var savedBackup=System.IO.File.Exists(backupPath)?System.IO.File.ReadAllBytes(backupPath):null;
+            var originalState=WindowState;var originalStartup=WindowStartupLocation;var originalLeft=Left;var originalTop=Top;var originalWidth=Width;var originalHeight=Height;
+            var originalMinWidth=MinWidth;var originalMinHeight=MinHeight;
+            var originalWindowedBounds=windowedBounds;var originalLastNonMinimizedState=lastNonMinimizedState;
+            try
+            {
+                var screen=new Rect(SystemParameters.VirtualScreenLeft,SystemParameters.VirtualScreenTop,SystemParameters.VirtualScreenWidth,SystemParameters.VirtualScreenHeight);
+                var testWidth=Math.Min(960,screen.Width-64);var testHeight=Math.Min(700,screen.Height-64);
+                if(testWidth<MinWidth||testHeight<MinHeight)throw new InvalidOperationException("屏幕尺寸不足以验证窗口位置记忆。");
+                WindowState=WindowState.Normal;WindowStartupLocation=WindowStartupLocation.Manual;
+                Left=Math.Clamp(screen.Left+24,screen.Left,screen.Right-testWidth);Top=Math.Clamp(screen.Top+24,screen.Top,screen.Bottom-testHeight);Width=testWidth;Height=testHeight;
+                await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
+                var expected=new Rect(Left,Top,Width,Height);
+                WindowState=WindowState.Maximized;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(100);
+                WindowState=WindowState.Minimized;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await WaitForNativeStateAsync(true);
+                SaveWindowPlacement();
+                var actual=Store.Read<WindowPlacement>(path);
+                Check("UX16 minimized placement retains normal position size and max state",actual is {Maximized:true}&&Math.Abs(actual.Left-expected.Left)<0.5&&Math.Abs(actual.Top-expected.Top)<0.5&&Math.Abs(actual.Width-expected.Width)<0.5&&Math.Abs(actual.Height-expected.Height)<0.5);
+                RestoreBackground();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                Check("UX16 restoring a minimized maximized window keeps its max state",WindowState==WindowState.Maximized);
+                EnterBackground();
+                Check("UX16 backgrounding a maximized window keeps it maximized",!IsVisible&&WindowState==WindowState.Maximized);
+                RestoreBackground();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
+                Check("UX16 background restore and tray exit preserve maximized placement",IsVisible&&WindowState==WindowState.Maximized&&Store.Read<WindowPlacement>(path) is {Maximized:true});
+                WindowState=WindowState.Normal;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                EnterBackground();RestoreBackground();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
+                Check("UX16 background restore keeps a normal window normal",IsVisible&&WindowState==WindowState.Normal&&Store.Read<WindowPlacement>(path) is {Maximized:false});
+                if(!TryGetWindowWorkArea(out var work))throw new InvalidOperationException("无法读取测试窗口工作区。");
+                Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,false));
+                ApplyWindowPlacement();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                Check("UX16 restored normal bounds fit the selected monitor work area",Math.Abs(Left-work.Left)<0.5&&Math.Abs(Top-work.Top)<0.5&&Math.Abs(Width-work.Width)<0.5&&Math.Abs(Height-work.Height)<0.5);
+                Width=testWidth;Height=testHeight;Left=expected.Left;Top=expected.Top;
+                await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,true));
+                ApplyWindowPlacement();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
+                var maxPlacement=Store.Read<WindowPlacement>(path);
+                Check("UX16 maximized restore retains work-area-safe windowed bounds",WindowState==WindowState.Maximized&&maxPlacement is {Maximized:true}&&Math.Abs(maxPlacement.Left-work.Left)<0.5&&Math.Abs(maxPlacement.Top-work.Top)<0.5&&Math.Abs(maxPlacement.Width-work.Width)<0.5&&Math.Abs(maxPlacement.Height-work.Height)<0.5);
+                var compactWidth=Math.Max(MinWidth,Math.Min(800,work.Width-64));var compactHeight=Math.Max(MinHeight,Math.Min(600,work.Height-64));
+                var compact=new Rect(work.Left+(work.Width-compactWidth)/2,work.Top+(work.Height-compactHeight)/2,compactWidth,compactHeight);
+                Store.Save(path,new WindowPlacement(compact.Left,compact.Top,compact.Width,compact.Height,true));
+                ApplyWindowPlacement();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);SaveWindowPlacement();
+                var compactPlacement=Store.Read<WindowPlacement>(path);
+                Check("UX16 applying distinct bounds while maximized preserves the requested geometry",WindowState==WindowState.Maximized&&compactPlacement is {Maximized:true}&&Math.Abs(compactPlacement.Left-compact.Left)<0.5&&Math.Abs(compactPlacement.Top-compact.Top)<0.5&&Math.Abs(compactPlacement.Width-compact.Width)<0.5&&Math.Abs(compactPlacement.Height-compact.Height)<0.5);
+                Store.Save(path,new WindowPlacement(work.Left,work.Top,work.Width,work.Height+128,false));
+                var beforeShow=new MainWindow([]);
+                try
+                {
+                    new System.Windows.Interop.WindowInteropHelper(beforeShow).EnsureHandle();
+                    if(!beforeShow.TryGetWindowWorkArea(out var sourceWork))throw new InvalidOperationException("无法读取未显示窗口工作区。");
+                    Check("UX16 source initialization fits saved bounds before first show",!beforeShow.IsVisible&&beforeShow.Left>=sourceWork.Left-0.5&&beforeShow.Top>=sourceWork.Top-0.5&&beforeShow.Left+beforeShow.Width<=sourceWork.Right+0.5&&beforeShow.Top+beforeShow.Height<=sourceWork.Bottom+0.5);
+                }
+                finally{beforeShow.closing=true;beforeShow.Close();}
+            }
+            finally
+            {
+                static void RestoreFile(string file,byte[]? bytes){if(bytes is null){if(System.IO.File.Exists(file))System.IO.File.Delete(file);}else System.IO.File.WriteAllBytes(file,bytes);}
+                RestoreFile(path,savedPlacement);RestoreFile(backupPath,savedBackup);
+                if(!IsVisible)RestoreBackground();
+                MinWidth=originalMinWidth;MinHeight=originalMinHeight;
+                WindowState=WindowState.Normal;WindowStartupLocation=originalStartup;Left=originalLeft;Top=originalTop;Width=originalWidth;Height=originalHeight;WindowState=originalState;
+                await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
+                await WaitForNativeStateAsync(false,originalState==WindowState.Maximized);
+                windowedBounds=originalWindowedBounds;lastNonMinimizedState=originalLastNonMinimizedState;
+            }
         }
         IEnumerable<T> Find<T>(DependencyObject root) where T:DependencyObject
         {
@@ -47,6 +132,7 @@ public partial class MainWindow
             await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
         }
         Check("config load is writable",!readOnly);
+        await CheckWindowPlacementRoundTripAsync();
         // F6/F8 regressions: null template values and unsupported LastEdited must fail closed. Both use the real configPath in the isolated test root.
         await saveTask;
         var healthyConfig=System.IO.File.Exists(configPath)?System.IO.File.ReadAllBytes(configPath):null;
@@ -107,10 +193,10 @@ public partial class MainWindow
         await SelectRailSlot(1);
         config.SaveTemplate("fourth");config.Edit(d=>d.DirectoryMode="shared");config.Restore(config.Templates["fourth"]);Render();
         Check("native mode restore renders isolated",DirectoryMode.SelectedIndex==0&&config.Draft.DirectoryMode=="isolated");
-        var firstId=config.Draft.Slots[0].Id;config.Edit(d=>d.Slots[0].Profiles["pi"]=new(){Executable="C:\\Example\\pi.exe",Arguments=["--only-pi"]});Render();
+        var firstId=config.Draft.Slots[0].Id;config.Edit(d=>d.Slots[0].Profiles["omp"]=new(){Executable="C:\\Example\\omp.exe",Arguments=["--only-omp"]});Render();
         var select=AgentCombo();select.SelectedValue="local:codex";Check("native Agent selector separates profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Executable=="");
-        select=AgentCombo();select.SelectedValue="local:pi";Check("native Agent selector restores profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Arguments.SequenceEqual(new[]{"--only-pi"}));
-        var cloudHost=new RemoteHost(Guid.NewGuid(),"候选云 VPS","choices.example.com",22,"root","agent",["pi","kimi"],null);
+        select=AgentCombo();select.SelectedValue="local:omp";Check("native Agent selector restores profile",config.Draft.Slots.Single(s=>s.Id==firstId).Current.Arguments.SequenceEqual(new[]{"--only-omp"}));
+        var cloudHost=new RemoteHost(Guid.NewGuid(),"候选云 VPS","choices.example.com",22,"root","agent",["omp"],null);
         config.RemoteHosts=[cloudHost];Render();
         await SelectRailSlot(2);
         Check("UX14 agent list does not mix cloud hosts",AgentCombo().Items.OfType<AgentChoice>().All(c=>c.HostId==null));
@@ -118,14 +204,14 @@ public partial class MainWindow
         Check("UX14 unbound slot lists the cloud place separately",cloudPlace.Items.OfType<PlaceChoice>().Any(c=>c.HostId==cloudHost.Id));
         cloudPlace.SelectedValue=cloudHost.Id.ToString();
         var boundSlot=config.Draft.Slots[1];
-        Check("UX14 picking cloud place binds host and derives remote dir",boundSlot.RemoteHostId==cloudHost.Id&&boundSlot.AgentId=="pi"&&RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(boundSlot.RemoteDirectory??"")&&boundSlot.RemoteDirectory!.StartsWith("~/work/"));
+        Check("UX14 picking cloud place binds host and derives remote dir",boundSlot.RemoteHostId==cloudHost.Id&&boundSlot.AgentId=="omp"&&RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(boundSlot.RemoteDirectory??"")&&boundSlot.RemoteDirectory!.StartsWith("~/work/"));
         PlaceCombo().SelectedValue="local";
         Check("UX14 picking local place unbinds host",config.Draft.Slots[1].RemoteHostId==null&&config.Draft.Slots[1].RemoteDirectory==null);
         Check("UX15 shared directory risk stays outside the collapsed options",SharedDirectoryRisk.Visibility==Visibility.Collapsed&&!LaunchOptionsExpander.IsExpanded);
         Edit(d=>d.DirectoryMode="shared");
         Check("UX15 shared directory risk is visible while options stay collapsed",SharedDirectoryRisk.Visibility==Visibility.Visible&&SharedDirectoryRiskText.Text.Contains("互相覆盖")&&!LaunchOptionsExpander.IsExpanded);
         Edit(d=>d.DirectoryMode="isolated");
-        var otherHost=new RemoteHost(Guid.NewGuid(),"另一云","other.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.None);
+        var otherHost=new RemoteHost(Guid.NewGuid(),"另一云","other.example.com",22,"root","agent",["omp"],null,WorkspaceSyncMode.None);
         config.RemoteHosts=[cloudHost,otherHost];
         Edit(d=>{d.Slots[0].Enabled=true;d.Slots[0].RemoteHostId=cloudHost.Id;d.Slots[1].Enabled=true;d.Slots[1].RemoteHostId=otherHost.Id;d.Slots[1].RemoteDirectory="~/work/other";});
         var mixedLabel=LaunchButton.Content as string??"";
@@ -225,7 +311,7 @@ public partial class MainWindow
         var realMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(realMonitor>0){try{using var m=Process.GetProcessById(realMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
         Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE","1");
         await RefreshAsync();Check("fake-sample monitor healthy",status is{Ok:true});
-        var gateItem=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"ui-gate",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new(Commands.FindExe("node.exe")!,["-e","setTimeout(()=>{},1500)"],"exe"),ResourcePolicy.AgentBudget);
+        var gateItem=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"ui-gate",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new(Commands.FindExe("node.exe")!,["-e","setTimeout(()=>{},1500)"],"exe"),ResourcePolicy.AgentBudget,AgentId:"codex");
         var gateReserve=await Ipc.ReserveWithCleanupAsync([gateItem]);Check("gate reserve admitted ("+gateReserve.Message+")",gateReserve.Ok);
         submittedAttempts=[gateItem.Id];submittedRevision=config.Draft.Revision;
         await RefreshAsync();
@@ -279,6 +365,7 @@ public partial class MainWindow
             config.TextScalePercent=scale;config.Theme="dark";ApplyTheme();Render();await ResizeForCheckAsync(650,700);
             var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth*UiScale.Value<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight*UiScale.Value<=ActualHeight);
             foreach(var scaleCombo in Find<ComboBox>(SlotList)){var comboOrigin=scaleCombo.TranslatePoint(new Point(),SlotList);Check($"detail combo stays inside the detail card at {scale}% text scale",comboOrigin.X>=-0.5&&comboOrigin.X+scaleCombo.ActualWidth<=SlotList.ActualWidth+0.5);}
+            await CheckCompactAgentLabelsAsync(Check,scale,folder);
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-text-{scale}.png"));encoder.Save(file);
         }
         config.TextScalePercent=100;ApplyTheme();
@@ -315,6 +402,11 @@ public partial class MainWindow
             Check($"F12 named template {name} restores its own snapshot",config.Draft.DirectoryMode=="prepared"&&config.Draft.Slots[3].Enabled&&!config.Draft.Slots[0].Enabled);
         }
         await RunTaskUsabilityChecksAsync(Check);
+        await RunTaskDailyFixChecksAsync(Check);
+        RunTerminalUsabilityChecks(Check);
+        RunDailyUsabilityChecks(Check);
+        await RunChangeWorkspaceArchiveChecksAsync(Check);
+        await RunConfigurationFormFailureChecksAsync(Check);
         await RunTaskChecksAsync(Check);
         await RunQuickQueueChecksAsync(Check);
         ReviewUiChecks.Run(Check);
@@ -341,7 +433,7 @@ public partial class MainWindow
             // P4 compare-group wiring: queued tasks are refused before any dialog or write.
             var compareButton=Find<Button>(TaskList).FirstOrDefault(b=>AutomationProperties.GetName(b)=="复制为对比组 rail-queue-probe");
             if(compareButton!=null){ErrorText.Text="";compareButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check("queued task is refused from compare grouping",ErrorText.Text.Contains("正在队列中"));}
-            status=new(true,"rail probe",[new(){Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"rail-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Started"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
+            status=new(true,"rail probe",[new(){Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),1,"rail-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget,AgentId:"omp"),State="Started"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
             RenderMonitorStatus();
             Check("rail sessions follow monitor refresh",FindLogical<TextBlock>(RailSessions).Any(t=>t.Text.Contains("rail-session-probe")));
             var focusButton=Find<Button>(ActiveSessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="聚焦终端 rail-session-probe");
@@ -350,7 +442,7 @@ public partial class MainWindow
             // R28 operator-confirmed release: Disconnected remote entries expose judgment + reason + second confirm;
             // non-Gone / missing reason / unconfirmed paths must never reach the release request (hermetic, no monitor IPC).
             var releaseAttempt=Guid.NewGuid();
-            status=new(true,"remote release probe",[new(){Plan=new LaunchItem(releaseAttempt,Guid.NewGuid(),1,"remote-release-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("pi",[],"remote"),0,RemoteExecution:new RemoteExecutionSpec("release.example.com",22,"root","agent","pi","/home/agent/work",[],null,null)),State="Disconnected",Detail="SSH 连接断开（退出码 255）；远程进程可能仍在运行。"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
+            status=new(true,"remote release probe",[new(){Plan=new LaunchItem(releaseAttempt,Guid.NewGuid(),1,"remote-release-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("omp",[],"remote"),0,AgentId:"omp",RemoteExecution:new RemoteExecutionSpec("release.example.com",22,"root","agent","omp","/home/agent/work",[],null,null)),State="Disconnected",Detail="SSH 连接断开（退出码 255）；远程进程可能仍在运行。"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
             RenderMonitorStatus();
             var releaseButton=Find<Button>(ActiveSessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认释放 remote-release-probe");
             Check("disconnected remote session offers operator release entry",releaseButton!=null);
@@ -389,7 +481,7 @@ public partial class MainWindow
             finally{TestConfirm=priorConfirm;ProgressText.Text="";}
             var reattachButton=Find<Button>(ActiveSessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="核对并确认重新挂接 remote-release-probe");
             Check("disconnected remote session offers reattach beside release",reattachButton!=null&&releaseButton!=null&&(reattachButton.Content as string)!=(releaseButton.Content as string));
-            Check("UX15 reattach and release effects stay in separate sentences",Find<TextBlock>(ActiveSessions).Any(t=>t.Text.Contains("新的 SSH 窗格"))&&Find<TextBlock>(ActiveSessions).Any(t=>t.Text.Contains("不会结束远端进程")&&t.Text.Contains("也不会重新挂接")));
+            Check("UX15 reattach and release effects stay in separate sentences",Find<TextBlock>(ActiveSessions).Any(t=>t.Text.Contains("工作 Shell")&&t.Text.Contains("未恢复"))&&Find<TextBlock>(ActiveSessions).Any(t=>t.Text.Contains("不会结束远端进程")&&t.Text.Contains("也不会重新挂接")));
             var narrowWidth=Width;Width=650;
             for(var i=0;i<20&&ActualWidth>=900;i++){await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);await Task.Delay(25);}
             Check("UX15 disconnected actions stay reachable when the rail sessions hide",ActiveNow.Visibility==Visibility.Visible&&RailSessionsSection.Visibility==Visibility.Collapsed&&releaseButton!.IsVisible&&reattachButton!.IsVisible);
@@ -397,10 +489,10 @@ public partial class MainWindow
             var reattachDialog=CreateRemoteReattachDialog(releaseEntry);
             // 取消钮只标了 IsCancel；测试里直接 RaiseEvent(Click) 不会走 Button.OnClick，对话框关不上，整段 UI 会卡到 90 秒。
             // 与释放对话框相同，点会设置 DialogResult 的「提交挂接」。二次确认取消仍由下面的 SubmitRemoteReattachAsync 覆盖。
-            reattachDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>FindLogical<Button>(reattachDialog).Single(b=>b.Content as string=="提交挂接").RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
+            reattachDialog.Loaded+=(_,_)=>Dispatcher.BeginInvoke(new Action(()=>FindLogical<Button>(reattachDialog).Single(b=>b.Content as string=="打开工作 Shell").RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
             var reattachApplied=reattachDialog.ShowDialog();
             var reattachNote=FindLogical<TextBlock>(reattachDialog).FirstOrDefault(t=>t.Text.Contains("release.example.com"));
-            Check("reattach dialog names host, directory, and refuses to pretend sync",reattachApplied==true&&reattachNote!=null&&reattachNote.Text.Contains("/home/agent/work")&&reattachNote.Text.Contains("不会把它说成已同步")&&reattachNote.Text.Contains("不会自动重连"));
+            Check("reattach dialog names host, directory, and refuses to pretend sync",reattachApplied==true&&reattachNote!=null&&reattachNote.Text.Contains("/home/agent/work")&&reattachNote.Text.Contains("没有启用文件同步")&&reattachNote.Text.Contains("不会自动重连")&&reattachNote.Text.Contains("未恢复"));
             var reattachConfirms=0;var reattachPrompt="";
             try
             {
@@ -412,7 +504,7 @@ public partial class MainWindow
             finally{TestConfirm=priorConfirm;ProgressText.Text="";ErrorText.Text="";}
             // P2 session-card wiring: settled agent entries expose read-only change summary; review routing follows the linked run's terminal transition without any monitor-entry change.
             var settledAttempt=Guid.NewGuid();var settledTask=Guid.NewGuid();
-            status=new(true,"settled probe",[new(){Plan=new LaunchItem(settledAttempt,Guid.NewGuid(),1,"settled-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget),State="Settled"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
+            status=new(true,"settled probe",[new(){Plan=new LaunchItem(settledAttempt,Guid.NewGuid(),1,"settled-session-probe",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget,AgentId:"omp"),State="Settled"}],new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,DateTimeOffset.UtcNow));
             taskBook=new(){Revision=1,Tasks=[new(){Id=settledTask,Revision=1,Name="settled-task-probe",Project=Store.Root}],Attempts=[new(){TaskId=settledTask,TaskRevision=1,AttemptId=settledAttempt,BatchId=Guid.NewGuid(),State="Running",At=DateTimeOffset.UtcNow}]};
             RenderMonitorStatus();
             var viewChanges=Find<Button>(Sessions).FirstOrDefault(b=>AutomationProperties.GetName(b)=="查看变更 settled-session-probe");
@@ -440,7 +532,7 @@ public partial class MainWindow
             dotSlot.Enabled=dotWasEnabled;Render();
             Check("rail status dot maps to state brushes",dotMappedOk&&dotMappedOff);
             var railNow=DateTimeOffset.UtcNow;
-            status=new(true,"rail summary probe",Enumerable.Range(0,5).Select(i=>new ControlEntry{Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),i+1,$"rail-summary-{i}",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget,Kind:"agent"),State="Started",Created=railNow.AddMinutes(-i)}).ToArray(),new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,railNow));
+            status=new(true,"rail summary probe",Enumerable.Range(0,5).Select(i=>new ControlEntry{Plan=new LaunchItem(Guid.NewGuid(),Guid.NewGuid(),i+1,$"rail-summary-{i}",Store.Root,PhysicalDirectory.Workspace(Store.Root),false,new("cmd.exe",[],"exe"),ResourcePolicy.AgentBudget,Kind:"agent",AgentId:"omp"),State="Started",Created=railNow.AddMinutes(-i)}).ToArray(),new MemorySnapshot(16UL*ResourcePolicy.GiB,7UL*ResourcePolicy.GiB,32UL*ResourcePolicy.GiB,20UL*ResourcePolicy.GiB,12.5,railNow));
             RenderMonitorStatus();
             var sessionsTruncated=RailSessions.Children.Count==4&&RailSessions.Children[3] is Button sessionsMore&&sessionsMore.Content is string sessionsLabel&&sessionsLabel.Contains("全部");
             var summaryTasks=Enumerable.Range(0,5).Select(i=>new TaskCard{Id=Guid.NewGuid(),Revision=1,Name=$"rail-summary-task-{i}",Project=Store.Root}).ToArray();
@@ -470,7 +562,7 @@ public partial class MainWindow
         notifier.Now = () => notifyAt;
         ControlEntry N(Guid id, string state, string detail) => new()
         {
-            Plan = new LaunchItem(id, Guid.NewGuid(), 1, "会话A", Store.Root, PhysicalDirectory.Workspace(Store.Root), false, new("cmd.exe", ["--secret-arg"], "exe"), ResourcePolicy.AgentBudget),
+            Plan = new LaunchItem(id, Guid.NewGuid(), 1, "会话A", Store.Root, PhysicalDirectory.Workspace(Store.Root), false, new("cmd.exe", ["--secret-arg"], "exe"), ResourcePolicy.AgentBudget, AgentId: "omp"),
             State = state, Detail = detail, Created = notifyAt
         };
         var nId = Guid.NewGuid(); const string finishedDetail = "全部受管进程已退出。退出码 3；目录 C:\\Users\\me\\proj；参数 --secret-arg";
@@ -502,6 +594,8 @@ public partial class MainWindow
         Check("disabled setting suppresses notifications", notifier.Delivered.Count == beforeOff);
         notifier.Now = () => DateTimeOffset.UtcNow; notifier.TestMode = false;
         var pids=status?.Entries?.Where(e=>!Store.IsTerminal(e)).Count()??0;Check("UI checks do not launch agents",pids==0);
+        await StopUiFixtureProcessesAsync(folder,fixtureStarted);
+        Check("UI fixture custody exits only after its isolated root is empty",true);
         Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});Close();
     }
 
@@ -538,7 +632,7 @@ public partial class MainWindow
             await Git("-c","user.email=fixture@example.com","-c","user.name=fixture","commit","-qm","small");
             await System.IO.File.WriteAllTextAsync(small,"base\nchanged line\n");
             await System.IO.File.WriteAllTextAsync(System.IO.Path.Combine(repo,"新增.txt"),"untracked\n");
-            var host=new RemoteHost(Guid.NewGuid(),"同步审阅 VPS","sync-review.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.Mutagen);
+            var host=new RemoteHost(Guid.NewGuid(),"同步审阅 VPS","sync-review.example.com",22,"root","agent",["omp"],null,WorkspaceSyncMode.Mutagen);
             config=new Configuration();config.RemoteHosts=[host];
             config.Edit(d=>{d.Project=repo;d.Slots.ForEach(s=>s.Enabled=false);d.Slots[0].Enabled=true;d.Slots[0].Directory=repo;d.Slots[0].RemoteHostId=host.Id;d.Slots[0].RemoteDirectory="/home/agent/work";});
             Render();
@@ -549,8 +643,8 @@ public partial class MainWindow
             var badge=FindLogical<TextBlock>(this).FirstOrDefault(t=>AutomationProperties.GetName(t)==$"同步状态 {slot.DisplayName}");
             check("UX12 VPS slot renders sync badge",badge!=null);
             var attempt=Guid.NewGuid();
-            var plan=new LaunchItem(attempt,Guid.NewGuid(),1,"sync-review",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:slot.Id,RemoteExecution:new RemoteExecutionSpec(host.Address,22,"root","agent","pi","/home/agent/work",[],null,null));
-            ControlEntry Entry(string state)=>new(){Plan=plan,State=state};
+            var plan=new LaunchItem(attempt,Guid.NewGuid(),1,"sync-review",repo,PhysicalDirectory.Workspace(repo),false,new("omp",[],"remote"),0,SourceSlotId:slot.Id,AgentId:slot.AgentId,RemoteExecution:new RemoteExecutionSpec(host.Address,22,"root","agent",slot.AgentId,"/home/agent/work",[],null,null));
+            ControlEntry Entry(string state)=>new(){Plan=plan,Digest=Store.Digest(plan),State=state};
             status=new(true,"sync review probe",[Entry("Settled")]);
             Store.Save(Store.SyncFinalPath(attempt),new SyncFinalRecord(1,SyncFinalRecord.Synced,"Mutagen flush 成功，会话已终止。",DateTimeOffset.UtcNow));
             await ApplySyncListToBadgesAsync("No sessions found",true,"",DateTimeOffset.UtcNow);
@@ -622,10 +716,10 @@ public partial class MainWindow
             check("UX12 B1 changes dialog opened for inspection",dialogSeen);
             check("UX12 B1 review left worktree untouched",await System.IO.File.ReadAllTextAsync(tracked)==string.Join("\n",Enumerable.Range(1,500).Select(i=>"changed "+i))+"\n");
             // ---- 同步可靠性 R34/R39/R40/R41/R36：链路徽章 + 上次观测 + 只读冲突清单 ----
-            var jyHost=new RemoteHost(Guid.NewGuid(),"京云夹具","jy.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.Mutagen);
-            var alyHost=new RemoteHost(Guid.NewGuid(),"阿里云夹具","aly.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.Mutagen);
-            var sshfsHost=new RemoteHost(Guid.NewGuid(),"SSHFS 夹具","sshfs.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.SshfsMount);
-            var noneHost=new RemoteHost(Guid.NewGuid(),"None 遗留","none.example.com",22,"root","agent",["pi"],null,WorkspaceSyncMode.None);
+            var jyHost=new RemoteHost(Guid.NewGuid(),"京云夹具","jy.example.com",22,"root","agent",["omp"],null,WorkspaceSyncMode.Mutagen);
+            var alyHost=new RemoteHost(Guid.NewGuid(),"阿里云夹具","aly.example.com",22,"root","agent",["omp"],null,WorkspaceSyncMode.Mutagen);
+            var sshfsHost=new RemoteHost(Guid.NewGuid(),"SSHFS 夹具","sshfs.example.com",22,"root","agent",["omp"],null,WorkspaceSyncMode.SshfsMount);
+            var noneHost=new RemoteHost(Guid.NewGuid(),"None 遗留","none.example.com",22,"root","agent",["omp"],null,WorkspaceSyncMode.None);
             config=new Configuration();config.RemoteHosts=[jyHost,alyHost,sshfsHost,noneHost];
             config.Edit(d=>{d.Project=repo;
                 d.Slots[0].Enabled=true;d.Slots[0].Directory=repo;d.Slots[0].RemoteHostId=jyHost.Id;d.Slots[0].RemoteDirectory="/home/agent/work";
@@ -649,8 +743,8 @@ public partial class MainWindow
                 conflicts+(lastError.Length>0?$"Last error: {lastError}\n":"")+$"Status: {status}\n"+
                 "-------------------------------------------------------------------------------\n";
             var jyAttempt=Guid.NewGuid();var alyAttempt=Guid.NewGuid();
-            var jyPlan=new LaunchItem(jyAttempt,Guid.NewGuid(),1,"r34-jy",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:config.Draft.Slots[0].Id,RemoteExecution:new RemoteExecutionSpec(jyHost.Address,22,"root","agent","pi","/home/agent/work",[],null,null));
-            var alyPlan=new LaunchItem(alyAttempt,Guid.NewGuid(),2,"r34-aly",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:config.Draft.Slots[1].Id,RemoteExecution:new RemoteExecutionSpec(alyHost.Address,22,"root","agent","pi","/home/agent/work",[],null,null));
+            var jyPlan=new LaunchItem(jyAttempt,Guid.NewGuid(),1,"r34-jy",repo,PhysicalDirectory.Workspace(repo),false,new("omp",[],"remote"),0,SourceSlotId:config.Draft.Slots[0].Id,AgentId:config.Draft.Slots[0].AgentId,RemoteExecution:new RemoteExecutionSpec(jyHost.Address,22,"root","agent",config.Draft.Slots[0].AgentId,"/home/agent/work",[],null,null));
+            var alyPlan=new LaunchItem(alyAttempt,Guid.NewGuid(),2,"r34-aly",repo,PhysicalDirectory.Workspace(repo),false,new("omp",[],"remote"),0,SourceSlotId:config.Draft.Slots[1].Id,AgentId:config.Draft.Slots[1].AgentId,RemoteExecution:new RemoteExecutionSpec(alyHost.Address,22,"root","agent",config.Draft.Slots[1].AgentId,"/home/agent/work",[],null,null));
             status=new(true,"sync reliability probe",[new ControlEntry{Plan=jyPlan,State="Started"},new ControlEntry{Plan=alyPlan,State="Started"}]);
             var jyName="agent-launcher-"+Guid.NewGuid().ToString("N");var alyName="agent-launcher-"+Guid.NewGuid().ToString("N");
             Store.Save(Store.SyncSessionPath(jyAttempt),new SyncSessionRecord(1,jyName,repo,"/home/agent/work",DateTimeOffset.UtcNow));
@@ -809,8 +903,8 @@ public partial class MainWindow
             check("R36 conflict details dialog opened for inspection",conflictSeen);
             // R41：启用 SSHFS/None 槽位后按最近尝试状态显示挂载提示与拒收文案（都不是已收敛）。
             var sshfsAttempt=Guid.NewGuid();var noneAttempt=Guid.NewGuid();
-            var sshfsPlan=new LaunchItem(sshfsAttempt,Guid.NewGuid(),3,"r41-sshfs",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:config.Draft.Slots[2].Id,RemoteExecution:new RemoteExecutionSpec(sshfsHost.Address,22,"root","agent","pi","/home/agent/work",[],null,null,new(WorkspaceSyncMode.SshfsMount,repo,"/home/agent/work",null,null)));
-            var nonePlan=new LaunchItem(noneAttempt,Guid.NewGuid(),4,"r41-none",repo,PhysicalDirectory.Workspace(repo),false,new("pi",[],"remote"),0,SourceSlotId:config.Draft.Slots[3].Id,RemoteExecution:new RemoteExecutionSpec(noneHost.Address,22,"root","agent","pi","/home/agent/work",[],null,null));
+            var sshfsPlan=new LaunchItem(sshfsAttempt,Guid.NewGuid(),3,"r41-sshfs",repo,PhysicalDirectory.Workspace(repo),false,new("omp",[],"remote"),0,SourceSlotId:config.Draft.Slots[2].Id,AgentId:config.Draft.Slots[2].AgentId,RemoteExecution:new RemoteExecutionSpec(sshfsHost.Address,22,"root","agent",config.Draft.Slots[2].AgentId,"/home/agent/work",[],null,null,new(WorkspaceSyncMode.SshfsMount,repo,"/home/agent/work",null,null)));
+            var nonePlan=new LaunchItem(noneAttempt,Guid.NewGuid(),4,"r41-none",repo,PhysicalDirectory.Workspace(repo),false,new("omp",[],"remote"),0,SourceSlotId:config.Draft.Slots[3].Id,AgentId:config.Draft.Slots[3].AgentId,RemoteExecution:new RemoteExecutionSpec(noneHost.Address,22,"root","agent",config.Draft.Slots[3].AgentId,"/home/agent/work",[],null,null));
             status=new(true,"sync reliability probe",[new ControlEntry{Plan=jyPlan,State="Started"},new ControlEntry{Plan=alyPlan,State="Started"},new ControlEntry{Plan=sshfsPlan,State="Started"},new ControlEntry{Plan=nonePlan,State="FailedBeforeStart"}]);
             config.Edit(d=>{d.Slots[2].Enabled=true;d.Slots[3].Enabled=true;});
             Render();

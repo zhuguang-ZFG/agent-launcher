@@ -12,7 +12,7 @@ internal static class TaskChecks
         {
             var path = Path.Combine(temp, "lost-tasks.json");
             var store = new TaskStore(path);
-            var created = store.Update(0, book => TaskBookOps.Create(book, "保留任务", temp, "custom", new AgentProfile(), "", [], "shared", null, 0));
+            var created = store.Update(0, book => TaskBookOps.Create(book, "保留任务", temp, "codex", new AgentProfile(), "", [], "shared", null, 0));
             store.Update(created.Revision, _ => { });
             var backup = File.ReadAllBytes(path + ".bak");
             File.Delete(path);
@@ -238,7 +238,7 @@ internal static class TaskChecks
             var book = new TaskBook();
             var first = QuickSlot("omp", "说明一", "--model", "a b");
             var second = QuickSlot("codex", "说明二", "--sandbox", "workspace-write");
-            var draft = QuickDraft("shared", first, new Slot { Enabled = false, AgentId = "pi" }, second);
+            var draft = QuickDraft("shared", first, new Slot { Enabled = false, AgentId = "claude" }, second);
             var items = new[]
             {
                 QuickItem(second, temp, "volume:second", "C:\\resolved\\codex.exe", new[] { "--resolved", "x y" }),
@@ -271,13 +271,13 @@ internal static class TaskChecks
             var book = new TaskBook();
             var repoA = QuickSlot("omp", "甲", "--a");
             var repoB = QuickSlot("codex", "乙", "--b");
-            var other = QuickSlot("pi", "丙", "--c");
+            var other = QuickSlot("claude", "丙", "--c");
             var draft = QuickDraft("isolated", repoA, repoB, other);
             var items = new[]
             {
                 QuickItem(repoA, temp, "volume:repo", "C:\\resolved\\omp.exe", Array.Empty<string>()),
                 QuickItem(repoB, temp, "volume:repo", "C:\\resolved\\codex.exe", Array.Empty<string>()),
-                QuickItem(other, temp, "volume:other", "C:\\resolved\\pi.exe", Array.Empty<string>())
+                QuickItem(other, temp, "volume:other", "C:\\resolved\\claude.exe", Array.Empty<string>())
             };
             var root = Path.Combine(temp, "worktrees");
             TaskBookOps.EnqueueQuickLaunch(book, draft, items, root);
@@ -320,7 +320,7 @@ internal static class TaskChecks
         {
             var slotA = QuickSlot("omp", "甲", "--a");
             var slotB = QuickSlot("codex", "乙", "--b");
-            var slotC = QuickSlot("pi", "丙", "--c");
+            var slotC = QuickSlot("claude", "丙", "--c");
             var draft = QuickDraft("shared", slotA, slotB, slotC);
             var valid = new[]
             {

@@ -20,7 +20,7 @@ internal static class AdmissionIntegration
             catch (Exception e) { Console.WriteLine("FAIL " + name + ": " + e.Message); evidence.Add(new { name, passed = false, error = e.ToString() }); }
         }
 
-        var authoritySlots=Enumerable.Range(0,ResourcePolicy.MaxSlots).Select(index=>new Slot{Enabled=index<3,AgentId=index%2==0?"pi":"codex"}).ToArray();
+        var authoritySlots=Enumerable.Range(0,ResourcePolicy.MaxSlots).Select(index=>new Slot{Enabled=index<3,AgentId=index%2==0?"omp":"codex"}).ToArray();
         LaunchItem Item(string name,int position=1) => new(Guid.NewGuid(), Guid.NewGuid(), position, name, cwd, PhysicalDirectory.Workspace(cwd), true,
             new(Environment.ProcessPath!, ["--hold", "1"], "exe"), ResourcePolicy.DefaultJobMemoryLimit, "agent",
             PlanningBytes: ResourcePolicy.DefaultPlanningBytes, ResourceMode: "practical",SourceSlotId:authoritySlots[position-1].Id,AgentId:authoritySlots[position-1].AgentId);
@@ -91,23 +91,24 @@ internal static class AdmissionIntegration
             SaveAuthority();
         });
 
-        await Test("R21 concurrency cap allows 8 agents, rejects the 9th, and does not count git", async () =>
+        await Test("R21 concurrency cap allows 6 agents, rejects the 7th, and does not count git", async () =>
         {
+            Assert(ResourcePolicy.MaxConcurrentAgents==6,"running pane cap changed");
             SaveAuthority(enabledCount:16);
-            var eight = Enumerable.Range(0, 8).Select(i => Item("cap-" + i,i+1)).ToArray();
+            var six = Enumerable.Range(0, ResourcePolicy.MaxConcurrentAgents).Select(i => Item("cap-" + i,i+1)).ToArray();
             var hash = ResourcePolicy.PolicyHash(policy);
-            var digest = ResourcePolicy.PlanDigest(eight);
-            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), eight, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
-            Assert(reserved.Ok, "8-agent batch was rejected: " + reserved.Message);
-            var replay = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), eight, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
+            var digest = ResourcePolicy.PlanDigest(six);
+            var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), six, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
+            Assert(reserved.Ok, "6-agent batch was rejected: " + reserved.Message);
+            var replay = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), six, Policy: policy, PolicyHash: hash, PlanDigest: digest, DraftRevision: 3));
             Assert(replay.Ok && replay.Message == "请求已记录", "exact replay was not idempotent: " + replay.Message);
-            var ninth = Item("cap-9",9);
-            var overflow = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [ninth], Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest([ninth]), DraftRevision: 3));
-            Assert(!overflow.Ok && overflow.Message.Contains($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个"), "9th agent was accepted: " + overflow.Message);
-            var git = GitItem("cap-git",10);
+            var seventh = Item("cap-7",ResourcePolicy.MaxConcurrentAgents+1);
+            var overflow = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [seventh], Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest([seventh]), DraftRevision: 3));
+            Assert(!overflow.Ok && overflow.Message.Contains($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个"), "7th agent was accepted: " + overflow.Message);
+            var git = GitItem("cap-git",ResourcePolicy.MaxSlots);
             var gitReserve = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [git], Policy: policy, PolicyHash: hash, PlanDigest: ResourcePolicy.PlanDigest([git]), DraftRevision: 3));
             Assert(gitReserve.Ok, "git preparation was blocked by the agent concurrency cap: " + gitReserve.Message);
-            foreach (var item in eight.Concat([git]))
+            foreach (var item in six.Concat([git]))
             {
                 await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: item.Id));
             }
@@ -273,9 +274,9 @@ internal static class AdmissionIntegration
                 var command = new CommandSpec(Environment.ProcessPath!, ["--hold", "1"], "exe");
                 var profile = new AgentProfile { Executable = command.Executable, Arguments = command.Arguments };
                 var book = new TaskBook();
-                var practicalTask = TaskBookOps.Create(book, "frozen practical", cwd, "custom", profile, "", [], "shared", new ResourceSettings { Mode = "practical" }, 0);
+                var practicalTask = TaskBookOps.Create(book, "frozen practical", cwd, "codex", profile, "", [], "shared", new ResourceSettings { Mode = "practical" }, 0);
                 var practicalQueue = TaskBookOps.Enqueue(book, practicalTask.Id, command, AgentProbe.Fingerprint(command));
-                var conservativeTask = TaskBookOps.Create(book, "frozen conservative", cwd, "custom", profile, "", [], "shared", new ResourceSettings { Mode = "conservative" }, 0);
+                var conservativeTask = TaskBookOps.Create(book, "frozen conservative", cwd, "codex", profile, "", [], "shared", new ResourceSettings { Mode = "conservative" }, 0);
                 var conservativeQueue = TaskBookOps.Enqueue(book, conservativeTask.Id, command, AgentProbe.Fingerprint(command));
                 Store.Save(taskPath, book);
                 var fixture = Activator.CreateInstance(monitorType, true)!;
@@ -416,7 +417,7 @@ internal static class AdmissionIntegration
             }
         });
 
-        await Test("R21 legacy ledger with nine pending agents is refused at begin and eight still begins", async () =>
+        await Test("R21 legacy ledger with seven pending agents is refused at begin and six still begins", async () =>
         {
             SaveAuthority();
             var controlPath = Store.FilePath("control.json");
@@ -439,23 +440,23 @@ internal static class AdmissionIntegration
             }
             async Task StartWith(Ledger ledger)
             {
-                // Ledgers written before the 8-pane cap cannot be produced through reserve, so the crafted book is published
+                // Ledgers written before the six-pane cap cannot be produced through reserve, so the crafted book is published
                 // while no monitor holds it in memory; the order (stop, publish, start) is what makes the load authoritative.
                 StopMonitor();
                 Store.Save(controlPath, ledger);
                 var started = await Ipc.EnsureMonitorAsync();
                 Assert(started.Ok, "monitor did not load the crafted ledger: " + started.Message);
             }
-            await StartWith(LedgerFor(9));
-            var nine = Store.Read<Ledger>(controlPath)!;
-            var refused = await Ipc.SendAsync(new("begin", Guid.NewGuid(), Attempt: nine.Entries[0].Plan.Id));
-            Assert(!refused.Ok && refused.Message.Contains($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个"), "nine pending agents were not refused at begin: " + refused.Message);
+            await StartWith(LedgerFor(ResourcePolicy.MaxConcurrentAgents+1));
+            var seven = Store.Read<Ledger>(controlPath)!;
+            var refused = await Ipc.SendAsync(new("begin", Guid.NewGuid(), Attempt: seven.Entries[0].Plan.Id));
+            Assert(!refused.Ok && refused.Message.Contains($"同时运行的 Agent 窗格最多 {ResourcePolicy.MaxConcurrentAgents} 个"), "seven pending agents were not refused at begin: " + refused.Message);
             var retained = Store.Read<Ledger>(controlPath)!;
-            Assert(retained.Entries.Count == 9 && retained.Entries.All(entry => entry.State == "Pending"), "refused begin changed or consumed the legacy ledger");
-            await StartWith(LedgerFor(8));
-            var eight = Store.Read<Ledger>(controlPath)!;
-            var began = await Ipc.SendAsync(new("begin", Guid.NewGuid(), Attempt: eight.Entries[0].Plan.Id));
-            Assert(began.Ok, "eight pending agents were refused at begin: " + began.Message);
+            Assert(retained.Entries.Count == ResourcePolicy.MaxConcurrentAgents+1 && retained.Entries.All(entry => entry.State == "Pending"), "refused begin changed or consumed the legacy ledger");
+            await StartWith(LedgerFor(ResourcePolicy.MaxConcurrentAgents));
+            var six = Store.Read<Ledger>(controlPath)!;
+            var began = await Ipc.SendAsync(new("begin", Guid.NewGuid(), Attempt: six.Entries[0].Plan.Id));
+            Assert(began.Ok, "six pending agents were refused at begin: " + began.Message);
             var cleanup = Store.Read<Ledger>(controlPath)!;
             // The begun entry is Creating: only Pending entries can be revoked, while an unstarted Creating grant settles as
             // FailedBeforeStart on the monitor's next refresh (no receipt, no job member). Wait for that tick before reading.

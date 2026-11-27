@@ -30,7 +30,7 @@ internal static class RemoteLiveChecks
         if (key is not null && !File.Exists(key)) throw new IOException("SSH key not found: " + key);
         Directory.CreateDirectory(Store.Root);
 
-        var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["pi"], key, WorkspaceSyncMode.Mutagen);
+        var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["omp"], key, WorkspaceSyncMode.Mutagen);
         var configuration = new Configuration { SchemaVersion = 2 };
         configuration.Draft.SchemaVersion = 2;
         configuration.Draft.Revision = 3;
@@ -40,11 +40,11 @@ internal static class RemoteLiveChecks
         configuration.RemoteHosts = [host];
         var slot = configuration.Draft.Slots[0];
         slot.Enabled = true;
-        slot.AgentId = "pi";
-        slot.CustomName = "Live Remote Pi";
+        slot.AgentId = "omp";
+        slot.CustomName = "Live Remote Omp";
         slot.RemoteHostId = host.Id;
         slot.RemoteDirectory = remoteDir;
-        slot.Profiles["pi"] = new AgentProfile { Executable = "pi", Arguments = arguments };
+        slot.Profiles["omp"] = new AgentProfile { Executable = "omp", Arguments = arguments };
         foreach (var other in configuration.Draft.Slots.Skip(1)) other.Enabled = false;
         Store.Save(Store.FilePath("configuration.json"), configuration);
 
@@ -290,11 +290,11 @@ Do nothing else before or after.";
         configuration.RemoteHosts = [host];
         var slot = configuration.Draft.Slots[0];
         slot.Enabled = true;
-        slot.AgentId = "pi";
-        slot.CustomName = "Live Remote Pi";
+        slot.AgentId = "omp";
+        slot.CustomName = "Live Remote Omp";
         slot.RemoteHostId = host.Id;
         slot.RemoteDirectory = remoteDir;
-        slot.Profiles["pi"] = new AgentProfile { Executable = "pi", Arguments = arguments };
+        slot.Profiles["omp"] = new AgentProfile { Executable = "omp", Arguments = arguments };
         foreach (var other in configuration.Draft.Slots.Skip(1)) other.Enabled = false;
         Store.Save(Store.FilePath("configuration.json"), configuration);
         var initial = await Ipc.EnsureMonitorAsync();
@@ -479,7 +479,7 @@ Do nothing else before or after.";
         var (timeoutSeconds, key) = GuardLiveRun(keyPath, timeoutText);
         var mib = int.Parse(memoryLimitMibText);
         if (scenario == "nonroot" && sshUser != agentUser) throw new IOException("nonroot 场景要求 sshUser 与 agentUser 相同（以非 root 登录触发 systemd 拒绝）。");
-        var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["pi"], key, WorkspaceSyncMode.Mutagen, null, mib);
+        var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["omp"], key, WorkspaceSyncMode.Mutagen, null, mib);
         string[] arguments = ["-p", "-a", "--no-session", scenario == "oom" ? OomPrompt : HeartbeatPrompt];
         Step("start-live begin");
         var run = await StartLiveAsync(host, remoteDir, arguments);
@@ -621,7 +621,7 @@ Do nothing else before or after.";
     {
         LiveConsole();
         var (timeoutSeconds, key) = GuardLiveRun(keyPath, timeoutText);
-        var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["pi"], key, WorkspaceSyncMode.Mutagen);
+        var host = new RemoteHost(Guid.NewGuid(), "Live VPS", address, 22, sshUser, agentUser, ["omp"], key, WorkspaceSyncMode.Mutagen);
         string[] arguments = ["-p", "-a", "--no-session", HeartbeatPrompt];
         var run = await StartLiveAsync(host, remoteDir, arguments);
         var log = new TransitionLog();

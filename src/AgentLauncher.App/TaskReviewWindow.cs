@@ -348,6 +348,8 @@ public sealed class TaskReviewWindow : Window
         var (ledger, ledgerProblem) = ReadLedgerCore();
         var planned = ReviewWindowPolicy.LockedWorkspacePath(monitorEntries, run.AttemptId, run.BatchId, run.WorkspaceKey)
             ?? (ledger is null ? null : ReviewWindowPolicy.LockedWorkspacePath(ledger.Entries, run.AttemptId, run.BatchId, run.WorkspaceKey));
+        if(planned is null&&TaskRecoveryReader.ReadAttempt(run.AttemptId,ledger) is {} archived)
+            planned=ReviewWindowPolicy.LockedWorkspacePath([archived],run.AttemptId,run.BatchId,run.WorkspaceKey);
         if (planned is not null)
         {
             var identity = PhysicalDirectory.Resolve(planned);
@@ -355,7 +357,7 @@ public sealed class TaskReviewWindow : Window
                 throw new IOException("控制账本记录的工作区物理身份与尝试记录不一致；已停止，不会审阅其它目录。");
             return identity.Path;
         }
-        var fallback = PhysicalDirectory.Workspace(task.Project);
+        var fallback = PhysicalDirectory.Workspace(string.IsNullOrWhiteSpace(run.WorkspacePath)?task.Project:run.WorkspacePath);
         if (!ReviewWindowPolicy.WorkspaceKeyMatches(run.WorkspaceKey, fallback))
             throw new IOException("无法把该尝试锁定到唯一工作区：监视状态与控制账本都没有该尝试的计划记录，任务项目目录的物理身份也与尝试记录不一致。已停止审阅，不会打开其它目录。"
                 + (ledgerProblem is null ? "" : " 账本读取失败：" + ledgerProblem));

@@ -260,11 +260,7 @@ public static partial class Commands
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Yarn","bin"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"scoop","shims"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".bun","bin"));
-        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".kimi-code","bin"));
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".local","bin"));
-        var kimiDir=Environment.GetEnvironmentVariable("KIMI_INSTALL_DIR");if(!string.IsNullOrWhiteSpace(kimiDir))Add(Path.Combine(kimiDir,"bin"));
-        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".qoder","bin","qodercli"));
-        Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".pi","agent","bin"));
         return dirs;
     }
     private static IEnumerable<string> SearchDirs(IReadOnlyList<string>? extra)
@@ -304,17 +300,34 @@ public static partial class Commands
         var extension=Path.GetExtension(command.Arguments[0]);
         return extension.Equals(".js",StringComparison.OrdinalIgnoreCase)||extension.Equals(".cjs",StringComparison.OrdinalIgnoreCase)||extension.Equals(".mjs",StringComparison.OrdinalIgnoreCase)?1:0;
     }
+    public static int ProfileProgramArgumentCount(AgentProfile profile)=>
+        !string.IsNullOrWhiteSpace(profile.Executable)&&IsNodeExecutable(profile.Executable)&&profile.Arguments.Length>0&&
+        Path.GetExtension(profile.Arguments[0]).ToLowerInvariant() is ".js" or ".cjs" or ".mjs"?1:0;
+
+    public static CommandSpec ProbeCommand(string agentId,AgentProfile profile)
+    {
+        var resolved=OmpMemoryGuard.Detach(Resolve(agentId,profile));
+        return resolved with{Arguments=resolved.Adapter=="node-shim"?[resolved.Arguments[0]]:[]};
+    }
     public static CommandSpec Resolve(string agentId,AgentProfile profile)
     {
-        var input=string.IsNullOrWhiteSpace(profile.Executable)?Agents.Get(agentId).Command:profile.Executable;
-        var path=FindExe(input)??throw new FileNotFoundException($"未找到 {Agents.Get(agentId).Name} 命令，请选择程序位置。");
-        CommandSpec Protect(CommandSpec command)=>agentId switch { "omp"=>OmpMemoryGuard.Attach(command), "qoder"=>QoderMemoryGuard.Attach(command), _=>command };
+        if(!Agents.IsSupported(agentId))throw new IOException("Agent 类型已移除，仅支持 Omp、Codex 和 Claude Code。");
+        var agent=Agents.Get(agentId);
+        var input=string.IsNullOrWhiteSpace(profile.Executable)?agent.Command:profile.Executable;
+        var path=FindExe(input)??throw new FileNotFoundException($"未找到 {agent.Name} 命令，请选择程序位置。");
+        CommandSpec Protect(CommandSpec command)=>agentId=="omp"?OmpMemoryGuard.Attach(command):command;
         if(Path.GetExtension(path).Equals(".exe",StringComparison.OrdinalIgnoreCase))
         {
             var command=new CommandSpec(path,profile.Arguments,"exe");
+            if(IsNodeExecutable(path)&&MemoryGuardInjectionOffset(command)==1)
+            {
+                var entryScript=profile.Arguments[0];
+                if(!Path.IsPathFullyQualified(entryScript)||!File.Exists(entryScript))throw new IOException("Node.exe 的入口脚本必须是已存在的绝对路径；请在第一个参数中选择完整脚本路径。");
+                command=new(path,[Path.GetFullPath(entryScript),..profile.Arguments.Skip(1)],"node-shim");
+            }
             // A guarded agent configured as Node.exe must start with its entry script; otherwise Attach would prepend
             // options Node rejects and the pane would silently fail. Surface the misconfiguration instead.
-            if((agentId is "omp" or "qoder")&&IsNodeExecutable(path)&&MemoryGuardInjectionOffset(command)==0)
+            if(agentId=="omp"&&IsNodeExecutable(path)&&MemoryGuardInjectionOffset(command)==0)
                 throw new IOException("Node.exe 手动配置必须以入口脚本（.js/.cjs/.mjs）作为第一个参数，否则无法附加内存保护组件。");
             return Protect(command);
         }
@@ -340,23 +353,7 @@ CALL :find_dp0
         }
         // Full-template matching avoids translating arbitrary wrappers with hidden setup semantics.
         string? script=null;
-        const string piShim="""
-@ECHO off
-SETLOCAL
-SET "node=node"
-"%node%" "%~dp0pi-launcher.js" %*
-SET "pi_exit_code=%ERRORLEVEL%"
-IF "%pi_exit_code%"=="9009" (
-  IF "%node%"=="node" (
-    "%SystemRoot%\System32\where.exe" /Q node
-    IF ERRORLEVEL 1 GOTO node_missing
-  ) ELSE IF NOT EXIST "%node%" GOTO node_missing
-)
-EXIT /B %pi_exit_code%
-:node_missing
-ECHO Pi could not find Node.js. Install Node.js 22.19.0 or newer, or rerun the installer at https://pi.dev. 1>&2
-EXIT /B %pi_exit_code%
-""";
+
         const string npmShim="""
 @ECHO off
 GOTO start
@@ -376,18 +373,12 @@ IF EXIST "%dp0%\node.exe" (
 
 endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\{ENTRY}" %*
 """;
-        var npmStyle=false;
-        if(Path.GetFileName(path).Equals("pi.cmd",StringComparison.OrdinalIgnoreCase)&&text==piShim.Replace("\r\n","\n"))script=Path.Combine(folder,"pi-launcher.js");
-        else
-        {
-            npmStyle=true;
-            var matches=System.Text.RegularExpressions.Regex.Matches(text,"\"%dp0%\\\\([^\"]+\\.(?:js|cjs|mjs))\"");
-            var candidates=matches.Select(m=>m.Groups[1].Value).Distinct().ToArray();
-            if(candidates.Length==1&&text==npmShim.Replace("{ENTRY}",candidates[0]).Replace("\r\n","\n"))script=Path.GetFullPath(Path.Combine(folder,candidates[0]));
-        }
+        var matches=System.Text.RegularExpressions.Regex.Matches(text,"\"%dp0%\\\\([^\"]+\\.(?:js|cjs|mjs))\"");
+        var candidates=matches.Select(m=>m.Groups[1].Value).Distinct().ToArray();
+        if(candidates.Length==1&&text==npmShim.Replace("{ENTRY}",candidates[0]).Replace("\r\n","\n"))script=Path.GetFullPath(Path.Combine(folder,candidates[0]));
         if(script==null||!File.Exists(script))throw new IOException("脚本适配未识别。请选择实际 exe，或选择 Node.exe 并以入口脚本（.js/.cjs/.mjs）作为第一个参数。");
-        // The npm shim itself prefers a sibling node.exe; the Pi shim always resolves node through PATH. Mirror each template's own selection semantics.
-        var node=npmStyle&&File.Exists(Path.Combine(folder,"node.exe"))?Path.Combine(folder,"node.exe"):FindExe("node.exe")??throw new FileNotFoundException("未找到 Node.js。");
+        // The npm shim prefers a sibling node.exe; otherwise it resolves node through PATH.
+        var node=File.Exists(Path.Combine(folder,"node.exe"))?Path.Combine(folder,"node.exe"):FindExe("node.exe")??throw new FileNotFoundException("未找到 Node.js。");
         return Protect(new(node,[script,..profile.Arguments],"node-shim"));
     }
     public static string Terminal(string explicitPath)

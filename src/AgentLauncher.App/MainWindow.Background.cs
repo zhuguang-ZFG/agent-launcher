@@ -36,7 +36,11 @@ public partial class MainWindow
         }
         catch(Exception ex)when(ex is not OutOfMemoryException){ErrorText.Text="后台运行未开启："+ex.Message;}
     }
-    internal void RestoreBackground(){Show();WindowState=WindowState.Normal;Activate();backgroundTimer.Stop();backgroundIcon?.Hide();}
+    internal void RestoreBackground()
+    {
+        var restoredState=WindowState==WindowState.Minimized?lastNonMinimizedState:WindowState;
+        Show();WindowState=restoredState;Activate();backgroundTimer.Stop();backgroundIcon?.Hide();
+    }
 }
 
 internal sealed class BackgroundIcon : IDisposable

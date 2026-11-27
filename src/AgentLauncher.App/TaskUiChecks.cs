@@ -43,9 +43,9 @@ public partial class MainWindow
         var fixture = Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe");
         check("ACC-B05 task fixture program exists", File.Exists(fixture));
         var book = new TaskBook();
-        var waiting = TaskBookOps.Create(book, "任务甲", Store.Root, "custom", new AgentProfile { Executable = fixture }, "", ["通过"], "shared", null, 4);
+        var waiting = TaskBookOps.Create(book, "任务甲", Store.Root, "codex", new AgentProfile { Executable = fixture }, "", ["通过"], "shared", null, 4);
         TaskBookOps.Enqueue(book, waiting.Id, new CommandSpec(fixture, ["--fixture"], "exe"), new string('A', 64));
-        var reviewed = TaskBookOps.Create(book, "任务乙", Store.Root, "custom", new AgentProfile { Executable = fixture }, "", [], "shared", null, 1);
+        var reviewed = TaskBookOps.Create(book, "任务乙", Store.Root, "codex", new AgentProfile { Executable = fixture }, "", [], "shared", null, 1);
         var reviewedRun = TaskBookOps.StartRun(book, TaskBookOps.Enqueue(book, reviewed.Id, new CommandSpec(fixture, [], "exe"), AgentProbe.Fingerprint(fixture)), Guid.NewGuid(), Guid.NewGuid(), "volume:task-check");
         reviewedRun.SessionRef = "session-check";
         TaskBookOps.FinishRun(book, reviewedRun.AttemptId, "Review", "进程已结束，等待人工验收");
@@ -128,6 +128,7 @@ public partial class MainWindow
         check("CR-N02 missing task primary keeps queue disabled and backup untouched", taskBook is null && !QueueToggleButton.IsEnabled
             && !File.Exists(tasksPath) && backup.SequenceEqual(File.ReadAllBytes(tasksPath + ".bak")) && TaskEmptyText.Text.Contains("备份"));
         File.Delete(tasksPath + ".bak");
+        Store.Save(tasksPath, new TaskBook());
         await LoadTasksAsync();
         ErrorText.Text = "";
         }
@@ -184,8 +185,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             var otherShim = Path.Combine(root, "other.cmd");
             File.WriteAllText(otherShim, File.ReadAllText(shim).Replace("queue-agent.js", "other-agent.js", StringComparison.Ordinal));
             var identityDraft = new Draft { Project = root, DirectoryMode = "shared", Slots = [
-                new() { Enabled = true, AgentId = "custom", Profiles = new() { ["custom"] = new() { Executable = shim } } },
-                new() { Enabled = true, AgentId = "custom", Profiles = new() { ["custom"] = new() { Executable = otherShim } } }] };
+                new() { Enabled = true, AgentId = "codex", Profiles = new() { ["codex"] = new() { Executable = shim } } },
+                new() { Enabled = true, AgentId = "codex", Profiles = new() { ["codex"] = new() { Executable = otherShim } } }] };
             var captured = CaptureQuickQueue(identityDraft, "").Items;
             check("CR-N04 quick queue keeps distinct package identities on one Node runtime", captured.Count == 2
                 && captured[0].Command.Executable == captured[1].Command.Executable && captured[0].ProgramFingerprint != captured[1].ProgramFingerprint
@@ -220,20 +221,47 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             RenderTasks();
             check("ACC-B10 a completed first run exposes explicit session registration",
                 ReviewFind<Button>(TaskList).Any(button => AutomationProperties.GetName(button) == "登记会话 队列 shim"));
+            void RecordSessionDiagnostic(string action, FormWindow? dialog = null, Button? applyButton = null)
+            {
+                TaskBook? persisted = null; string? readError = null;
+                try { persisted = taskStore.Load(); } catch (Exception e) when (e is IOException or JsonException or InvalidDataException) { readError = e.Message; }
+                var report = this.arguments is ["--ui-check", var folder] ? folder : Store.Root;
+                Store.Save(Path.Combine(report, "task-session-diagnostic.json"), new
+                {
+                    Action = action, At = DateTimeOffset.UtcNow, Title = dialog?.Title, Visible = dialog?.IsVisible,
+                    ApplyError = dialog?.ApplyError, ApplyEnabled = applyButton?.IsEnabled, Error = ErrorText.Text,
+                    QueueStatus = QueueStatusText.Text, queueEnabled, queuePumping, ExpectedParent = runs[^1].AttemptId,
+                    ReadError = readError, Queue = persisted?.Queue.Where(entry => entry.TaskId == taskId).ToArray(),
+                    Attempts = persisted?.Attempts.Where(run => run.TaskId == taskId).ToArray()
+                });
+            }
             async Task AnswerDialogAsync(string action, string value, bool apply)
             {
+                var priorDialogs = OwnedWindows.OfType<FormWindow>().ToHashSet();
                 ReviewFind<Button>(TaskList).Single(button => AutomationProperties.GetName(button) == action).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 FormWindow? dialog = null;
                 for (var i = 0; i < 100 && dialog is null; i++)
                 {
-                    dialog = OwnedWindows.OfType<FormWindow>().FirstOrDefault(window => window.IsVisible);
+                    dialog = OwnedWindows.OfType<FormWindow>().FirstOrDefault(window => window.IsVisible && !priorDialogs.Contains(window));
                     if (dialog is null) await Task.Delay(50);
                 }
+                if (dialog is null) RecordSessionDiagnostic(action);
                 check("ACC-B10 the requested session dialog opens", dialog is not null);
-                dialog!.SetValue("session",value);
-                ReviewFind<Button>(dialog!).Single(button => apply ? button.IsDefault : button.IsCancel).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                if (!apply && dialog!.IsVisible) dialog.Close();
-                await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+                var applyButton = ReviewFind<Button>(dialog!).Single(button => button.IsDefault);
+                var closed = false;
+                dialog!.Closed += (_, _) => closed = true;
+                try
+                {
+                    dialog.SetValue("session",value);
+                    ReviewFind<Button>(dialog).Single(button => apply ? button.IsDefault : button.IsCancel).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    if (!apply && dialog.IsVisible) dialog.Close();
+                    // ApplyAsync persists before closing; a dispatcher tick is not a completion boundary.
+                    for (var i = 0; i < 100 && !closed && dialog.ApplyError.Length == 0; i++) await Task.Delay(50);
+                    if (!closed || dialog.ApplyError.Length > 0) RecordSessionDiagnostic(action, dialog, applyButton);
+                    check("ACC-B10 session dialog completes before the next action", closed && dialog.ApplyError.Length == 0);
+                    await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+                }
+                finally { if (dialog.IsVisible && applyButton.IsEnabled) dialog.Close(); }
             }
             var beforeCancel = File.ReadAllText(taskStore.FilePath);
             await AnswerDialogAsync("登记会话 队列 shim", "cancelled-session", false);
@@ -255,6 +283,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
                 if (resumed?.ResumeOf == runs[1].AttemptId) break;
                 await Task.Delay(50);
             }
+            if (resumed?.ResumeOf != runs[1].AttemptId || resumed.SessionRef != session || resumed.AttemptId == runs[1].AttemptId)
+                RecordSessionDiagnostic("resume linkage");
             check("ACC-B10 resume creates a linked new attempt", resumed?.ResumeOf == runs[1].AttemptId && resumed.SessionRef == session && resumed.AttemptId != runs[1].AttemptId);
             for (var i = 0; i < 100 && ReadStoreSettled<Receipt>(Store.ReceiptPath(resumed!.AttemptId))?.Phase != "Finished"; i++) await Task.Delay(100);
             check("ACC-B10 resumed shim finishes through the real Terminal pane", ReadStoreSettled<Receipt>(Store.ReceiptPath(resumed!.AttemptId)) is { Phase: "Finished", ExitCode: 0 });
@@ -331,7 +361,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
     {
         await LoadTasksAsync();
         var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "任务重试门禁", Store.Root, PhysicalDirectory.Workspace(Store.Root),
-            true, command, ResourcePolicy.AgentBudget, SourceSlotId: Guid.NewGuid());
+            true, command, ResourcePolicy.AgentBudget, SourceSlotId: Guid.NewGuid(), AgentId: "codex");
         var reserved = await Ipc.SendAsync(new("reserve", Guid.NewGuid(), [plan]));
         if (!reserved.Ok) throw new IOException(reserved.Message);
         var revoked = await Ipc.SendAsync(new("revoke", Guid.NewGuid(), Attempt: plan.Id));

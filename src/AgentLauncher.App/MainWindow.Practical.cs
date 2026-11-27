@@ -12,7 +12,7 @@ using AgentLauncher.Windows;
 namespace AgentLauncher.App;
 
 // 实用三件套（参考 crystal / claude-squad 的多 Agent 管理实践，全部只读、additive）：
-// F1 查看改动：按槽位核对本机工作目录的 git status（VPS 槽位即同步落回本机的文件，证明远端 agent 改了本机文件）；
+// F1 查看改动：核对槽位实际尝试目录的 git status；本机差异不能单独证明远程写入来源或同步收敛。
 //    B1 逐文件审阅：文件列表选中后显示只读 diff（单文件 400 行、本次查看累计 2000 行截断并提示）。
 // F2 内存看板：页脚实时显示本进程工作集/专用内存与系统可用内存，提示 VPS 会话降低本机内存占用。
 // F3 同步状态：VPS 槽位的每链路七态徽章（安全暂停/冲突/未知/离线/未收敛/同步中/已收敛，规格 2026-11-18 §4）+ 上次观测时间；
@@ -74,19 +74,72 @@ public partial class MainWindow
     }
 
     // ---- F1 工作区改动查看 ----
+    private sealed record ChangeWorkspace(string Path,string Label,string? WorkspaceKey=null,Guid? AttemptId=null,DateTimeOffset At=default);
+    private ChangeWorkspace[] ChangeWorkspaces(Slot slot,IEnumerable<ControlEntry>? entries,TaskBook? book=null,IReadOnlyList<TaskHistoryArchive>? archives=null,IEnumerable<TaskHistoryItem>? historyItems=null)
+    {
+        var taskIds=(book?.Tasks??[]).Concat((archives??[]).SelectMany(archive=>archive.Tasks))
+            .Where(task=>task.QuickLaunch?.SlotId==slot.Id).Select(task=>task.Id).ToHashSet();
+        var runs=(book?.Attempts??[]).Concat((archives??[]).SelectMany(archive=>archive.Attempts))
+            .Where(run=>run.SourceSlotId==slot.Id||taskIds.Contains(run.TaskId)).DistinctBy(run=>run.AttemptId).ToDictionary(run=>run.AttemptId);
+        var attempts=new List<ChangeWorkspace>();
+        foreach(var entry in (entries??[]).Where(entry=>entry.Plan.Kind=="agent"&&(entry.Plan.SourceSlotId==slot.Id||entry.Plan.SourceSlotId is {} taskId&&taskIds.Contains(taskId)||runs.ContainsKey(entry.Plan.Id))))
+        {
+            if(entry.Digest!=Store.Digest(entry.Plan)||runs.TryGetValue(entry.Plan.Id,out var linked)&&!AttemptIdentity.Matches(linked,entry))
+                throw new InvalidDataException("尝试与保留的工作目录身份不一致，已停止查看改动。");
+            attempts.Add(new(entry.Plan.Cwd,$"{entry.Created.ToLocalTime():MM-dd HH:mm} · {entry.Plan.Name} · {entry.Plan.Cwd}",entry.Plan.Workspace.Key,entry.Plan.Id,entry.Created));
+        }
+        foreach(var run in runs.Values.Where(run=>attempts.All(item=>item.AttemptId!=run.AttemptId)&&!string.IsNullOrWhiteSpace(run.WorkspacePath)&&!string.IsNullOrWhiteSpace(run.WorkspaceKey)))
+            attempts.Add(new(run.WorkspacePath,$"{run.At.ToLocalTime():MM-dd HH:mm} · 任务尝试 {run.AttemptId.ToString("N")[..8]} · {run.WorkspacePath}",run.WorkspaceKey,run.AttemptId,run.At));
+        var known=runs.Count>0||(historyItems??[]).Any(item=>item.TaskId==slot.Id||item.TaskId is {} id&&taskIds.Contains(id));
+        if(attempts.Count==0&&known)throw new IOException("已有历史尝试，但无法核对它的实际工作目录。请从任务历史与诊断核对保留记录；不会改为查看源项目。");
+        var configured=string.IsNullOrWhiteSpace(slot.Directory)?config.Draft.Project:slot.Directory;
+        if(attempts.Count==0)attempts.Add(new(configured,"当前配置目录 · "+configured));
+        return attempts.OrderByDescending(item=>item.At).DistinctBy(item=>item.Path,StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+    private ChangeWorkspace[] LoadChangeWorkspaces(Slot slot,IEnumerable<ControlEntry>? currentEntries)
+    {
+        // HistoryReader caps outcome-directory inspection at 10000; this runs only for an explicit review request.
+        var history=TaskHistoryReader.Load(taskStore,null);
+        if(history.Book is null)throw new IOException("任务历史不可读取，无法核对运行目录。"+history.Notice);
+        var archives=taskStore.ReadHistoryArchives(history.Book);
+        var ledger=TaskRecoveryReader.ReadLedger();
+        var taskIds=history.Book.Tasks.Concat(archives.SelectMany(archive=>archive.Tasks)).Where(task=>task.QuickLaunch?.SlotId==slot.Id).Select(task=>task.Id).ToHashSet();
+        var runIds=history.Book.Attempts.Concat(archives.SelectMany(archive=>archive.Attempts)).Where(run=>run.SourceSlotId==slot.Id||taskIds.Contains(run.TaskId)).Select(run=>run.AttemptId).ToHashSet();
+        var entries=(currentEntries??[]).Concat(ledger?.Entries??[]).ToList();
+        foreach(var item in history.Items.Where(item=>item.TaskId==slot.Id||item.TaskId is {} id&&taskIds.Contains(id)||runIds.Contains(item.AttemptId)))
+        {
+            if(entries.Any(entry=>entry.Plan.Id==item.AttemptId))continue;
+            var archived=item.ArchivedEvidence??TaskRecoveryReader.ReadAttempt(item.AttemptId,ledger);
+            if(archived is not null)entries.Add(archived);
+        }
+        var choices=ChangeWorkspaces(slot,entries.DistinctBy(entry=>entry.Plan.Id),history.Book,archives,history.Items);
+        if(choices.All(choice=>choice.AttemptId is null)&&history.Notice.Length>0)throw new IOException("历史检查未完成，无法确认此项从未启动；请先核对历史与诊断。"+history.Notice);
+        return choices;
+    }
     internal async Task ShowSlotChangesAsync(Guid slotId)
     {
         var slot=config.Draft.Slots.FirstOrDefault(s=>s.Id==slotId);
         if(slot==null){ErrorText.Text="查看改动失败：该配置项已不存在，请重新打开菜单。";return;}
-        var directory=string.IsNullOrWhiteSpace(slot.Directory)?config.Draft.Project:slot.Directory;
+        var entries=status?.Entries??[];
+        ChangeWorkspace[] choices;
+        try{choices=await Task.Run(()=>LoadChangeWorkspaces(slot,entries));}
+        catch(Exception e)when(e is IOException or System.Text.Json.JsonException or InvalidDataException or UnauthorizedAccessException){ErrorText.Text="历史目录读取未完成："+e.Message;return;}
+        var selected=choices[0];
+        if(choices.Length>1)
+        {
+            var pick=new FormWindow(this,"选择要查看的运行目录",[("directory","运行目录",selected.Path,false)],"同一 Agent 有多个运行目录，请选择对应尝试；不会把源项目当成独立工作目录。",choices:new(){["directory"]=choices.Select(item=>(item.Path,item.Label)).ToArray()});
+            if(pick.ShowDialog()!=true)return;selected=choices.Single(item=>item.Path==pick.Values["directory"]);
+        }
+        var directory=selected.Path;
         if(string.IsNullOrWhiteSpace(directory)){ErrorText.Text="查看改动失败：此项尚未设置工作目录，请先选择项目或为此项指定工作目录。";return;}
         if(!Directory.Exists(directory)){ErrorText.Text="查看改动失败：工作目录不存在或尚未创建："+directory;return;}
+        if(selected.WorkspaceKey is {} expectedKey&&PhysicalDirectory.Workspace(directory).Key!=expectedKey){ErrorText.Text="查看改动失败：运行目录的物理身份已改变，请从历史与诊断核对原尝试。";return;}
         var host=RemoteHostForSlot(slot);
         var changes=await Task.Run(()=>WorkspaceInsights.ReadChanges(directory));
         if(!changes.Ok){ErrorText.Text="查看改动失败："+changes.Error;return;}
         const int maxRows=400;
         var note=host!=null
-            ?$"此项绑定 VPS「{host.Name}」。以下是本机工作目录的改动：Mutagen 双向同步把远端 agent 的修改落回这里，看到改动即证明远端修改了本机文件。只读核对，不修改任何内容。"
+            ?$"此项绑定 VPS「{host.Name}」。{LaunchSurface.ChangesAreLocalGit}"
             :"只读核对本机工作目录的改动（git status --porcelain=v1 -b），不修改任何内容。";
         // B1 逐文件审阅：左侧文件列表，右侧只读等宽 diff。单文件 400 行（ReadDiffAsync）、本次查看累计 2000 行截断并提示。
         var window=new Window{Owner=this,Title="查看改动 · "+slot.DisplayName,Width=Math.Min(980,SystemParameters.WorkArea.Width-32),Height=Math.Min(700,SystemParameters.WorkArea.Height-32),WindowStartupLocation=WindowStartupLocation.CenterOwner,Style=(Style)Application.Current.Resources[typeof(Window)]};

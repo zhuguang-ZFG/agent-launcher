@@ -9,7 +9,7 @@ public static class RemoteReattach
 
     public static string AttemptToken(Guid attemptId) => "AGENT_LAUNCHER_ATTEMPT=" + attemptId.ToString("N");
 
-    // None 不是双向同步。只有原来启用了 Mutagen 或 SSHFS 才在重新挂接时恢复同步。
+    // None 不恢复文件连接。Mutagen 是双向同步；SSHFS 仅恢复远程目录挂载。
     public static bool RestoresSync(WorkspaceSyncMode? mode) => mode is WorkspaceSyncMode.Mutagen or WorkspaceSyncMode.SshfsMount;
 
     public static string ProbeShell(Guid attemptId)
@@ -36,7 +36,7 @@ public static class RemoteReattach
             + "done; "
             + "if [ \"$found\" != 1 ]; then echo GONE; exit 3; fi; "
             + "cd " + dir + " || exit 3; "
-            + "echo '已重新挂接：远程进程仍在。此窗格是本地 SSH，不会另起 Agent。'; "
+            + "echo '已打开远程工作 Shell：远程进程仍在。未恢复原 Agent 的终端或对话；此处输入的是 Shell 命令。'; "
             + "exec bash --noprofile --norc";
     }
 

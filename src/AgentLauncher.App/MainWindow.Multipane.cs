@@ -13,6 +13,25 @@ public partial class MainWindow
     private bool applyingScalePreset;
     private bool showingResourceSettings;
 
+    private void RenderLaunchPreview(Slot[] active)
+    {
+        ExternalLayoutOptions.Visibility=config.EmbeddedTerminal?Visibility.Collapsed:Visibility.Visible;
+        PreviewHeading.Text=config.EmbeddedTerminal?"标签预览":"分屏预览";
+        PreviewHostLabel.Text=config.EmbeddedTerminal?"启动器内 · 点击标签切换会话":"Windows Terminal";
+        if(!config.EmbeddedTerminal){RenderMultipanePreview(active);return;}
+        Preview.Children.Clear();Preview.RowDefinitions.Clear();Preview.ColumnDefinitions.Clear();
+        var content=new StackPanel();var tabs=new WrapPanel();content.Children.Add(tabs);
+        foreach(var slot in active)
+        {
+            var tab=CreatePreviewPane(slot);tab.Padding=new(8,4,8,4);tab.ToolTip="终端标签："+slot.DisplayName;
+            if(tab.Child is StackPanel lines)foreach(var extra in lines.Children.OfType<TextBlock>().Skip(1))extra.Visibility=Visibility.Collapsed;
+            tabs.Children.Add(tab);
+        }
+        var guide=new TextBlock{Text=active.Length==0?"勾选 Agent 后，每项打开一个终端标签。":"一次查看一个会话；Ctrl+Tab 切换标签，滚轮回看输出。",TextWrapping=TextWrapping.Wrap,Margin=new(8,12,8,8)};
+        guide.SetResourceReference(TextBlock.ForegroundProperty,"PreviewMuted");content.Children.Add(guide);Preview.Children.Add(content);
+        PaneCount.Text=$"{active.Length} 个标签";
+    }
+
     private void RenderMultipanePreview(Slot[] active)
     {
         Preview.Children.Clear();Preview.RowDefinitions.Clear();Preview.ColumnDefinitions.Clear();
@@ -101,6 +120,7 @@ public partial class MainWindow
     {
         if(busy||readOnly||loading||rendering||closeRequested)return;
         var source=config.Draft.Slots.FirstOrDefault(s=>s.Id==sourceId);if(source is null)return;
+        if(!Agents.IsSupported(source.AgentId)){ProgressText.Text="此 Agent 类型已移除，不能复制到其他窗格。";return;}
         var agentId=source.AgentId;var profile=source.Current.Copy();var sourceIndex=config.Draft.Slots.IndexOf(source);var copied=0;
         if(Edit(d=>
         {

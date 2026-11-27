@@ -25,16 +25,22 @@ public sealed class TaskHistoryWindow : Window
         public string Label => $"{(Item.At is { } at ? at.ToLocalTime().ToString("MM-dd HH:mm") : "时间待核对")} · {Item.Name} · {TaskUsability.StateLabel(Item.State)} · {Item.AttemptId.ToString("N")[..8]}";
     }
 
-    public TaskHistoryWindow(Window owner, TaskHistorySnapshot snapshot)
+    public TaskHistoryWindow(Window owner, TaskHistorySnapshot snapshot, Func<Task>? archiveHistory = null)
     {
         this.snapshot = snapshot; Owner = owner; Title = "任务历史与诊断";
         Width = Math.Min(860, SystemParameters.WorkArea.Width - 32); Height = Math.Min(720, SystemParameters.WorkArea.Height - 32); WindowStartupLocation = WindowStartupLocation.CenterOwner;
         Style = (Style)Application.Current.Resources[typeof(Window)];
         var root = new DockPanel { Margin = new Thickness(20) };
         notice.Text = $"已保留 {snapshot.Items.Length} 条记录，可按任务名称、状态或尝试编号搜索。" + (snapshot.Notice.Length > 0 ? "\n" + snapshot.Notice : "");
+        notice.Text += $"\n每次最多迁移 200 条已结束旧尝试；最近尝试、验收中、续接引用及缺失证明会保留。领取记录另有 {LedgerMigration.MaxTaskClaims} 条上限，迁移历史不会降低该计数。";
         DockPanel.SetDock(notice, Dock.Top); root.Children.Add(notice);
         AutomationProperties.SetName(search, "搜索历史任务、状态或尝试编号"); DockPanel.SetDock(search, Dock.Top); search.Margin = new Thickness(0, 0, 0, 8); root.Children.Add(search);
         var actions = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) }; DockPanel.SetDock(actions, Dock.Bottom); root.Children.Add(actions);
+        if (archiveHistory is not null) Add("迁移已结束历史", async () =>
+        {
+            await archiveHistory();
+            notice.Text = "已迁移可核对的旧尝试，当前窗口仍保留迁移前快照；重新打开历史可查看最新容量。迁移文件保存在 tasks.json.history，领取证据和运行占用保留。";
+        });
         Add("导出当前筛选列表", async () =>
         {
             var picker = new SaveFileDialog { Filter = "JSON|*.json", FileName = "agent-launcher-history.json" };
@@ -52,7 +58,7 @@ public sealed class TaskHistoryWindow : Window
         review.Click += (_, _) =>
         {
             if (list.SelectedItem is Row { Item.Run: { } run } && snapshot.Book?.Tasks.FirstOrDefault(task => task.Id == run.TaskId) is { } task)
-                new TaskReviewWindow(this, task, run).Show();
+                new TaskReviewWindow(this, task, run, (list.SelectedItem as Row)?.Item.ArchivedEvidence is { } evidence ? [evidence] : null).Show();
         };
         Add("打开记录目录", () => { Directory.CreateDirectory(Store.Root); Process.Start(new ProcessStartInfo(Store.Root) { UseShellExecute = true }); return Task.CompletedTask; });
         var close = new Button { Content = "关闭", IsCancel = true }; close.Click += (_, _) => Close(); actions.Children.Add(close);

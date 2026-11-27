@@ -2,10 +2,6 @@ param([switch]$SkipUi, [switch]$SkipBrowser, [string]$RuntimeDirectory = (Join-P
 $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtime=[IO.Path]::GetFullPath($RuntimeDirectory)
-& dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release
-if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
-& dotnet run --project (Join-Path $root 'tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj') -c Release -- --sync-review-checks
-if($LASTEXITCODE -ne 0){throw 'Sync review checks failed'}
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.TerminalModel.Tests/AgentLauncher.TerminalModel.Tests.csproj') -c Release
 if($LASTEXITCODE -ne 0){throw 'Embedded terminal model tests failed'}
 & dotnet run --project (Join-Path $root 'tests/AgentLauncher.ManualRelay.Tests/AgentLauncher.ManualRelay.Tests.csproj') -c Release
@@ -15,12 +11,19 @@ foreach($project in @('tests/AgentLauncher.Soak','tests/AgentLauncher.Tests','sr
   & dotnet publish (Join-Path $root "$project/$name.csproj") -c Release -p:DefineConstants=INTEGRATION_TESTS -o $runtime --nologo -m:1
   if($LASTEXITCODE -ne 0){throw "Test publish failed: $name"}
 }
-$env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-integration-'+[guid]::NewGuid().ToString('N'))
-$env:AGENT_LAUNCHER_FAKE_SAMPLE='1'
+$previousTestRoot=$env:AGENT_LAUNCHER_TEST_ROOT
+$previousFakeSample=$env:AGENT_LAUNCHER_FAKE_SAMPLE
+$env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-native-'+[guid]::NewGuid().ToString('N'))
 $previousPiAgentDir=$env:PI_CODING_AGENT_DIR
 try {
   # Even --version may initialize Pi's configuration. Tests must never write to the user's real agent directory.
   $env:PI_CODING_AGENT_DIR=Join-Path $env:AGENT_LAUNCHER_TEST_ROOT 'pi-config'
+  Remove-Item Env:AGENT_LAUNCHER_FAKE_SAMPLE -ErrorAction SilentlyContinue
+  & (Join-Path $runtime 'AgentLauncher.Tests.exe')
+  if($LASTEXITCODE -ne 0){throw 'Native/model tests failed'}
+  & (Join-Path $runtime 'AgentLauncher.Tests.exe') --sync-review-checks
+  if($LASTEXITCODE -ne 0){throw 'Sync review checks failed'}
+  $env:AGENT_LAUNCHER_FAKE_SAMPLE='1'
   $env:AGENT_LAUNCHER_TEST_ROOT=Join-Path $env:TEMP ('AgentLauncher-tests-repairs-'+[guid]::NewGuid().ToString('N'))
   & (Join-Path $runtime 'AgentLauncher.Tests.exe') --repair-checks
   if($LASTEXITCODE -ne 0){throw 'Repair checks failed'}
@@ -46,7 +49,7 @@ try {
     $report=Join-Path $root 'artifacts/ui'
     $progressPath=Join-Path $report 'ui-progress.json'
     $startedAt=[DateTime]::UtcNow;$lastProgressAt=$startedAt;$lastProgress='no UI progress recorded';$hardDeadline=$startedAt.AddSeconds(90)
-    $p=Start-Process (Join-Path $runtime 'AgentLauncher.App.exe') -ArgumentList '--ui-check',('"'+$report+'"') -PassThru
+    $p=Start-Process (Join-Path $runtime 'AgentLauncher.App.exe') -WindowStyle Hidden -ArgumentList '--ui-check',('"'+$report+'"') -PassThru
     while(-not $p.WaitForExit(500)){
       try{$progressInfo=Get-Item $progressPath -ErrorAction Stop;if($progressInfo.LastWriteTimeUtc -ge $startedAt -and $progressInfo.LastWriteTimeUtc -gt $lastProgressAt){$lastProgressAt=$progressInfo.LastWriteTimeUtc;$lastProgress=Get-Content $progressPath -Raw -ErrorAction Stop}}catch{}
       $now=[DateTime]::UtcNow
@@ -67,14 +70,8 @@ try {
   if(-not $SkipBrowser){& node (Join-Path $root 'scripts/test-browser.mjs');if($LASTEXITCODE -ne 0){throw 'Browser tests failed'}}
 } finally {
   $env:PI_CODING_AGENT_DIR=$previousPiAgentDir
-  Remove-Item Env:AGENT_LAUNCHER_FAKE_SAMPLE -ErrorAction SilentlyContinue
-  Remove-Item Env:AGENT_LAUNCHER_TEST_ROOT -ErrorAction SilentlyContinue
-  # 测试卫生：清理超过 2 小时的历史测试根。本机多次门禁会遗留上千个 AgentLauncher-tests-* 根目录，
-  # 是环境瞬态（中途文件消失）的嫌疑来源。只匹配该前缀且只删过期根，正在使用的运行不受影响。
-  try{
-    $cutoff=(Get-Date).AddHours(-2)
-    Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'AgentLauncher-tests-*' -ErrorAction SilentlyContinue |
-      Where-Object { $_.LastWriteTime -lt $cutoff } |
-      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-  }catch{}
+  $env:AGENT_LAUNCHER_FAKE_SAMPLE=$previousFakeSample
+  $env:AGENT_LAUNCHER_TEST_ROOT=$previousTestRoot
+  # Retain isolated evidence. Directory age cannot establish that another test process has stopped using it.
+  # Cleanup is an explicit maintenance action after inspecting the concrete paths and active processes.
 }

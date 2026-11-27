@@ -8,7 +8,7 @@ internal static class TaskUsabilityChecks
 {
     public static void Run(Action<string, Action> test, string temp)
     {
-        TaskCard Create(TaskBook book, string name = "任务") => TaskBookOps.Create(book, name, temp, "custom", new AgentProfile { Executable = "C:\\agent.exe" }, "请修复中文问题", ["测试通过", "保留历史"], "shared", null, 0);
+        TaskCard Create(TaskBook book, string name = "任务") => TaskBookOps.Create(book, name, temp, "codex", new AgentProfile { Executable = "C:\\agent.exe" }, "请修复中文问题", ["测试通过", "保留历史"], "shared", null, 0);
         var command = new CommandSpec("C:\\agent.exe", ["--raw", ""], "exe");
         var fingerprint = new string('A', 64);
         test("UX04 null task queue and attempt elements report damaged structure", () =>
@@ -77,7 +77,7 @@ internal static class TaskUsabilityChecks
         {
             var book = new TaskBook { MaxRunning = 4 };
             var existing = Create(book, "已有任务"); var old = TaskBookOps.Enqueue(book, existing.Id, command, fingerprint);
-            var slot = new Slot { Enabled = true, AgentId = "custom" };
+            var slot = new Slot { Enabled = true, AgentId = "codex" };
             var draft = new Draft { Project = temp, DirectoryMode = "shared", Slots = [slot] };
             var ids = TaskBookOps.EnqueueQuickLaunch(book, draft, [new(slot.Id, temp, new(temp, "workspace"), command, fingerprint)], "", resetConcurrency: false);
             book.LastDispatchTaskIds = ids.ToList();

@@ -38,7 +38,7 @@ public sealed class TerminalPipeClient : IDisposable, IAsyncDisposable
     }
 
     // 读到帧结束、长度非法或管道断开就返回：不重连、不补发历史。
-    public async Task PumpAsync(Func<TerminalSnapshot, Task> onSnapshot, CancellationToken cancellation)
+    public async Task PumpAsync(Func<TerminalSnapshot, Task> onSnapshot, CancellationToken cancellation, Func<TerminalReadback, Task>? onReadback = null)
     {
         while (!cancellation.IsCancellationRequested)
         {
@@ -49,7 +49,15 @@ public sealed class TerminalPipeClient : IDisposable, IAsyncDisposable
             var message = TerminalWire.Decode(payload);
             if (message?.Kind == TerminalWire.SnapshotKind && message.Snapshot is { } snapshot && snapshot.IsWellFormed)
                 await onSnapshot(snapshot);
+            else if (message?.Kind == TerminalWire.ReadbackKind && message.Readback is { } page && onReadback is not null)
+                await onReadback(page);
         }
+    }
+
+    public Task SendReadAsync(TerminalReadRequest request, CancellationToken cancellation)
+    {
+        if (!request.IsWellFormed) throw new ArgumentException("历史读取请求超出边界。", nameof(request));
+        return WriteAsync(TerminalWire.EncodeRead(request), cancellation);
     }
 
     public async Task SendInputAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellation)

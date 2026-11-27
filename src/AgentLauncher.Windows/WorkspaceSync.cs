@@ -35,7 +35,7 @@ public static class WorkspaceSync
     [
         "sync", "create",
         "--name", sessionName,
-        "--sync-mode", "two-way-safe",
+        "--sync-mode", MutagenCreateMode.SyncMode,
         "--ignore-vcs",  // 忽略 .git 目录
         "--ignore", "node_modules/",
         "--ignore", "bin/",
@@ -45,6 +45,35 @@ public static class WorkspaceSync
         spec.LocalPath,
         MutagenSyncSession.MutagenEndpoint(remote, spec.RemotePath)
     ];
+
+    // 重开远程工作 Shell 时优先复用已保存的 Mutagen 会话；明确不存在才新建。
+    // 端点不符或探针失败时拒绝，避免同名冲突或同步到另一目录。
+    public static async Task<IWorkspaceSyncSession> RestoreAsync(WorkspaceSyncSpec spec, RemoteExecutionSpec remote, CancellationToken cancellation = default)
+    {
+        if (spec.Mode != WorkspaceSyncMode.Mutagen || string.IsNullOrEmpty(spec.MutagenSessionName)) return await StartAsync(spec, remote, cancellation);
+#if INTEGRATION_TESTS
+        if (Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SYNC") == "1") return await StartAsync(spec, remote, cancellation);
+#endif
+        var probe = await WorkspaceInsights.ListMutagenSessionsAsync(cancellation);
+        if (!probe.Ok) throw new IOException("无法核对原 Mutagen 会话，已保留现状：" + probe.Error);
+        return await RestoreMutagenAsync(spec, remote, probe.Output, cancellation,
+            () => StartAsync(spec, remote, cancellation));
+    }
+
+    internal static async Task<IWorkspaceSyncSession> RestoreMutagenAsync(WorkspaceSyncSpec spec, RemoteExecutionSpec remote, string output, CancellationToken cancellation, Func<Task<IWorkspaceSyncSession>> create)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        var name = spec.MutagenSessionName ?? throw new InvalidDataException("缺少已保存的 Mutagen 会话名。");
+        var blocks = SyncReliability.SplitSessionBlocks(output);
+        var empty = blocks.Length == 1 && blocks[0].Trim() == "No sessions found";
+        if (!empty && (blocks.Length == 0 || blocks.Any(block => SyncReliability.ParseSession(block) is not { AlphaUrl.Length: >0, BetaUrl.Length: >0, Status.Length: >0 })))
+            throw new IOException("Mutagen 会话列表无法完整核对，已保留现状。");
+        var named = blocks.Select(SyncReliability.ParseSession).Where(session => session?.Name == name).ToArray();
+        if (named.Length == 0) return await create();
+        if (named.Length != 1 || WorkspaceInsights.FindSyncSession(output, spec.LocalPath, remote.Host, spec.RemotePath, remote.AgentUser, remote.SshPort, name) is null)
+            throw new IOException("保存的 Mutagen 会话与本次工作目录或 SSH 身份不一致，已停止恢复并保留原会话。");
+        return MutagenSyncSession.Existing(name, spec.RemotePath);
+    }
 }
 
 // 工作区同步会话（生命周期管理）
@@ -76,6 +105,8 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         _remotePath = remotePath;
         _daemonProcess = daemonProcess;
     }
+
+    internal static MutagenSyncSession Existing(string name, string remotePath) => new(name, remotePath, null);
     
     public static async Task<MutagenSyncSession> StartAsync(
         WorkspaceSyncSpec spec,
@@ -176,7 +207,10 @@ internal sealed class MutagenSyncSession : IWorkspaceSyncSession
         {
             await RunMutagenCommandAsync(new[] { "sync", "terminate", _sessionName }, CancellationToken.None);
         }
-        catch { /* 忽略终止失败（会话已收敛，终止失败不影响数据） */ }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return $"Mutagen flush 已成功，但会话 {_sessionName} 的终止未确认：{ex.Message}。请检查会话状态；本次不能记为已终止。";
+        }
         
         return null;  // 成功
     }

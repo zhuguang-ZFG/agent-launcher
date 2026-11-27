@@ -78,7 +78,7 @@ internal static class LiveMemorySoak
 
     public static async Task<int> Run(string agent, string cli, string worker, string node, string repository, string root)
     {
-        if (agent is not ("qoder" or "omp") || !Path.IsPathFullyQualified(root) || !root.Contains("AgentLauncher-tests-", StringComparison.Ordinal) || Directory.Exists(root))
+        if (agent != "omp" || !Path.IsPathFullyQualified(root) || !root.Contains("AgentLauncher-tests-", StringComparison.Ordinal) || Directory.Exists(root))
             throw new IOException("Use a fresh isolated AgentLauncher-tests- directory and a known agent.");
         Directory.CreateDirectory(root);
         var sample = new Sampler().Sample();
@@ -90,21 +90,10 @@ internal static class LiveMemorySoak
         using var guard = new OmpMemoryGuard(job, null, physicalFloor, commitFloor);
         var workload = Path.Combine(repository, "tests", "fixtures", "memory-workload.mjs");
         var env = new Dictionary<string, string> { [OmpMemoryGuard.PipeEnvironment] = guard.PipeName };
-        string[] arguments;
-        if (agent == "qoder")
-        {
-            QoderMemoryGuard.Prepare(worker, root);
-            var command = $"\"{node.Replace('\\', '/')}\" \"{workload.Replace('\\', '/')}\" \"{root.Replace('\\', '/')}\"";
-            env["LAUNCHER_QODER_STREAM_COMMAND"] = command;
-            arguments = ["--plugin-dir", QoderMemoryGuard.DirectoryFor(worker, root), "--setting-sources", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--no-session-persistence", "--tools", "Bash", "--allowed-tools", "Bash", "--input-format", "stream-json", "--output-format", "stream-json", "--max-model-request-retries", "1", "-p"];
-        }
-        else
-        {
-            var config = Path.Combine(root, "config");Directory.CreateDirectory(config);
-            File.WriteAllText(Path.Combine(config, "config.yml"), "disabledProviders: [ollama, lm-studio, llama.cpp]\ntask:\n  maxConcurrency: 4\nasync:\n  enabled: false\n");
-            env["PI_CODING_AGENT_DIR"] = config;env["LAUNCHER_SOAK_ROOT"] = root;env["LAUNCHER_SOAK_NODE"] = node;env["LAUNCHER_SOAK_WORKLOAD"] = workload;
-            arguments = ["--no-extensions", "--no-skills", "--no-rules", "--no-context-files", "--no-lsp", "--no-session", "--no-title", "--extension", Path.Combine(repository, "src", "AgentLauncher.Windows", "omp-memory-guard.mjs"), "--extension", Path.Combine(repository, "tests", "fixtures", "omp-memory-soak.mjs"), "--model", "launcher-soak/probe", "--mode", "json", "-p", "Run the sequential memory workload."];
-        }
+        var config = Path.Combine(root, "config");Directory.CreateDirectory(config);
+        File.WriteAllText(Path.Combine(config, "config.yml"), "disabledProviders: [ollama, lm-studio, llama.cpp]\ntask:\n  maxConcurrency: 4\nasync:\n  enabled: false\n");
+        env["PI_CODING_AGENT_DIR"] = config;env["LAUNCHER_SOAK_ROOT"] = root;env["LAUNCHER_SOAK_NODE"] = node;env["LAUNCHER_SOAK_WORKLOAD"] = workload;
+        var arguments = new[]{"--no-extensions", "--no-skills", "--no-rules", "--no-context-files", "--no-lsp", "--no-session", "--no-title", "--extension", Path.Combine(repository, "src", "AgentLauncher.Windows", "omp-memory-guard.mjs"), "--extension", Path.Combine(repository, "tests", "fixtures", "omp-memory-soak.mjs"), "--model", "launcher-soak/probe", "--mode", "json", "-p", "Run the sequential memory workload."};
         var specPath = Path.Combine(root, "invocation.json");File.WriteAllText(specPath, JsonSerializer.Serialize(new Invocation(cli, arguments, root, env)));
         var release = Path.Combine(root, "pressure");
         using var holder = new ProtectedProcess(new(Environment.ProcessPath!, ["--live-memory-hold", release], "exe"), root, [outer, job], createNoWindow: true);
@@ -152,7 +141,7 @@ internal static class LiveMemorySoak
             driver?.Dispose();
         }
         var drained = job.Members().Length == 0;
-        File.WriteAllText(Path.Combine(root, "result.json"), JsonSerializer.Serialize(new { Passed = succeeded && drained, Agent = agent, Seconds = watch.Elapsed.TotalSeconds, Steps = steps, DriverExit = driverExit, guard.HandshakeConfirmed, Memory = job.QueryMemory(), Drained = drained, Failure = failure, PhysicalFloor = physicalFloor, CommitFloor = commitFloor, SyntheticCommitMiB = 2180, AuthenticatedModel = agent == "qoder" }));
+        File.WriteAllText(Path.Combine(root, "result.json"), JsonSerializer.Serialize(new { Passed = succeeded && drained, Agent = agent, Seconds = watch.Elapsed.TotalSeconds, Steps = steps, DriverExit = driverExit, guard.HandshakeConfirmed, Memory = job.QueryMemory(), Drained = drained, Failure = failure, PhysicalFloor = physicalFloor, CommitFloor = commitFloor, SyntheticCommitMiB = 2180, AuthenticatedModel = false }));
         Console.WriteLine((succeeded && drained ? "PASS " : "FAIL ") + agent + ": " + failure + " " + root);
         return succeeded && drained ? 0 : 1;
     }

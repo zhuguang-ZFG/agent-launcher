@@ -58,10 +58,12 @@ public partial class MainWindow
             else text.AppendLine("任务当前不在等待队列。可从「历史与诊断」查看本任务所有已保留尝试。");
         }
         else if (book is not null) text.AppendLine($"任务文件可读取：活动 {book.Tasks.Count(task => !task.Archived)} 张，等待 {book.Queue.Count} 项。可在任务卡或等待项的「原因与恢复」中核对具体任务。");
+        if (book is not null) text.AppendLine($"活动尝试 {book.Attempts.Count}/{TaskSchema.MaxAttempts}，已迁移 {book.HistoryArchives.Sum(archive => archive.Count)} 条。历史窗口可分批迁移已证明退出的旧尝试；最近记录、验收中和续接引用会保留，可能没有可迁移项。");
         try
         {
             var ledger = TaskRecoveryReader.ReadLedger();
             text.AppendLine().AppendLine($"已保留的运行记录：{ledger?.Entries.Count ?? 0} 条；领取记录：{ledger?.TaskClaims.Count ?? 0} 条。");
+            text.AppendLine($"领取记录上限 {LedgerMigration.MaxTaskClaims} 条，迁移任务历史不降低此计数；达到后停止新增预约，需要维护者核对并迁移控制账本。");
             text.AppendLine("「核对占用」只会释放有完整退出证据的陈旧占用。未知记录保持占用，直到证据满足或重启后可核对。");
         }
         catch (Exception e) when (e is not OutOfMemoryException) { text.AppendLine().AppendLine("控制记录不可读取：" + e.Message).AppendLine("请复制此页诊断交给维护者核对原文件和备份。当前保留占用和历史。"); }
@@ -98,6 +100,8 @@ public partial class MainWindow
         Add("刷新证据", RefreshView, out _);
         Add("复制诊断", () => { Clipboard.SetText(text.Text); message.Text = "已复制当前恢复诊断。"; return Task.CompletedTask; }, out _);
         Add("打开记录目录", () => { Directory.CreateDirectory(Store.Root); Process.Start(new ProcessStartInfo(Store.Root) { UseShellExecute = true }); return Task.CompletedTask; }, out _);
+        Add("打开任务历史快照", () => { Directory.CreateDirectory(taskStore.SnapshotDirectory); Process.Start(new ProcessStartInfo(taskStore.SnapshotDirectory) { UseShellExecute = true })?.Dispose(); message.Text="每次覆盖前的原始任务文件按内容保存于此，恢复前请核对日期、任务和历史；不会自动恢复或执行。"; return Task.CompletedTask; }, out _);
+        Add("选择快照恢复…", async () => { await ChooseTaskSnapshotAsync(window); await RefreshView(); }, out _);
         Add("恢复任务备份…", async () =>
         {
             if (view?.BackupHash is not { } hash) return;
@@ -122,6 +126,68 @@ public partial class MainWindow
         }, out requeue);
         var close = new Button { Content = "关闭", IsCancel = true }; close.Click += (_, _) => window.Close(); actions.Children.Add(close);
         window.Content = root; UiScale.Apply(window); await RefreshView(); window.Show();
+    }
+
+    private async Task ChooseTaskSnapshotAsync(Window owner)
+    {
+        if (queuePumping || queueEditing || closeRequested) throw new IOException("正在核对派发，请先暂停队列后重试。");
+        queueEnabled = false; taskTimer.Stop(); RenderTasks();
+        var snapshots = await Task.Run(() =>
+        {
+            if (!Directory.Exists(taskStore.SnapshotDirectory)) return Array.Empty<(string Hash, string Label)>();
+            var found = new List<(string Hash, string Label)>();
+            foreach (var file in Directory.EnumerateFiles(taskStore.SnapshotDirectory, "*.json").OrderByDescending(File.GetLastWriteTimeUtc))
+            {
+                var hash = Path.GetFileNameWithoutExtension(file);
+                try
+                {
+                    var book = taskStore.ReadSnapshot(hash);
+                    found.Add((hash, $"{File.GetLastWriteTime(file):yyyy-MM-dd HH:mm:ss} · {book.Tasks.Count} 张任务 / {book.Queue.Count} 项等待 / {book.Attempts.Count} 条尝试 · {hash[..8]}"));
+                }
+                catch (Exception e) when (e is IOException or System.Text.Json.JsonException or InvalidDataException or UnauthorizedAccessException) { }
+                if (found.Count == 100) break;
+            }
+            return found.ToArray();
+        });
+        if (snapshots.Length == 0) throw new IOException("没有可验证的任务快照。损坏或缺少关联归档的文件仍保留在快照目录中，不会当作空任务恢复。");
+        var dialog = new FormWindow(owner, "选择任务快照", [("snapshot", "要恢复的任务快照", snapshots[0].Hash, false)],
+            "列出最近 100 份可验证快照。选中后将显示任务名称和数量，再确认替换当前任务文件。当前文件、.bak、领取记录和未知占用会保留，队列保持暂停。",
+            choices: new() { ["snapshot"] = snapshots.Select(snapshot => (snapshot.Hash, snapshot.Label)).ToArray() }, applyLabel: "核对并恢复…");
+        dialog.ApplyAsync = async form =>
+        {
+            var hash = form.Values["snapshot"];
+            var selected = await Task.Run(() => taskStore.ReadSnapshot(hash));
+            TaskBook? current = null;
+            try { current = await Task.Run(taskStore.Load); }
+            catch (Exception e) when (e is IOException or System.Text.Json.JsonException or InvalidDataException) { }
+            var preview = $"快照 {hash[..12]}\n将恢复 {selected.Tasks.Count} 张任务、{selected.Queue.Count} 项等待、{selected.Attempts.Count} 条活动尝试，另有 {selected.HistoryArchives.Sum(archive => archive.Count)} 条已迁移历史。\n\n任务：\n"
+                + string.Join("\n", selected.Tasks.Take(12).Select(task => "• " + task.Name)) + (selected.Tasks.Count > 12 ? "\n…" : "")
+                + (current is null ? "\n\n当前主文件缺失或不可读取。" : $"\n\n将替换当前 {current.Tasks.Count} 张任务、{current.Queue.Count} 项等待、{current.Attempts.Count} 条活动尝试。")
+                + "\n原文件另存快照；现有备份和控制账本保留。恢复不会启动队列。确认恢复这份快照？";
+#if INTEGRATION_TESTS
+            var answer = TestConfirm is { } confirm ? confirm(preview, "恢复所选任务快照", MessageBoxButton.YesNo) : MessageBox.Show(form, preview, "恢复所选任务快照", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No);
+#else
+            var answer = MessageBox.Show(form, preview, "恢复所选任务快照", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No);
+#endif
+            if (answer != MessageBoxResult.Yes) { form.SetError("已取消恢复，可继续选择快照；当前任务文件未改动。"); return false; }
+            await RestoreTaskSnapshotAsync(hash, current?.Revision);
+            return true;
+        };
+        dialog.ShowDialog();
+    }
+
+    private async Task RestoreTaskSnapshotAsync(string hash, long? expectedRevision)
+    {
+        if (queuePumping || queueEditing || closeRequested) throw new IOException("正在核对派发，请稍后再恢复。");
+        using var gate = taskStore.TryAcquireQueueGate() ?? throw new IOException("另一个窗口正在派发，请稍后重试。");
+        queueEnabled = false; taskTimer.Stop(); queueEditing = true;
+        try
+        {
+            taskBook = await Task.Run(() => taskStore.RestoreSnapshot(hash, expectedRevision)); taskLoadError = "";
+            queueScopeTaskIds = taskBook.LastDispatchTaskIds?.ToHashSet();
+            QueueStatusText.Text = "已恢复所选任务快照，队列保持暂停。请核对历史和领取证据后再明确执行。";
+        }
+        finally { queueEditing = false; RenderTasks(); }
     }
 
     private async Task ReplaceQueueIntentAsync(Guid entryId)

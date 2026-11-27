@@ -125,14 +125,15 @@ public sealed class OmpMemoryGuard : IDisposable
         finally { pipe.Dispose(); }
     }
 
-    /// <summary>Bounded wait for the extension's load hello. A timeout returns false; the Runner then discloses fail-open tools.</summary>
-    public bool WaitForHandshake(TimeSpan timeout)
+    /// <summary>Wait for a load hello while the observed process can still load it. Timeout or confirmed exit returns false; the endpoint stays available.</summary>
+    public bool WaitForHandshake(TimeSpan timeout, System.Diagnostics.Process? process = null)
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             while (!HandshakeConfirmed)
             {
+                if (process?.HasExited == true) return false;
                 if (watch.Elapsed >= timeout || stop.Token.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(100))) return false;
             }
             return true;

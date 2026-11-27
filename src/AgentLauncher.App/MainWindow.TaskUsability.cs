@@ -123,7 +123,7 @@ public partial class MainWindow
     private async Task ShowTaskHistoryAsync(Guid? taskId)
     {
         var snapshot = await Task.Run(() => TaskHistoryReader.Load(taskStore, taskId));
-        var window = new TaskHistoryWindow(this, snapshot);
+        var window = new TaskHistoryWindow(this, snapshot, ArchiveTaskHistoryAsync);
         window.Show();
     }
 

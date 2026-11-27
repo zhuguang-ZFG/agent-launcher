@@ -10,7 +10,7 @@ public sealed record RemoteHost(
     int SshPort,                    // SSH 端口，通常 22
     string SshUser,                 // SSH 登录用户，如 "root"
     string AgentUser,               // agent 运行用户，如 "agent"
-    string[] AvailableAgents,       // 可用的 agent 类型，如 ["pi", "kimi", "qodercli", "omp"]
+    string[] AvailableAgents,       // 可用的 agent 类型，如 ["omp", "codex", "claude"]
     string? SshKeyPath,             // SSH 私钥路径（可选；免密登录走 密钥/ssh-agent/SSH config，绝不提示密码）
     WorkspaceSyncMode WorkspaceSyncMode = WorkspaceSyncMode.Mutagen,  // 工作区同步模式（默认 Mutagen，用户明确要求远程 agent 编辑本地工作区）
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] Dictionary<string,string>? AgentUpgradeCommands = null,  // 每-agent 升级命令覆盖（可选；缺省用 RemoteAgentMaintenance.DefaultUpgradeCommands）

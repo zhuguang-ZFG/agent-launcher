@@ -6,7 +6,7 @@ public static class LongTaskResources
     public const ulong Planning = 1536 * ResourcePolicy.MiB;
 
     public static bool Suggested(Draft draft) => draft.Resource.JobMemoryLimit < MemoryLimit
-        && draft.Slots.Any(slot => slot.Enabled && slot.AgentId is "omp" or "qoder");
+        && draft.Slots.Any(slot => slot.Enabled && slot.AgentId == "omp");
 
     public static ResourceSettings Create(ResourceSettings current)
     {

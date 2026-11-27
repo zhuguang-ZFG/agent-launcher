@@ -133,7 +133,7 @@ Check("ET08", "2000 逻辑行和 8 MiB 消费", () =>
     return (ok, $"fed={fed} truncated={snapshot.TruncatedLines} visibleArray={snapshot.Primary.Length} historyLines={screen.ScrollbackLines} historyBytes={screen.ScrollbackBytes}");
 });
 
-Check("ET09", "多行粘贴整段拒绝", () =>
+Check("ET09", "未协商且未确认的多行粘贴拒绝", () =>
 {
     var line = TerminalInput.Paste("npm install\nrm -rf /");
     var carriage = TerminalInput.Paste("a\rb");
@@ -224,6 +224,87 @@ Check("CODEC", "快照编解码、帧和上限", () =>
     var ok = roundTrip && worstPayload.Length <= TerminalWire.MaxPayload && reframed is not null && reframed.AsSpan().SequenceEqual(payload)
         && input?.Input is { Length: 2 } bytes && bytes[0] == 0x03;
     return (ok, $"roundTrip={roundTrip} worstCase={worstPayload.Length}/{TerminalWire.MaxPayload} frame={frame.Length} input={input?.Input?.Length}");
+});
+
+Check("ET01", "中文横纵缩放保留完整宽字符并清除截断半格", () =>
+{
+    var screen = new TerminalScreen(20, 4);screen.Feed("中文Ag");
+    screen.Resize(40, 4);var wider=screen.VisibleText().TrimEnd()=="中文Ag"&&screen.CellAt(1,0).IsContinuation;
+    screen.Resize(40, 8);var taller=screen.VisibleText().TrimEnd()=="中文Ag"&&screen.CellAt(3,0).IsContinuation;
+    screen.Resize(3,8);var clipped=screen.VisibleText().TrimEnd()=="中"&&screen.CellAt(2,0)==TerminalCell.Empty;
+    return(wider&&taller&&clipped,$"wider={wider} taller={taller} clipped={clipped}");
+});
+
+Check("ET09", "bracketed paste 协商、取消和确认多行粘贴", () =>
+{
+    const string text="中文\r\nnext\rthird\n\u001b[201~\u001b]52;c;secret\u0007\u009b31mDONE\u0003";
+    var screen=new TerminalScreen();screen.Feed("\u001b[?2004h");var enabled=screen.Snapshot().BracketedPaste;
+    var wrapped=Encoding.UTF8.GetString(TerminalInput.Paste(text,enabled)!);
+    screen.Feed("\u001b[?2004l");var disabled=!screen.Snapshot().BracketedPaste;
+    var denied=TerminalInput.Paste(text) is null&&TerminalInput.RequiresPasteConfirmation(text,false);
+    var confirmed=Encoding.UTF8.GetString(TerminalInput.Paste(text,false,true)!);
+    var ok=enabled&&disabled&&denied&&wrapped=="\u001b[200~中文\nnext\nthird\nDONE\u001b[201~"&&confirmed=="中文\rnext\rthird\rDONE";
+    return(ok,$"enabled={enabled} disabled={disabled} denied={denied} wrapped={wrapped.Replace("\u001b","ESC")} confirmedBytes={confirmed.Length}");
+});
+
+Check("ET11", "Shift+Tab、Ctrl+方向键和标签导航不降级", () =>
+{
+    var shifted=Encoding.ASCII.GetString(TerminalInput.Key(TerminalKey.Tab,false,TerminalModifiers.Shift));
+    var word=Encoding.ASCII.GetString(TerminalInput.Key(TerminalKey.Left,true,TerminalModifiers.Control));
+    var combined=Encoding.ASCII.GetString(TerminalInput.Key(TerminalKey.Right,false,TerminalModifiers.Control|TerminalModifiers.Shift));
+    var tabs=TerminalInput.Key(TerminalKey.Tab,false,TerminalModifiers.Control).Length;
+    return(shifted=="\u001b[Z"&&word=="\u001b[1;5D"&&combined=="\u001b[1;6C"&&tabs==0,$"shiftTab={shifted.Length} ctrlLeft={word.Length} ctrlTabBytes={tabs}");
+});
+
+Check("ET08", "历史按需一屏读取、搜索与快照大小无关", () =>
+{
+    var screen=new TerminalScreen(20,4);
+    for(var i=0;i<2050;i++)screen.Feed($"line-{i:D4}\r\n");
+    var snapshot=screen.Snapshot();
+    var page=screen.Readback(new(1,0));
+    var historyText=TerminalText.ExtractLine(page.Cells.AsSpan(0,20));
+    var match=screen.Readback(new(2,page.FirstLine,"LINE-2000"));
+    var missing=screen.Readback(new(3,page.FirstLine,"absent"));
+    var wire=TerminalWire.Decode(TerminalWire.EncodeReadback(match));
+    var request=TerminalWire.Decode(TerminalWire.EncodeRead(new(7,page.FirstLine,"line-2000",true)));
+    var ok=page.IsWellFormed&&page.Cells.Length==80&&page.FirstLine==47&&historyText=="line-0047"&&snapshot.HistoryLines==2000&&
+        match.MatchLine==2000&&match.MatchColumn==0&&missing.MatchLine==-1&&wire?.Readback?.Cells.SequenceEqual(match.Cells)==true&&request?.Request?.Backward==true&&
+        TerminalWire.EncodeSnapshot(snapshot).Length<2048&&TerminalWire.Decode(TerminalWire.EncodeRead(new(9,0,new string('x',257)))) is null;
+    screen.Feed("\u001b[?1049hALT");var alternate=screen.Readback(new(4,0,"line-2000"));
+    ok&=alternate.HistoryLines==0&&alternate.MatchLine==-1&&TerminalText.ExtractLine(alternate.Cells.AsSpan(0,20))=="ALT";
+    return(ok,$"first={page.FirstLine} history={snapshot.HistoryLines} pageCells={page.Cells.Length} matchLine={match.MatchLine} alternateHistory={alternate.HistoryLines}");
+});
+
+Check("ET01", "选择中文半格和多行空白可准确复制", () =>
+{
+    var screen=new TerminalScreen(20,4);screen.Feed("中文Ag\r\n\r\n尾行");
+    var snapshot=screen.Snapshot();
+    var half=TerminalText.Selection(snapshot.Visible,20,1,3);
+    var all=TerminalText.Selection(snapshot.Visible,20,0,44);
+    var reversed=TerminalText.Selection(snapshot.Visible,20,44,0);
+    return(half=="中文"&&all=="中文Ag"+Environment.NewLine+Environment.NewLine+"尾行"&&reversed==all,$"half={half} allLength={all.Length} reversed={reversed==all}");
+});
+
+Check("ET08", "同一行多处中文搜索双向循环", () =>
+{
+    var screen=new TerminalScreen(20,4);screen.Feed("中文 xx 中文\r\nnext");
+    var first=screen.Readback(new(1,0,"中文"));
+    var second=screen.Readback(new(2,first.MatchLine,"中文",false,first.MatchColumn));
+    var wrapped=screen.Readback(new(3,second.MatchLine,"中文",false,second.MatchColumn));
+    var previous=screen.Readback(new(4,second.MatchLine,"中文",true,second.MatchColumn));
+    return(first.MatchColumn==0&&second.MatchColumn==8&&wrapped.MatchColumn==0&&previous.MatchColumn==0&&first.MatchLength==4,
+        $"columns={first.MatchColumn}/{second.MatchColumn}/{wrapped.MatchColumn}/{previous.MatchColumn} width={first.MatchLength}");
+});
+
+Check("ET12", "拒绝畸形历史匹配与字符，窄窗搜索不返回隐藏列", () =>
+{
+    var screen=new TerminalScreen(20,4);screen.Feed("中文 xx 中文\r\nline2\r\nline3\r\nline4\r\n");
+    var page=screen.Readback(new(1,0,"中文"));
+    var bad= new[]{page with{MatchLength=-1},page with{MatchColumn=20},page with{MatchLine=page.TopLine+page.Rows},page with{Active=(ScreenId)99}};
+    var cells=(TerminalCell[])page.Cells.Clone();cells[0]=cells[0] with{Codepoint=0xd800};
+    var rejected=bad.All(value=>!value.IsWellFormed&&TerminalWire.Decode(TerminalWire.EncodeReadback(value)) is null)&&!(page with{Cells=cells}).IsWellFormed;
+    screen.Resize(3,4);var narrow=screen.Readback(new(2,0,"中文"));var visible=screen.Readback(new(3,0,"中"));
+    return(rejected&&narrow.IsWellFormed&&narrow.MatchLine==-1&&visible.IsWellFormed&&visible.MatchLength==2,$"rejected={rejected} narrowMatch={narrow.MatchLine} visibleWidth={visible.MatchLength}");
 });
 
 Console.WriteLine($"SUMMARY executed={executed} failed={failures}");

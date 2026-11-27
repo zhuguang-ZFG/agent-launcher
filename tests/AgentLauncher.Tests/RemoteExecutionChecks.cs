@@ -18,7 +18,7 @@ internal static class RemoteExecutionChecks
                 SshPort: 22,
                 SshUser: "root",
                 AgentUser: "agent",
-                AgentType: "pi",
+                AgentType: "omp",
                 RemoteWorkingDirectory: "/home/agent/work",
                 Arguments: [],
                 MemoryLimitBytes: null,
@@ -33,7 +33,7 @@ internal static class RemoteExecutionChecks
                 Cwd: "/home/agent/work",
                 Workspace: new("/home/agent/work", "key"),
                 Shared: true,  // 共享池
-                Command: new("pi", [], "adapter"),
+                Command: new("omp", [], "adapter"),
                 Budget: 1024 * 1024 * 1024,
                 PoolId: Guid.NewGuid(),  // 有 PoolId
                 RemoteExecution: spec
@@ -51,7 +51,7 @@ internal static class RemoteExecutionChecks
                 SshPort: 22,
                 SshUser: "root",
                 AgentUser: "agent",
-                AgentType: "pi",
+                AgentType: "omp",
                 RemoteWorkingDirectory: "/home/agent/work",
                 Arguments: [],
                 MemoryLimitBytes: null,
@@ -66,7 +66,7 @@ internal static class RemoteExecutionChecks
                 Cwd: "/home/agent/work",
                 Workspace: new("/home/agent/work", "key"),
                 Shared: false,
-                Command: new("pi", [], "adapter"),
+                Command: new("omp", [], "adapter"),
                 Budget: 1024 * 1024 * 1024,
                 PlanningBytes: 512 * 1024 * 1024,  // 本地内存策略
                 RemoteExecution: spec
@@ -84,7 +84,7 @@ internal static class RemoteExecutionChecks
                 SshPort: 2222,
                 SshUser: "testuser",
                 AgentUser: "agent",
-                AgentType: "pi",
+                AgentType: "omp",
                 RemoteWorkingDirectory: "/home/agent/work dir",  // 含空格
                 Arguments: ["--arg with spaces", "another'arg"],  // 含空格和单引号
                 MemoryLimitBytes: null,
@@ -107,7 +107,7 @@ internal static class RemoteExecutionChecks
             var remoteCmd = args[^1];  // 最后一个参数是远程命令
             assert(remoteCmd.Contains("su - agent -c"), "应包含 su - agent -c");
             assert(remoteCmd.Contains("cd '/home/agent/work dir'"), "应包含工作目录（内部单引号 quoting）");
-            assert(remoteCmd.Contains("pi '--arg with spaces' 'another'\\\\''arg'"), "嵌套 su 命令应保留参数内单引号的转义");
+            assert(remoteCmd.Contains("omp '--arg with spaces' 'another'\\\\''arg'"), "嵌套 su 命令应保留参数内单引号的转义");
             assert(remoteCmd.StartsWith("su - agent -c \"") && remoteCmd.EndsWith("\""), "远程命令应用双引号包裹（内部已有单引号）");
             assert(remoteCmd.Contains("export NODE_OPTIONS=--max-old-space-size=1024;"), "远程命令应注入 Node 堆上限，防止小 VPS 被 agent 吃满内存");
             // stdout/stderr 必须继承控制台：重定向而无人读取会丢输出，远端写满管道缓冲会挂死 agent。
@@ -121,7 +121,7 @@ internal static class RemoteExecutionChecks
         test("R23 remote catalog and home-relative directories", () =>
         {
             const string path="~/work/project with spaces";
-            foreach(var id in Agents.All.Where(a=>a.Id!="custom").Select(a=>a.Id).Append("qodercli"))
+            foreach(var id in Agents.All.Select(a=>a.Id))
             {
                 var spec=new RemoteExecutionSpec("test.example",2222,"agent","agent",id,path,[],null,null);
                 spec.Validate();
@@ -134,7 +134,7 @@ internal static class RemoteExecutionChecks
         test("R45 remote memory cap wraps systemd-run and validates bounds", () =>
         {
             // 命令形状：有上限时先守卫 systemd-run 可用性，再以 transient scope 包裹内层命令（agent 及其后代落入同一 cgroup）。
-            var capped=new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",["--hold"],1024L*1024*1024,null,null);
+            var capped=new RemoteExecutionSpec("mem.example",22,"root","agent","omp","/home/agent/work",["--hold"],1024L*1024*1024,null,null);
             capped.Validate();
             using var runner=SshRunnerBackend.Create(capped);
             var remoteCmd=runner.StartInfo.ArgumentList[^1];
@@ -146,20 +146,20 @@ internal static class RemoteExecutionChecks
             // scope 内用 --uid/--gid 直接以 agent 身份执行 sh，不用 su -（pam_systemd 会把进程迁出 scope 使 MemoryMax 失效，实测 memory.max=max）。
             assert(remoteCmd.Contains("--uid=agent --gid=agent")&&remoteCmd.Contains("sh -c"),"scope 应以 --uid/--gid 在 scope 内执行 sh");
             assert(!remoteCmd.Contains("su - agent"),"内存上限不得用 su（pam_systemd 迁出 scope 使 MemoryMax 失效）");
-            assert(remoteCmd.Contains("cd '/home/agent/work' && pi '--hold'"),"内存上限不得改变工作目录或参数");
+            assert(remoteCmd.Contains("cd '/home/agent/work' && omp '--hold'"),"内存上限不得改变工作目录或参数");
             // 无上限：命令形状与从前一致，不引入 systemd 包裹。
-            var uncapped=new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",["--hold"],null,null,null);
+            var uncapped=new RemoteExecutionSpec("mem.example",22,"root","agent","omp","/home/agent/work",["--hold"],null,null,null);
             uncapped.Validate();
             using var plain=SshRunnerBackend.Create(uncapped);
             assert(!plain.StartInfo.ArgumentList[^1].Contains("systemd-run"),"无上限不应引入 systemd 包裹");
             // 边界：256 MiB 下限、64 GiB 上限，出界拒收；留空合法。
             foreach(var invalid in new long?[]{-1,255L*1024*1024,64L*1024*1024*1024+1})
             {
-                var spec=new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",[],invalid,null,null);
+                var spec=new RemoteExecutionSpec("mem.example",22,"root","agent","omp","/home/agent/work",[],invalid,null,null);
                 try{spec.Validate();assert(false,"出界上限被接受："+invalid);}catch(InvalidDataException e){assert(e.Message.Contains("256 MiB"),e.Message);}
             }
-            new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",[],256L*1024*1024,null,null).Validate();
-            new RemoteExecutionSpec("mem.example",22,"root","agent","pi","/home/agent/work",[],64L*1024*1024*1024,null,null).Validate();
+            new RemoteExecutionSpec("mem.example",22,"root","agent","omp","/home/agent/work",[],256L*1024*1024,null,null).Validate();
+            new RemoteExecutionSpec("mem.example",22,"root","agent","omp","/home/agent/work",[],64L*1024*1024*1024,null,null).Validate();
             assert(RemoteHost.ValidateMemoryLimitMib(null) is null,"留空应合法");
             assert(RemoteHost.ValidateMemoryLimitMib(256) is null && RemoteHost.ValidateMemoryLimitMib(65536) is null,"边界值应合法");
             assert(RemoteHost.ValidateMemoryLimitMib(255) is not null && RemoteHost.ValidateMemoryLimitMib(65537) is not null,"出界 MiB 应拒收");
@@ -172,7 +172,7 @@ internal static class RemoteExecutionChecks
                 SshPort: 22,
                 SshUser: "root",
                 AgentUser: "agent",
-                AgentType: "pi",
+                AgentType: "omp",
                 RemoteWorkingDirectory: "/home/agent/work",
                 Arguments: [],
                 MemoryLimitBytes: null,
@@ -216,7 +216,7 @@ internal static class RemoteExecutionChecks
                     SshPort: 22,
                     SshUser: "testuser",
                     AgentUser: "agent",
-                    AgentType: "pi",
+                    AgentType: "omp",
                     RemoteWorkingDirectory: "/home/agent/work",
                     Arguments: ["--test", "arg with spaces"],
                     MemoryLimitBytes: null,
@@ -268,7 +268,7 @@ internal static class RemoteExecutionChecks
                             SshPort: 22,
                             SshUser: "root",
                             AgentUser: "agent",
-                            AvailableAgents: ["pi"],
+                            AvailableAgents: ["omp"],
                             SshKeyPath: null
                         )
                     ]
@@ -284,7 +284,7 @@ internal static class RemoteExecutionChecks
                         new Slot
                         {
                             Enabled = true,
-                            AgentId = "pi",
+                            AgentId = "omp",
                             RemoteHostId = configuration.RemoteHosts[0].Id,
                             RemoteDirectory = "/home/agent/work/test"
                         }
@@ -349,7 +349,7 @@ internal static class RemoteExecutionChecks
                     SshPort: 22,
                     SshUser: "testuser",
                     AgentUser: "agent",
-                    AgentType: "pi",
+                    AgentType: "omp",
                     RemoteWorkingDirectory: "/home/agent/work",
                     Arguments: [],
                     MemoryLimitBytes: null,
@@ -376,7 +376,7 @@ internal static class RemoteExecutionChecks
         {
             static RemoteExecutionSpec WithArgs(params string[] args) => new(
                 Host: "vps.example.com", SshPort: 22, SshUser: "root", AgentUser: "agent",
-                AgentType: "pi", RemoteWorkingDirectory: "/home/agent/work", Arguments: args,
+                AgentType: "omp", RemoteWorkingDirectory: "/home/agent/work", Arguments: args,
                 MemoryLimitBytes: null, SshKeyPath: null);
             foreach (var bad in new[] { "D:\\work", "D:/work", "--add-dir=D:\\work", "\\\\server\\share", "fix C:\\temp now" })
             {
@@ -408,8 +408,9 @@ internal static class RemoteExecutionChecks
                     Cwd: "/home/agent/work",
                     Workspace: new("/home/agent/work", "key"),
                     Shared: false,
-                    Command: new("pi", [], "exe"),
-                    Budget: 0
+                    Command: new("omp", [], "exe"),
+                    Budget: 0,
+                    AgentId: "omp"
                 ),
                 State = "Disconnected",
                 Detail = "SSH 连接断开",
@@ -478,11 +479,11 @@ internal static class RemoteExecutionChecks
             var attach = RemoteReattach.AttachShell(attempt, "/home/agent/work");
             assert(probe.Contains(RemoteReattach.ProbeMarker) && probe.Contains(RemoteReattach.AttemptToken(attempt)) && !probe.Contains("disconnect"), "探针命令应带尝试标记且不触发断连夹具");
             assert(attach.Contains(RemoteReattach.AttachMarker) && attach.Contains("cd '/home/agent/work'") && attach.Contains(RemoteReattach.AttemptToken(attempt)), "挂接命令应回到同一远程目录");
-            assert(!attach.Contains(" pi ") && !attach.Contains("&& pi"), "重新挂接不得再启动 agent");
+            assert(!attach.Contains(" omp ") && !attach.Contains("&& omp"), "重新挂接不得再启动 agent");
 
             var entry = new ControlEntry
             {
-                Plan = new LaunchItem(attempt, Guid.NewGuid(), 1, "reattach", "/tmp", new("/tmp", "key"), false, new("pi", [], "remote"), 0),
+                Plan = new LaunchItem(attempt, Guid.NewGuid(), 1, "reattach", "/tmp", new("/tmp", "key"), false, new("omp", [], "remote"), 0, AgentId: "omp"),
                 State = "Reattaching", Detail = "挂接中", Created = DateTimeOffset.UtcNow
             };
             assert(!ControlEntryStates.IsTerminal(entry), "正在重新挂接仍占窗格名额");
@@ -490,7 +491,7 @@ internal static class RemoteExecutionChecks
             assert(!ControlEntryStates.IsTerminal(entry), "断开未释放时仍占窗格名额");
             entry.State = "Started";
             assert(!ControlEntryStates.IsTerminal(entry), "重新挂上之后仍占原来的一个名额");
-            assert(ResourcePolicy.MaxConcurrentAgents == 8, "重新挂接不得改 8 窗格上限");
+            assert(ResourcePolicy.MaxConcurrentAgents == 6, "重新挂接不得改 6 窗格上限");
             assert(TaskUsability.StateLabel("Reattaching") == "正在重新挂接（占用保留）", "重新挂接状态文案不对");
         });
     }

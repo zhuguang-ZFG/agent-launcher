@@ -37,8 +37,8 @@ public partial class MainWindow
             var fixture = Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe");
             var command = new CommandSpec(fixture, [], "exe");
             var book = new TaskBook { MaxRunning = 3 };
-            var first = TaskBookOps.Create(book, "UX 前项", Store.Root, "custom", new AgentProfile { Executable = fixture }, "修复中文输入", ["验证中文", "保留记录"], "shared", null, 100);
-            var second = TaskBookOps.Create(book, "UX 后项", Store.Root, "custom", new AgentProfile { Executable = fixture }, "", [], "shared",
+            var first = TaskBookOps.Create(book, "UX 前项", Store.Root, "codex", new AgentProfile { Executable = fixture }, "修复中文输入", ["验证中文", "保留记录"], "shared", null, 100);
+            var second = TaskBookOps.Create(book, "UX 后项", Store.Root, "codex", new AgentProfile { Executable = fixture }, "", [], "shared",
                 new ResourceSettings { Mode = "conservative", JobMemoryLimit = 8 * ResourcePolicy.GiB, PlanningBytes = 8 * ResourcePolicy.GiB, PhysicalFloorOverride = 8 * ResourcePolicy.GiB }, 0);
             var head = TaskBookOps.Enqueue(book, first.Id, command, new string('A', 64));
             var tail = TaskBookOps.Enqueue(book, second.Id, command, AgentProbe.Fingerprint(command));
@@ -96,7 +96,7 @@ public partial class MainWindow
             queueEnabled = false; taskTimer.Stop();
 
             var attempt = Guid.NewGuid();
-            var plan = new LaunchItem(attempt, Guid.NewGuid(), 1, first.Name, Store.Root, PhysicalDirectory.Workspace(Store.Root), false, command, ResourcePolicy.AgentBudget, SourceSlotId: first.Id);
+            var plan = new LaunchItem(attempt, Guid.NewGuid(), 1, first.Name, Store.Root, PhysicalDirectory.Workspace(Store.Root), false, command, ResourcePolicy.AgentBudget, SourceSlotId: first.Id, AgentId: first.AgentId);
             var original = new ControlEntry { Plan = plan, Digest = Store.Digest(plan), State = "Revoked", Detail = "原尝试已撤销，未启动" };
             var ledger = new Ledger { BootId = Store.BootId(), Entries = [original], TaskClaims = [new(head.Id, attempt)] };
             Store.Save(Store.FilePath("control.json"), ledger);

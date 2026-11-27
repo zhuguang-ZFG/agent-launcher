@@ -104,10 +104,10 @@
        </Border>
        <Border x:Name="PreviewCard" Style="{StaticResource Card}" Padding="16">
         <StackPanel>
-         <DockPanel Margin="0,0,0,8"><TextBlock DockPanel.Dock="Right" Text="启动后的样子" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock Text="分屏预览" Style="{StaticResource Heading}"/></DockPanel>
+         <DockPanel Margin="0,0,0,8"><TextBlock DockPanel.Dock="Right" Text="启动后的样子" Style="{StaticResource Caption}" VerticalAlignment="Center"/><TextBlock x:Name="PreviewHeading" Text="终端预览" Style="{StaticResource Heading}"/></DockPanel>
          <Border Background="{DynamicResource PreviewPage}" BorderBrush="{DynamicResource PreviewLine}" BorderThickness="1" CornerRadius="10" Padding="12">
           <StackPanel>
-           <DockPanel Margin="4,0,4,12"><TextBlock DockPanel.Dock="Right" x:Name="PaneCount" Text="1 个窗格" Foreground="{DynamicResource PreviewMuted}" FontSize="12"/><TextBlock Text="Windows Terminal" Foreground="{DynamicResource PreviewInk}" FontSize="12"/></DockPanel>
+           <DockPanel Margin="4,0,4,12"><TextBlock DockPanel.Dock="Right" x:Name="PaneCount" Text="1 个标签" Foreground="{DynamicResource PreviewMuted}" FontSize="12"/><TextBlock x:Name="PreviewHostLabel" Text="启动器内 · 标签切换" Foreground="{DynamicResource PreviewInk}" FontSize="12"/></DockPanel>
            <Grid x:Name="Preview" MinHeight="120"/>
           </StackPanel>
          </Border>
@@ -118,7 +118,7 @@
        </Border>
        <Expander x:Name="LaunchOptionsExpander" Header="启动选项 · 目录与分屏" Margin="0,12,0,0" HorizontalContentAlignment="Stretch" Foreground="{DynamicResource Ink}">
         <StackPanel x:Name="SummaryPanel" Margin="0,12,0,0">
-         <DockPanel Margin="0,8,0,16"><TextBlock Text="两个窗格的排法" Style="{StaticResource Caption}" VerticalAlignment="Center"/><ComboBox x:Name="Layout" Width="128" HorizontalAlignment="Right" SelectionChanged="LayoutChanged" AutomationProperties.Name="两项布局"><ComboBoxItem Content="左右并排" Tag="vertical"/><ComboBoxItem Content="上下叠放" Tag="horizontal"/></ComboBox></DockPanel>
+         <DockPanel x:Name="ExternalLayoutOptions" Margin="0,8,0,16"><TextBlock Text="两个窗格的排法" Style="{StaticResource Caption}" VerticalAlignment="Center"/><ComboBox x:Name="Layout" Width="128" HorizontalAlignment="Right" SelectionChanged="LayoutChanged" AutomationProperties.Name="两项布局"><ComboBoxItem Content="左右并排" Tag="vertical"/><ComboBoxItem Content="上下叠放" Tag="horizontal"/></ComboBox></DockPanel>
          <TextBlock Text="文件夹策略" FontWeight="SemiBold" Margin="0,0,0,8"/>
          <ComboBox x:Name="DirectoryMode" SelectionChanged="DirectoryChanged" AutomationProperties.Name="同项目目录策略"><ComboBoxItem Content="各自独立（互不影响）" Tag="isolated"/><ComboBoxItem Content="用已准备好的目录" Tag="prepared"/><ComboBoxItem Content="共用同一个文件夹" Tag="shared"/></ComboBox>
          <TextBlock x:Name="DirectoryHelp" Style="{StaticResource Caption}" Margin="0,8,0,0"/>

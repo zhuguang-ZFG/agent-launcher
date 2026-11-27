@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using AgentLauncher.Core;
 
 namespace AgentLauncher.Windows;
 
@@ -11,14 +12,13 @@ public static class SessionDiscovery
 {
     public static SessionSearch Find(string agentId,string workspace,string? searchRoot=null)
     {
+        if(!Agents.IsSupported(agentId))return new([],"此 Agent 类型已移除，不能新开会话或续接。");
         var user=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var root=searchRoot??agentId switch
         {
             "codex"=>Path.Combine(Environment.GetEnvironmentVariable("CODEX_HOME")??Path.Combine(user,".codex"),"sessions"),
             "claude"=>Path.Combine(Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR")??Path.Combine(user,".claude"),"projects"),
-            "qoder"=>Path.Combine(Environment.GetEnvironmentVariable("QODER_CONFIG_DIR")??Path.Combine(user,".qoder"),"projects"),
             "omp"=>Path.Combine(Environment.GetEnvironmentVariable("PI_CODING_AGENT_DIR")??Path.Combine(user,".omp","agent"),"sessions"),
-            "pi"=>Environment.GetEnvironmentVariable("PI_CODING_AGENT_SESSION_DIR")??Path.Combine(Environment.GetEnvironmentVariable("PI_CODING_AGENT_DIR")??Path.Combine(user,".pi","agent"),"sessions"),
             _=>""
         };
         if(root.Length==0)return new([],"此 Agent 尚无本地会话索引适配，可手动填写会话标识。");
@@ -37,21 +37,20 @@ public static class SessionDiscovery
                     if(line.Length==0)continue;
                     using var json=JsonDocument.Parse(line);var data=json.RootElement;
                     if(data.ValueKind!=JsonValueKind.Object)continue;
-                    if(agentId=="codex")
-                    {if(!data.TryGetProperty("type",out var type)||type.ValueKind!=JsonValueKind.String||type.GetString()!="session_meta"||!data.TryGetProperty("payload",out data)||data.ValueKind!=JsonValueKind.Object)continue;}
                     string? directory;
-                    if(agentId=="qoder")
+                    if(agentId=="codex")
                     {
-                        if(!data.TryGetProperty("type",out var type)||type.ValueKind!=JsonValueKind.String||type.GetString()!="workspace-directories"||!data.TryGetProperty("directories",out var dirs)||dirs.ValueKind!=JsonValueKind.Array||dirs.GetArrayLength()!=1)continue;
-                        directory=dirs[0].ValueKind==JsonValueKind.String?dirs[0].GetString():null;
+                        if(!data.TryGetProperty("type",out var type)||type.ValueKind!=JsonValueKind.String||type.GetString()!="session_meta"||!data.TryGetProperty("payload",out data)||data.ValueKind!=JsonValueKind.Object)continue;
+                        if(!data.TryGetProperty("cwd",out var cwd)||cwd.ValueKind!=JsonValueKind.String)continue;
+                        directory=cwd.GetString();
                     }
                     else{if(!data.TryGetProperty("cwd",out var cwd)||cwd.ValueKind!=JsonValueKind.String)continue;directory=cwd.GetString();}
                     if(string.IsNullOrWhiteSpace(directory)||!Path.IsPathFullyQualified(directory)||!Directory.Exists(directory))continue;
                     if(PhysicalDirectory.Workspace(directory).Key!=key)continue;
                     string reference;
-                    if(agentId is "omp" or "pi")reference=Path.GetFullPath(file);
+                    if(agentId=="omp")reference=Path.GetFullPath(file);
                     else
-                    {if(!data.TryGetProperty(agentId is "claude" or "qoder"?"sessionId":"id",out var id)||id.ValueKind!=JsonValueKind.String||!Guid.TryParse(id.GetString(),out var guid))continue;reference=guid.ToString();}
+                    {if(!data.TryGetProperty(agentId=="claude"?"sessionId":"id",out var id)||id.ValueKind!=JsonValueKind.String||!Guid.TryParse(id.GetString(),out var guid))continue;reference=guid.ToString();}
                     if(reference.Length<=200&&!results.Any(s=>s.Reference==reference))results.Add(new(reference,File.GetLastWriteTimeUtc(file)));
                     break;
                 }

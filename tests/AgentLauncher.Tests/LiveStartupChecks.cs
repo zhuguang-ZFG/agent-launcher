@@ -10,7 +10,7 @@ internal static class LiveStartupChecks
     public static async Task<int> RunAsync(string agent)
     {
         var isolated = Environment.GetEnvironmentVariable("AGENT_LAUNCHER_TEST_ROOT");
-        if (agent is not ("qoder" or "omp") || isolated is null || !Path.IsPathFullyQualified(isolated)
+        if (agent != "omp" || isolated is null || !Path.IsPathFullyQualified(isolated)
             || !Path.GetFileName(isolated).StartsWith("AgentLauncher-tests-live-startup-", StringComparison.Ordinal)
             || !string.Equals(Path.GetFullPath(isolated), Store.Root, StringComparison.OrdinalIgnoreCase)
             || Directory.Exists(Store.Root)) throw new IOException("Requires a fresh isolated integration build/root.");
@@ -22,9 +22,7 @@ internal static class LiveStartupChecks
         var marker = Path.Combine(cwd, "startup-proof.txt");
         var token = "live-startup-" + Guid.NewGuid().ToString("N");
         var prompt = $"In this isolated acceptance directory, use your file write tool once to create {marker.Replace('\\', '/')} with exact content {token}. Then use your file read tool to read that file and report its exact content. Do not use shell, delegate, or access other files. If a hook denies a tool, report BLOCKED and stop without retry. Finish after reading the file.";
-        string[] args = agent == "qoder"
-            ? ["--no-session-persistence", "--tools", "Read,Write", "--allowed-tools", "Read,Write", "--output-format", "stream-json", "--max-model-request-retries", "0", "-p", prompt]
-            : ["--no-session", "--tools", "read,write", "--mode", "json", "-p", prompt];
+        var args = new[]{"--no-session", "--tools", "read,write", "--mode", "json", "-p", prompt};
         var profile = new AgentProfile { Arguments = args };
         var command = Commands.Resolve(agent, profile);
         var slot = new Slot { Enabled = true, AgentId = agent, Directory = cwd, Profiles = new() { [agent] = profile } };
@@ -71,7 +69,7 @@ internal static class LiveStartupChecks
                 || !File.Exists(marker) || File.ReadAllText(marker).Trim() != token)
                 throw new IOException("Real agent did not finish the isolated write; inspect output and receipts.");
             // Require actual read dispatch, not just a successful write or echoed prompt.
-            var readTool = agent == "qoder" ? "Read" : "read";
+            var readTool = "read";
             if (!text.Split('\n').Any(line => HasReadCall(line, readTool)))
                 throw new IOException("No real file-read tool call was recorded.");
             passed = true;

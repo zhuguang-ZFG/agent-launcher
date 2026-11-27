@@ -48,10 +48,10 @@ internal static class LaunchSurfaceChecks
         {
             var text = LaunchSurface.SyncHonesty(WorkspaceSyncMode.Mutagen);
             Assert(text.Contains(MutagenCreateMode.SyncMode), text);
-            Assert(MutagenCreateMode.SyncMode == "two-way-resolved", MutagenCreateMode.SyncMode);
+            Assert(MutagenCreateMode.SyncMode == "two-way-safe", MutagenCreateMode.SyncMode);
             Assert(text.Contains("不是已收敛"), text);
             Assert(!text.Contains("全部已收敛"), text);
-            Assert(text.Contains("本机一侧会赢得修改"), text);
+            Assert(text.Contains("保留双方内容"), text);
         });
         Test("UX15 terminal flush names sync-final and does not say 已收敛", () =>
         {
@@ -69,7 +69,7 @@ internal static class LaunchSurfaceChecks
         {
             Assert(LaunchSurface.SharedDirectoryRisk.Contains("互相覆盖"), LaunchSurface.SharedDirectoryRisk);
             Assert(LaunchSurface.ChangesAreLocalGit.Contains("本机工作目录") && LaunchSurface.ChangesAreLocalGit.Contains("不能证明"), LaunchSurface.ChangesAreLocalGit);
-            Assert(LaunchSurface.ReattachEffect.Contains("新的 SSH 窗格") && LaunchSurface.ReattachEffect.Contains("不会自动重连") && LaunchSurface.ReattachEffect.Contains("也不会释放名额"), LaunchSurface.ReattachEffect);
+            Assert(LaunchSurface.ReattachEffect.Contains("工作 Shell") && LaunchSurface.ReattachEffect.Contains("未恢复原 Agent") && LaunchSurface.ReattachEffect.Contains("不会自动重连") && LaunchSurface.ReattachEffect.Contains("也不会释放名额"), LaunchSurface.ReattachEffect);
             Assert(LaunchSurface.ReleaseEffect.Contains("不会结束远端进程") && LaunchSurface.ReleaseEffect.Contains("也不会重新挂接"), LaunchSurface.ReleaseEffect);
             Assert(LaunchSurface.LocalReconcileNote.Contains("不是远程名额释放"), LaunchSurface.LocalReconcileNote);
         });

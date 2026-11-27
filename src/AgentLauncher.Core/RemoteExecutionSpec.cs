@@ -7,7 +7,7 @@ public sealed record RemoteExecutionSpec(
     int SshPort,                    // SSH 端口（通常 22）
     string SshUser,                 // SSH 登录用户（如 "root"）
     string AgentUser,               // agent 运行用户（如 "agent"）
-    string AgentType,               // agent 类型（如 "pi", "kimi", "qodercli", "omp", "codex"）
+    string AgentType,               // agent 类型（omp / codex / claude）
     string RemoteWorkingDirectory,  // 远程工作目录（如 "/home/agent/work"）
     string[] Arguments,             // agent 参数
     long? MemoryLimitBytes,         // 内存限制（可选，远程 cgroup）
@@ -25,7 +25,7 @@ public sealed record RemoteExecutionSpec(
         // 远程是 Linux 环境：盘符/UNC 路径只可能来自误用的本地 profile，拒绝而不是静默传给远端。
         if (Arguments.Any(a => System.Text.RegularExpressions.Regex.IsMatch(a, @"(^|[^A-Za-z0-9])[A-Za-z]:[\\/]") || a.StartsWith("\\\\")))
             throw new InvalidDataException("远程参数包含 Windows 本地路径，远程主机无法访问；请改用远程目录或移除该参数。");
-        if (RemoteAgentMaintenance.AgentCommand(AgentType) is null)
+        if (!Agents.IsKnown(AgentType))
             throw new InvalidDataException("远程 Agent 类型不支持。");
         // 远程内存上限（规格 2026-11-19）：可选；出界拒收以防 MiB/GiB 录入错误静默生效。
         if (MemoryLimitBytes is { } limit && (limit < 256L * 1024 * 1024 || limit > 64L * 1024 * 1024 * 1024))

@@ -19,8 +19,8 @@ public partial class MainWindow
         var originalDefaults=presetSlotDefaults.ToDictionary(p=>p.Key,p=>p.Value.Copy());var originalEdited=presetEditedSlots.ToArray();
         timer.Stop();busy=false;readOnly=false;loading=false;submittedAttempts=[];submittedRevision=-1;presetSlotDefaults.Clear();presetEditedSlots.Clear();
         MemorySnapshot Sample()=>new(32*ResourcePolicy.GiB,28*ResourcePolicy.GiB,64*ResourcePolicy.GiB,60*ResourcePolicy.GiB,5,DateTimeOffset.UtcNow);
-        Configuration Fixture()=>new(){Draft=new(){Project=Store.Root,DirectoryMode="shared"}};
-        ControlEntry Entry(string state,int position,string kind="agent")=>new(){Plan=new(Guid.NewGuid(),Guid.NewGuid(),position,"multipane-check",Store.Root,new(Store.Root,"multipane-check"),false,new(Path.Combine(Environment.SystemDirectory,"cmd.exe"),[],"exe"),kind=="git"?ResourcePolicy.GitJobMemoryLimit:ResourcePolicy.DefaultJobMemoryLimit,Kind:kind,PlanningBytes:kind=="git"?ResourcePolicy.DefaultGitPlanningBytes:ResourcePolicy.DefaultPlanningBytes),State=state,Detail=state};
+        Configuration Fixture()=>new(){EmbeddedTerminal=false,Draft=new(){Project=Store.Root,DirectoryMode="shared"}};
+        ControlEntry Entry(string state,int position,string kind="agent")=>new(){Plan=new(Guid.NewGuid(),Guid.NewGuid(),position,"multipane-check",Store.Root,new(Store.Root,"multipane-check"),false,new(Path.Combine(Environment.SystemDirectory,"cmd.exe"),[],"exe"),kind=="git"?ResourcePolicy.GitJobMemoryLimit:ResourcePolicy.DefaultJobMemoryLimit,Kind:kind,AgentId:kind=="git"?null:"codex",PlanningBytes:kind=="git"?ResourcePolicy.DefaultGitPlanningBytes:ResourcePolicy.DefaultPlanningBytes),State=state,Detail=state};
         void Healthy(ControlEntry[]? entries=null)=>status=new(true,"multipane-check",entries??[],Sample(),Epoch:"multipane-check");
         try
         {
@@ -35,8 +35,8 @@ public partial class MainWindow
             check("ACC-S01 selection summary replaces the retired four-count card",config.Draft.Slots.Count==16&&config.Draft.Slots.Count(s=>s.Enabled)==3&&FindName("ConfiguredCountValue")==null&&FindName("EnabledCountValue")==null&&FindName("ReservedCountValue")==null&&FindName("StartedCountValue")==null&&FindName("CreatedPendingText")==null&&SelectionSummary.Text=="已选 3 个，共 16 个"&&LaunchButton.Content is string launchLabel&&launchLabel.Contains("3")&&Preview.Children.OfType<Grid>().Sum(g=>g.Children.Count)==3);
             status=new(false,"offline",Memory:Sample());UpdateLaunch();
             check("ACC-S01 unavailable status never reports a launchable configuration",!LaunchButton.IsEnabled&&LaunchHint.Text.Contains("正在等待后台检查就绪"));
-            Healthy([..Enumerable.Range(1,8).Select(i=>Entry("Started",i))]);UpdateLaunch();
-            check("ACC-U08 concurrency cap refuses launches beyond eight active agent panes",!LaunchButton.IsEnabled&&LaunchHint.Text.Contains("同时运行的 Agent 窗格最多 8 个"));
+            Healthy([..Enumerable.Range(1,6).Select(i=>Entry("Started",i))]);UpdateLaunch();
+            check("ACC-U08 concurrency cap refuses launches beyond six active agent panes",!LaunchButton.IsEnabled&&LaunchHint.Text.Contains("同时运行的 Agent 窗格最多 6 个"));
             Healthy();UpdateLaunch();
 
             foreach(var (n,layout,rows) in new (int,string,int[])[]{(2,"horizontal",[2]),(3,"vertical",[1,2]),(6,"vertical",[2,2,1,1]),(8,"vertical",[2,2,2,2]),(16,"vertical",[4,4,4,4])})
@@ -68,10 +68,10 @@ public partial class MainWindow
             var enabledAfterShrink=config.Draft.Slots.Select(s=>s.Enabled).ToArray();ApplyScalePreset(16);
             check("ACC-L04 enlarging existing capacity never silently reenables old slots",config.Draft.Slots.Select(s=>s.Enabled).SequenceEqual(enabledAfterShrink));
 
-            config=Fixture();ApplyScalePreset(8);config.Edit(d=>{for(var i=0;i<d.Slots.Count;i++){var slot=d.Slots[i];slot.AgentId="pi";slot.Directory=Path.Combine(Store.Root,$"slot-{i}");slot.RequiresDirectory=i%2==0;slot.Note=$"note-{i}";slot.CustomName=$"name-{i}";slot.Enabled=i%3==0;slot.Profiles["codex"]=new(){Executable="keep-codex",Arguments=[$"keep-{i}"]};}d.Slots[2].AgentId="claude";d.Slots[2].Profiles["claude"]=new(){Executable="source-cli",Arguments=["--source","argument with spaces"]};});Render();
+            config=Fixture();ApplyScalePreset(8);config.Edit(d=>{for(var i=0;i<d.Slots.Count;i++){var slot=d.Slots[i];slot.AgentId="codex";slot.Directory=Path.Combine(Store.Root,$"slot-{i}");slot.RequiresDirectory=i%2==0;slot.Note=$"note-{i}";slot.CustomName=$"name-{i}";slot.Enabled=i%3==0;slot.Profiles["codex"]=new(){Executable="keep-codex",Arguments=[$"keep-{i}"]};}d.Slots[2].AgentId="claude";d.Slots[2].Profiles["claude"]=new(){Executable="source-cli",Arguments=["--source","argument with spaces"]};});Render();
             var sourceId=config.Draft.Slots[2].Id;var beforeBatch=config.Draft.Copy();ApplyAgentToSlots(sourceId,false);
             bool UnrelatedFieldsKept()=>config.Draft.Slots.Select((slot,index)=>slot.Id==beforeBatch.Slots[index].Id&&slot.Directory==beforeBatch.Slots[index].Directory&&slot.RequiresDirectory==beforeBatch.Slots[index].RequiresDirectory&&slot.Note==beforeBatch.Slots[index].Note&&slot.CustomName==beforeBatch.Slots[index].CustomName&&slot.Enabled==beforeBatch.Slots[index].Enabled&&slot.Profiles["codex"].Arguments.SequenceEqual(beforeBatch.Slots[index].Profiles["codex"].Arguments)).All(value=>value);
-            check("ACC-L05 batch apply does not copy directory or note",UnrelatedFieldsKept()&&config.Draft.Slots.Take(2).All(s=>s.AgentId=="pi")&&config.Draft.Slots.Skip(3).All(s=>s.AgentId=="claude"&&s.Current.Executable=="source-cli"&&s.Current.Arguments.SequenceEqual(new[]{"--source","argument with spaces"})));
+            check("ACC-L05 batch apply does not copy directory or note",UnrelatedFieldsKept()&&config.Draft.Slots.Take(2).All(s=>s.AgentId=="codex")&&config.Draft.Slots.Skip(3).All(s=>s.AgentId=="claude"&&s.Current.Executable=="source-cli"&&s.Current.Arguments.SequenceEqual(new[]{"--source","argument with spaces"})));
             var batchSource=config.Draft.Slots[2].Current;var batchTarget=config.Draft.Slots[3].Current;var batchSibling=config.Draft.Slots[4].Current;batchTarget.Arguments[0]="target-only";
             check("ACC-L05 batch profiles and argument arrays are independent",!ReferenceEquals(batchSource,batchTarget)&&!ReferenceEquals(batchTarget.Arguments,batchSibling.Arguments)&&batchSource.Arguments[0]=="--source"&&batchSibling.Arguments[0]=="--source");
             ApplyAgentToSlots(sourceId,true);check("ACC-L05 applying to all includes preceding slots and preserves identity",UnrelatedFieldsKept()&&config.Draft.Slots.All(s=>s.AgentId=="claude"&&s.Current.Arguments.SequenceEqual(new[]{"--source","argument with spaces"})));
@@ -122,6 +122,10 @@ public partial class MainWindow
             var dropRevision=config.Draft.Revision;var dropSnapshot=JsonSerializer.Serialize(config.Draft,Store.Json);var rejected=false;
             try{await ApplyDroppedDirectoriesAsync([..dropped,Store.Root],null,dropRevision);}catch(IOException){rejected=true;}
             check("ACC-L02 seventeenth dropped directory leaves configuration untouched",rejected&&config.Draft.Revision==dropRevision&&JsonSerializer.Serialize(config.Draft,Store.Json)==dropSnapshot);
+            var retiredSlot=config.Draft.Slots[0];retiredSlot.AgentId="pi";retiredSlot.Enabled=false;Render();
+            var retiredRail=railLabels[retiredSlot.Id];
+            var retiredToggle=FindLogical(RailSlots).OfType<CheckBox>().Single(toggle=>toggle.Tag is Guid id&&id==retiredSlot.Id);
+            check("ACC-R02 retired slots are visibly marked and disabled in the rail",!retiredSlot.Enabled&&!retiredToggle.IsEnabled&&retiredRail.Text.Contains("已移除")&&retiredRail.Text.Contains("不可启动"));
         }
         finally
         {

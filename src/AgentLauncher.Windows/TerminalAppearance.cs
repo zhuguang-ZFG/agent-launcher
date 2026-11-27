@@ -62,8 +62,7 @@ public static class TerminalAppearance
         }
         return id switch
         {
-            "pi"=>"#61AFEF","codex"=>"#E5C07B","claude"=>"#C678DD","gemini"=>"#56B6C2","opencode"=>"#98C379",
-            "hermes"=>"#E06C75","omp"=>"#D19A66","kimi"=>"#BE5046","qoder"=>"#528BFF",_=>"#ABB2BF"
+            "codex"=>"#E5C07B","claude"=>"#C678DD","omp"=>"#D19A66",_=>"#ABB2BF"
         };
     }
 

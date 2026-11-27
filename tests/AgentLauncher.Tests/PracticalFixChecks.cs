@@ -61,8 +61,7 @@ internal static class PracticalFixChecks
             File.WriteAllText(Path.Combine(root,"broken.jsonl"),"{partial");
             var result=SessionDiscovery.Find("codex",temp,root);Check(result.Sessions.Count==1&&result.Sessions[0].Reference==id.ToString(),"wrong workspace session exposed");
             Check(!JsonSerializer.Serialize(result).Contains("conversation"),"conversation leaked");
-            File.WriteAllText(Path.Combine(root,"qoder.jsonl"),JsonSerializer.Serialize(new{type="workspace-directories",sessionId=id.ToString(),directories=new[]{temp}}));
-            Check(SessionDiscovery.Find("qoder",temp,root).Sessions.Single().Reference==id.ToString(),"Qoder workspace metadata not discovered");
+            Check(SessionDiscovery.Find("qoder",temp,root).Sessions.Count==0,"retired Qoder session discovery remained available");
         });
         test("UX12 malformed session metadata does not hide valid candidates",()=>
         {
@@ -71,8 +70,7 @@ internal static class PracticalFixChecks
                 File.WriteAllText(Path.Combine(root,name+".jsonl"),content);
             File.WriteAllText(Path.Combine(root,"valid.jsonl"),JsonSerializer.Serialize(new{type="session_meta",payload=new{id=id.ToString(),cwd=temp}}));
             Check(SessionDiscovery.Find("codex",temp,root).Sessions.Single().Reference==id.ToString(),"malformed Codex metadata aborted discovery");
-            File.WriteAllText(Path.Combine(root,"valid.jsonl"),JsonSerializer.Serialize(new{type="workspace-directories",sessionId=id.ToString(),directories=new[]{temp}}));
-            Check(SessionDiscovery.Find("qoder",temp,root).Sessions.Single().Reference==id.ToString(),"malformed Qoder metadata aborted discovery");
+            Check(SessionDiscovery.Find("qoder",temp,root).Sessions.Count==0,"retired Qoder metadata was discovered");
             File.WriteAllText(Path.Combine(root,"valid.jsonl"),JsonSerializer.Serialize(new{cwd=temp,sessionId=id.ToString()}));
             Check(SessionDiscovery.Find("claude",temp,root).Sessions.Single().Reference==id.ToString(),"malformed Claude metadata aborted discovery");
         });

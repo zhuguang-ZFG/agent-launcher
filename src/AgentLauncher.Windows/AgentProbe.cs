@@ -15,11 +15,11 @@ public static class AgentProbe
 
     public static async Task<AgentCapability> ProbeCapabilityAsync(string agentId, AgentProfile profile, string cwd, TimeSpan timeout, CancellationToken ct = default)
     {
-        var spec = Commands.Resolve(agentId, new AgentProfile { Executable = profile.Executable, Arguments = [] });
+        var spec = Commands.ProbeCommand(agentId, profile);
         var fingerprint = Fingerprint(spec);
         // Probes execute the bare CLI: the memory-guard extension belongs to launches, not to --version,
         // and script CLIs may dispatch on argument position. Identity still covers the launched spec.
-        var probe = QoderMemoryGuard.Detach(OmpMemoryGuard.Detach(spec));
+        var probe = OmpMemoryGuard.Detach(spec);
         var result = await RunAsync(probe with { Arguments = [.. probe.Arguments, "--version"] }, cwd, timeout, ct: ct);
         if (fingerprint != Fingerprint(spec)) throw new InvalidDataException("版本核对期间程序已变化，请重试核对。");
         var version = result is { ExitCode: 0,TimedOut:false,Truncated:false } ? AgentVersion.Parse(result.Output + "\n" + result.Error) : null;
