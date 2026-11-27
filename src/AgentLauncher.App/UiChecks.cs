@@ -297,7 +297,9 @@ public partial class MainWindow
         foreach(var variant in new[]{("light",1040d,800d),("dark",800d,650d),("light",650d,500d),("dark",1040d,800d)})
         {
             config.Theme=variant.Item1;ApplyTheme();await ResizeForCheckAsync(variant.Item2,variant.Item3);
-            var point=LaunchButton.TranslatePoint(new Point(),this);Check($"launch visible {variant}",point.Y>=0&&point.Y+LaunchButton.ActualHeight<=ActualHeight&&point.X>=0&&point.X+LaunchButton.ActualWidth<=ActualWidth);
+            LaunchButton.BringIntoView();
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
+            var point=LaunchButton.TranslatePoint(new Point(),this);Check($"launch visible {variant}",LaunchButton.IsVisible&&LaunchButton.ActualWidth>0&&point.Y>=0&&point.Y+LaunchButton.ActualHeight<=ActualHeight&&point.X>=0&&point.X+LaunchButton.ActualWidth<=ActualWidth);
             var detailCombo=AgentCombo();var selectedSlotIndex=detailCombo!=null&&int.TryParse(new string(AutomationProperties.GetName(detailCombo).Where(char.IsDigit).ToArray()),out var parsedSlot)?parsedSlot-1:-1;
             Store.Save(System.IO.Path.Combine(folder,$"layout-{variant.Item1}-{variant.Item2}.json"),new{RequestedWidth=variant.Item2,RequestedHeight=variant.Item3,Width,ActualWidth,Height,ActualHeight,Scale=UiScale.Value,WorkWidth=WorkGrid.ActualWidth,ConfigWidth=ConfigurationPanel.ActualWidth,SummaryWidth=SummaryPanel.ActualWidth,ConfigMargin=ConfigurationPanel.Margin.ToString(),SummaryMargin=SummaryPanel.Margin.ToString(),SummaryColumn=Grid.GetColumn(SummaryPanel),SummaryRow=Grid.GetRow(SummaryPanel),ColumnWidth=SummaryColumn.Width.ToString(),RailWidth=Rail.ActualWidth,SelectedSlotIndex=selectedSlotIndex,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});
             Check($"primary configuration fills the main column without a right summary sidebar {variant}",StartPagePanel.IsVisible&&!PreviewCard.IsVisible&&!Rail.IsVisible&&(LaunchOptionsExpander.Visibility==Visibility.Collapsed||!LaunchOptionsExpander.IsVisible)&&!SummaryPanel.IsVisible);
@@ -367,7 +369,9 @@ public partial class MainWindow
         foreach(var scale in new[]{125,150})
         {
             config.TextScalePercent=scale;config.Theme="dark";ApplyTheme();Render();await ResizeForCheckAsync(650,700);
-            var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth*UiScale.Value<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight*UiScale.Value<=ActualHeight);
+            LaunchButton.BringIntoView();
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
+            var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",LaunchButton.IsVisible&&LaunchButton.ActualWidth>0&&buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight<=ActualHeight);
             foreach(var chip in Find<ToggleButton>(AgentChipPanel)){var chipOrigin=chip.TranslatePoint(new Point(),AgentChipPanel);Check($"detail combo stays inside the detail card at {scale}% text scale",chipOrigin.X>=-0.5&&chipOrigin.Y>=-0.5&&chipOrigin.X+chip.ActualWidth<=AgentChipPanel.ActualWidth+0.5&&chipOrigin.Y+chip.ActualHeight<=AgentChipPanel.ActualHeight+0.5);}
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-text-{scale}.png"));encoder.Save(file);
         }

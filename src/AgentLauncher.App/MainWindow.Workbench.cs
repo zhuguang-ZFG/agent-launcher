@@ -336,7 +336,7 @@ public partial class MainWindow
         var project = config.Draft.Project;
         WorkbenchProjectTitle.Text = string.IsNullOrWhiteSpace(project) ? "未选择项目" : ProjectName(project);
         WorkbenchProjectTitle.ToolTip = string.IsNullOrWhiteSpace(project) ? null : project;
-        WorkbenchCapacity.Text = workbenchPanes.Count + " / 最多 " + WorkbenchLayout.MaxPanes;
+        WorkbenchCapacity.Text = "运行中 " + CountActiveWorkbenchPanes() + " / 最多 " + WorkbenchLayout.MaxPanes;
         WorkbenchResource.Text = status?.Memory is { } sample
             ? $"{RailResourceMode(config.Draft.Resource?.Mode)} · 可用 {GiB(sample.Available)} GiB"
             : "资源：未读取";
@@ -470,9 +470,11 @@ public partial class MainWindow
         for (var i = 0; i < workbenchPanes.Count; i++)
         {
             var pane = workbenchPanes[i];
-            pane.PlaceText.Text = pane.Plan.RemoteExecution is null ? "本机" : "远程";
-            pane.TitleText.Text = (i + 1) + "  " + pane.Plan.Name;
+            var remote = pane.Plan.RemoteExecution is not null;
+            pane.TitleText.Text = pane.Plan.Name;
             pane.TitleText.ToolTip = pane.Plan.Name;
+            pane.PlaceText.Text = remote ? "远程" : "本机";
+            pane.PlaceText.Visibility = remote ? Visibility.Visible : Visibility.Collapsed;
         }
     }
 
@@ -658,12 +660,7 @@ public partial class MainWindow
                 var chip = new ToggleButton
                 {
                     Tag = slot.Id,
-                    Margin = new Thickness(0, 0, 12, 12),
-                    Padding = new Thickness(12, 10, 12, 10),
-                    MinWidth = 168,
-                    MinHeight = 72,
-                    HorizontalContentAlignment = HorizontalAlignment.Left,
-                    VerticalContentAlignment = VerticalAlignment.Top,
+                    Style = (Style)FindResource("AgentChip"),
                     IsChecked = slot.Enabled,
                     IsEnabled = (slot.Enabled || ready) && !readOnly && !busy && !loading && !closeRequested
                 };
@@ -675,9 +672,13 @@ public partial class MainWindow
                 menu.Items.Add(edit);
                 chip.ContextMenu = menu;
                 var body = new StackPanel();
-                body.Children.Add(new TextBlock { Text = slot.DisplayName, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis });
-                body.Children.Add(new TextBlock { Text = place, Margin = new Thickness(0, 4, 0, 0), Style = (Style)FindResource("Caption") });
-                var state = new TextBlock { Text = ready ? "就绪" : "未就绪 · " + reason, Margin = new Thickness(0, 2, 0, 0), TextWrapping = TextWrapping.Wrap };
+                var name = new TextBlock { Text = slot.DisplayName, FontSize = 13, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis };
+                name.SetResourceReference(TextBlock.ForegroundProperty, ready ? "Ink" : "Muted");
+                body.Children.Add(name);
+                var placeText = new TextBlock { Text = place, FontSize = 11, Margin = new Thickness(0, 4, 0, 0), TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis };
+                placeText.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+                body.Children.Add(placeText);
+                var state = new TextBlock { Text = ready ? "就绪" : "未就绪 · " + reason, FontSize = 11, Margin = new Thickness(0, 2, 0, 0), TextWrapping = TextWrapping.Wrap };
                 state.SetResourceReference(TextBlock.ForegroundProperty, ready ? "Muted" : "WarningInk");
                 body.Children.Add(state);
                 chip.Content = body;

@@ -17,6 +17,7 @@
   <SolidColorBrush x:Key="AccentPressed" Color="#2563EB"/>
   <SolidColorBrush x:Key="AccentInk" Color="#FFFFFF"/>
   <SolidColorBrush x:Key="Selected" Color="#E7F0FE"/>
+  <SolidColorBrush x:Key="ChipSelected" Color="#FFFFFF"/>
   <SolidColorBrush x:Key="WarningSurface" Color="#FFF5E5"/>
   <SolidColorBrush x:Key="WarningInk" Color="#D29922"/>
   <SolidColorBrush x:Key="StatusOk" Color="#3FB950"/>
@@ -122,6 +123,32 @@
   </Style>
   <Style x:Key="Notice" TargetType="Border">
    <Setter Property="Background" Value="{DynamicResource WarningSurface}"/><Setter Property="CornerRadius" Value="10"/><Setter Property="Padding" Value="14,10"/>
+  </Style>
+  <Style x:Key="AgentChip" TargetType="ToggleButton">
+   <Setter Property="MinWidth" Value="188"/><Setter Property="Width" Value="188"/><Setter Property="MinHeight" Value="84"/>
+   <Setter Property="Margin" Value="0,0,8,8"/><Setter Property="Padding" Value="12,10"/>
+   <Setter Property="Background" Value="{DynamicResource HeaderSurface}"/>
+   <Setter Property="Foreground" Value="{DynamicResource Ink}"/>
+   <Setter Property="BorderBrush" Value="{DynamicResource Line}"/><Setter Property="BorderThickness" Value="2"/>
+   <Setter Property="HorizontalContentAlignment" Value="Left"/><Setter Property="VerticalContentAlignment" Value="Top"/>
+   <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
+    <Border x:Name="Chrome" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+     <DockPanel>
+      <Border x:Name="Mark" DockPanel.Dock="Left" Width="3" CornerRadius="2" Background="Transparent" Margin="0,0,10,0"/>
+      <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+     </DockPanel>
+    </Border>
+    <ControlTemplate.Triggers>
+     <Trigger Property="IsChecked" Value="True">
+      <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+      <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource ChipSelected}"/>
+      <Setter TargetName="Mark" Property="Background" Value="{DynamicResource Accent}"/>
+     </Trigger>
+     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Chrome" Property="Opacity" Value="0.92"/></Trigger>
+     <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource Muted}"/></Trigger>
+    </ControlTemplate.Triggers>
+   </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style TargetType="TextBox">
    <Setter Property="MinHeight" Value="34"/><Setter Property="Padding" Value="10,6"/>

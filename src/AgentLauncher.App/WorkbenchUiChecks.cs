@@ -62,6 +62,40 @@ public partial class MainWindow
                 && !LaunchHint.Text.Contains("启动授权"));
             check("agent chips live on the start page", AgentChipPanel.IsVisible && ReviewFind<ToggleButton>(AgentChipPanel).Count() == 7);
 
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            var chipBottom = AgentChipCard.TranslatePoint(new Point(0, AgentChipCard.ActualHeight), this).Y;
+            var buttonAt = LaunchButton.TranslatePoint(new Point(), this);
+            var nearChips = buttonAt.Y - chipBottom is >= -8 and <= 96;
+            var pinnedToWindowCorner = ActualHeight - (buttonAt.Y + LaunchButton.ActualHeight) < 48 && ActualWidth - (buttonAt.X + LaunchButton.ActualWidth) < 48;
+            check("start-page content is in a composed column",
+                StartPageColumn.MaxWidth is >= 760 and <= 880
+                && LaunchButton.IsVisible
+                && nearChips
+                && !pinnedToWindowCorner);
+
+            Color? ChipFill(ToggleButton chip)
+            {
+                chip.ApplyTemplate();
+                if (chip.Template?.FindName("Chrome", chip) is Border chrome && chrome.Background is SolidColorBrush direct) return direct.Color;
+                Border? Walk(DependencyObject node)
+                {
+                    if (node is Border { Name: "Chrome" } border) return border;
+                    for (var i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+                        if (Walk(VisualTreeHelper.GetChild(node, i)) is { } found) return found;
+                    return null;
+                }
+                return Walk(chip)?.Background is SolidColorBrush brush ? brush.Color : null;
+            }
+            bool PaleFill(Color color) => 0.299 * color.R + 0.587 * color.G + 0.114 * color.B > 180;
+            var selectedChip = ReviewFind<ToggleButton>(AgentChipPanel).FirstOrDefault(chip => chip.IsChecked == true);
+            var unreadyChipFill = ReviewFind<ToggleButton>(AgentChipPanel).FirstOrDefault(chip => chip.IsChecked != true);
+            var selectedFill = selectedChip is null ? null : ChipFill(selectedChip);
+            var idleFill = unreadyChipFill is null ? null : ChipFill(unreadyChipFill);
+            check("selected chips are not light fills on the dark page",
+                SystemParameters.HighContrast
+                || (selectedFill is { } selectedColor && !PaleFill(selectedColor)
+                    && idleFill is { } idleColor && !PaleFill(idleColor)));
+
             var readyCount = config.Draft.Slots.Count(IsSlotReady);
             check("seven ready chips are available before the cap click", readyCount == 7 && CountReadySelected() == WorkbenchLayout.MaxPanes);
             TrySelectOverCapReadyAgent();

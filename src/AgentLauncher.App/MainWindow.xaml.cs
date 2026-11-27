@@ -1398,6 +1398,7 @@ var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的�
         Set("WarningInk",palette.StatusWait);
         Set("Raised",dark?"#232733":"#F0F3FA");
         Set("Selected",dark?"#1E2A3F":"#E7F0FE");
+        Set("ChipSelected",dark?"#152033":palette.Surface);
         Set("InputLine",dark?"#3A4150":"#C0C8D8");
         Set("WarningSurface",dark?"#3D3120":"#FFF5E5");
         Set("AccentInk",dark?"#0B1220":"#FFFFFF");
@@ -1411,7 +1412,7 @@ var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的�
         var shadow=new System.Windows.Media.Effects.DropShadowEffect{BlurRadius=14,ShadowDepth=2,Opacity=dark?0.35:0.10,Color=(Color)ColorConverter.ConvertFromString(dark?"#000000":"#1F2937")};shadow.Freeze();resources["CardShadow"]=shadow;
         if(SystemParameters.HighContrast)
         {
-            foreach(var key in new[]{"Surface","Page","PreviewPage","PreviewSurface","WarningSurface","RailSurface","HeaderSurface"})resources[key]=SystemColors.WindowBrush;
+            foreach(var key in new[]{"Surface","Page","PreviewPage","PreviewSurface","WarningSurface","RailSurface","HeaderSurface","ChipSelected"})resources[key]=SystemColors.WindowBrush;
             foreach(var key in new[]{"Ink","Muted","Line","InputLine","WarningInk","ErrorInk","PreviewInk","PreviewMuted","PreviewLine","StatusOk","StatusOff","StatusBad","StatusWait"})resources[key]=SystemColors.WindowTextBrush;
             resources["Raised"]=SystemColors.ControlBrush;resources["Selected"]=SystemColors.HighlightBrush;resources["Accent"]=SystemColors.HighlightBrush;resources["AccentSoft"]=SystemColors.HighlightBrush;resources["AccentPressed"]=SystemColors.HighlightBrush;resources["AccentInk"]=SystemColors.HighlightTextBrush;resources["SelectionInk"]=SystemColors.HighlightTextBrush;
         }
