@@ -16,6 +16,8 @@ public partial class MainWindow
     private async Task RunUiChecksAsync(string folder)
     {
         var fixtureStarted=DateTimeOffset.UtcNow;
+        var fixtureClock=Stopwatch.StartNew();long previousBoundary=0;
+        var slowIntervals=new List<(string Name,long Milliseconds)>();
         System.IO.Directory.CreateDirectory(folder);var checks=new List<string>();
         // The harness owns an isolated, possibly non-existent test root. The app's preview-first startup no longer writes
         // monitor state there, so create it before the first configuration write (a missing root surfaces as a silent UI-only error).
@@ -27,10 +29,12 @@ public partial class MainWindow
         Activate();
         void Check(string name,bool value)
         {
+            var elapsed=fixtureClock.ElapsedMilliseconds;var interval=elapsed-previousBoundary;previousBoundary=elapsed;
+            if(interval>=100)slowIntervals.Add((name,interval));
             if(!value){Store.Save(System.IO.Path.Combine(folder,"ui-checks.json"),new{passed=checks,failed=name,diagnostic=new{WindowState=WindowState.ToString(),IsVisible,loading,closeRequested,OwnedWindows=OwnedWindows.Cast<Window>().Where(w=>w.IsVisible).Select(w=>w.Title).ToArray(),Error=ErrorText.Text}});throw new Exception("UI regression: "+name);}
             checks.Add(name);
             // Record every boundary so a later layout stall is attributed to the actual last completed check.
-            System.IO.File.WriteAllText(System.IO.Path.Combine(folder,"ui-progress.json"),System.Text.Json.JsonSerializer.Serialize(new{LastPassed=name,Count=checks.Count,At=DateTimeOffset.UtcNow}));
+            System.IO.File.WriteAllText(System.IO.Path.Combine(folder,"ui-progress.json"),System.Text.Json.JsonSerializer.Serialize(new{LastPassed=name,Count=checks.Count,At=DateTimeOffset.UtcNow,ElapsedMilliseconds=elapsed,SlowIntervals=slowIntervals.OrderByDescending(item=>item.Milliseconds).Take(15).Select(item=>new{item.Name,item.Milliseconds}).ToArray()}));
         }
         async Task CheckWindowPlacementRoundTripAsync()
         {

@@ -86,7 +86,7 @@ public partial class MainWindow
                 bitmap.Render(this);var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
                 using var output = System.IO.File.Create(System.IO.Path.Combine(screenshotFolder, "simple-start.png"));encoder.Save(output);
             }
-            await RunDirectStartCheckAsync(check);
+            await RunDirectStartCheckAsync(check,screenshotFolder);
         }
         finally
         {
@@ -98,7 +98,7 @@ public partial class MainWindow
         }
     }
 
-    private async Task RunDirectStartCheckAsync(Action<string, bool> check)
+    private async Task RunDirectStartCheckAsync(Action<string, bool> check,string? screenshotFolder)
     {
         var previousSample = Environment.GetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE");
         var queueBefore = JsonSerializer.Serialize(taskBook, Store.Json);
@@ -111,8 +111,10 @@ public partial class MainWindow
             config = new() { Draft = new() { Project = Store.Root, Slots = [new() { AgentId = "codex", Enabled = true, Directory = directory, Profiles = new() { ["codex"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.Tests.exe"), Arguments = ["--echo", output, "中文 with spaces"] } } }] } };
             Render();QueueSave();await saveTask;await commandCheckTask;await RefreshAsync();UpdateLaunch();
             check("ACC-U07 direct launch is ready with an explicit folder", LaunchButton.IsEnabled);
+            var launchStartedAt=DateTimeOffset.UtcNow;
             LaunchButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
             await launchTask;
+            var launchObservedAt=DateTimeOffset.UtcNow;
             ControlEntry? started = null;
             for (var i = 0; i < 100; i++)
             {
@@ -120,7 +122,11 @@ public partial class MainWindow
                 if (started is not null && Store.IsTerminal(started)) break;
                 await Task.Delay(100);
             }
-            check("ACC-U07 launch button reaches a real Terminal child and exit receipt", started is not null && Store.IsTerminal(started) && ReadStoreSettled<Receipt>(Store.ReceiptPath(started.Plan.Id)) is { Phase: "Finished", ExitCode: 0 } && System.IO.File.Exists(output));
+            var receipt=started is null?null:ReadStoreSettled<Receipt>(Store.ReceiptPath(started.Plan.Id));
+            check("ACC-U07 launch button reaches a real Terminal child and exit receipt", started is not null && Store.IsTerminal(started) && receipt is { Phase: "Finished", ExitCode: 0 } && System.IO.File.Exists(output));
+            var terminalObservationDelay=launchObservedAt-receipt!.At;
+            if(screenshotFolder is not null)Store.Save(System.IO.Path.Combine(screenshotFolder,"direct-start-timing.json"),new{Attempt=started!.Plan.Id,LaunchStartedAt=launchStartedAt,ReceiptAt=receipt.At,LaunchObservedAt=launchObservedAt,LaunchMs=(launchObservedAt-launchStartedAt).TotalMilliseconds,TerminalObservationDelayMs=Math.Max(0,terminalObservationDelay.TotalMilliseconds)});
+            check("ACC-U07 completed short command releases launch observation promptly",terminalObservationDelay<TimeSpan.FromSeconds(3));
             using var result = JsonDocument.Parse(System.IO.File.ReadAllText(output));
             check("ACC-U07 child uses the visible per-agent folder and exact arguments", PhysicalDirectory.Resolve(result.RootElement.GetProperty("Cwd").GetString()!).Key == PhysicalDirectory.Resolve(directory).Key && result.RootElement.GetProperty("Args").EnumerateArray().Select(value => value.GetString()).SequenceEqual(["中文 with spaces"]));
             check("ACC-U07 direct launch leaves old queued tasks untouched", JsonSerializer.Serialize(taskBook, Store.Json) == queueBefore);

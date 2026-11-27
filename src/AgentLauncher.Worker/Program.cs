@@ -282,7 +282,7 @@ internal static class Program
             if(sshChild is not null)startedDetail=$"已启动 SSH 远程会话（{plan.RemoteExecution!.Host}，不受本地资源限制）";
             // Fail open: an unconfirmed extension load weakens only the pre-limit, never the Job hard caps.
             handshakeWaitBegin=DateTimeOffset.UtcNow;
-            if(toolGuard is not null&&!toolGuard.WaitForHandshake(TimeSpan.FromSeconds(3)))
+            if(toolGuard is not null&&!toolGuard.WaitForHandshake(TimeSpan.FromSeconds(3),child?.Process))
                 startedDetail+="；Omp 内存保护未确认加载：工具可能不受提前限流（硬上限仍生效），请核对版本与插件加载提示";
             Write("Started",(child?.Process??sshChild!.Process).Id,(child?.CreationTime??sshChild!.CreationTime),null,startedDetail);
         }

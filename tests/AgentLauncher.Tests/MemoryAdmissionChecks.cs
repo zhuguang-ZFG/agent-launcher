@@ -148,6 +148,7 @@ internal static class MemoryAdmissionChecks
             Assert(Query(), "recovered kernel headroom did not allow a tool");
             Assert(guard.LastDecision is { Allowed: true }, "recovered tool check did not clear the denial");
         });
+        RunHandshakeChecks(test, temp);
         test("ACC-R07 guarded Omp argv remains structured and frozen in the plan digest", () =>
         {
             var args = new[] { "--resume", "session path with spaces", "--", "literal --extension" };
@@ -289,6 +290,54 @@ internal static class MemoryAdmissionChecks
             Assert(begin.Kind == AdmissionKind.Deny && !begin.Advisory && begin.Reason.Contains("加总溢出"),
                 "begin-time admission bypassed overflow denial: " + begin.Reason);
         });
+    }
+
+    public static void RunHandshakeChecks(Action<string, Action> test, string temp)
+    {
+        void WithChild(int holdMilliseconds, Action<ProtectedProcess, Job, OmpMemoryGuard> action)
+        {
+            using var root = new Job("Local\\AL-hello-root-" + Guid.NewGuid().ToString("N"), root: true);
+            using var job = new Job("Local\\AL-hello-item-" + Guid.NewGuid().ToString("N"), ResourcePolicy.GiB);
+            using var guard = new OmpMemoryGuard(job, null, 1, 1);
+            using var child = new ProtectedProcess(new(Environment.ProcessPath!, ["--hold", holdMilliseconds.ToString()], "exe"), temp, [root, job], createNoWindow: true);
+            child.Resume();
+            try { action(child, job, guard); }
+            finally { if (!child.Process.HasExited) { child.Process.Kill(); child.Process.WaitForExit(5000); } }
+        }
+        static void Hello(OmpMemoryGuard guard)
+        {
+            using var pipe = new NamedPipeClientStream(".", guard.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            using var timeout = new CancellationTokenSource(3000);
+            pipe.ConnectAsync(timeout.Token).GetAwaiter().GetResult(); pipe.WriteByte(2); pipe.Flush();
+            using var reader = new StreamReader(pipe);
+            var text = reader.ReadLineAsync(timeout.Token).AsTask().GetAwaiter().GetResult();
+            using var result = JsonDocument.Parse(text!);
+            Assert(result.RootElement.GetProperty("allowed").GetBoolean(), "load hello was not acknowledged");
+        }
+        test("ACC-R07 exited Omp child ends hello wait without inventing handshake evidence", () => WithChild(150, (child, job, guard) =>
+        {
+            var watch = Stopwatch.StartNew();
+            var confirmed = guard.WaitForHandshake(TimeSpan.FromSeconds(3), child.Process);
+            Assert(!confirmed && !guard.HandshakeConfirmed && guard.FirstHelloAt is null, "process exit was treated as a load hello");
+            Assert(child.Process.HasExited && child.Process.ExitCode == 0 && watch.Elapsed < TimeSpan.FromSeconds(2), "exited child consumed the full hello timeout: " + watch.Elapsed);
+            Assert(job.QueryMemory()!.LimitBytes == ResourcePolicy.GiB, "early wait completion changed the Job cap");
+            Hello(guard);
+            Assert(guard.HandshakeConfirmed && guard.FirstHelloAt is not null, "early wait completion stopped the guard endpoint");
+        }));
+        test("ACC-R07 live Omp child retains full hello deadline and its hard Job cap", () => WithChild(15000, (child, job, guard) =>
+        {
+            var watch = Stopwatch.StartNew();
+            Assert(!guard.WaitForHandshake(TimeSpan.FromSeconds(3), child.Process), "absent hello was accepted");
+            Assert(watch.Elapsed >= TimeSpan.FromSeconds(3) && !child.Process.HasExited && job.Members().Contains(child.Process.Id), "live child bypassed the hello deadline or was terminated");
+            Assert(!guard.HandshakeConfirmed && guard.FirstHelloAt is null && job.QueryMemory()!.LimitBytes == ResourcePolicy.GiB, "missing hello changed evidence or hard limit");
+        }));
+        test("ACC-R07 real load hello completes while the protected child stays alive", () => WithChild(15000, (child, job, guard) =>
+        {
+            var hello = Task.Run(() => Hello(guard));
+            Assert(guard.WaitForHandshake(TimeSpan.FromSeconds(3), child.Process), "real load hello did not complete the wait");
+            hello.GetAwaiter().GetResult();
+            Assert(guard.HandshakeConfirmed && guard.FirstHelloAt is not null && !child.Process.HasExited && job.QueryMemory()!.LimitBytes == ResourcePolicy.GiB, "confirmed hello changed process lifetime or hard limit");
+        }));
     }
 
     private static void Wait(Func<bool> condition, string error)

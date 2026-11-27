@@ -886,6 +886,9 @@ public partial class MainWindow : Window
             {
                 if(launchCancellation.Token.IsCancellationRequested)break;
                 await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true)){if(config.MinimizeAfterLaunch&&!config.EmbeddedTerminal)WindowState=WindowState.Minimized;break;}
+                // A short command can finish before the first poll; its verified terminal entry also completes observation.
+                // Missing entries remain unknown and keep the existing bounded wait.
+                if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&Store.IsTerminal(x))==true))break;
             }
         }
         finally{await FinishLaunchAsync();}

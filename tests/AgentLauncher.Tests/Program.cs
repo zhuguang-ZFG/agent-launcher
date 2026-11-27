@@ -4,7 +4,7 @@ using System.Text.Json;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
-if(args.Length==0||args.Length>0&&args[0] is "--repair-checks" or "--live-startup" or "--integration" or "--terminal-batch-checks" or "--parallel-batch-checks" or "--startup-queue-checks" or "--admission-integration" or "--remote-execution-integration" or "--sync-reliability-checks" or "--sync-reliability-integration" or "--workspace-sync" or "--remote-startup-e2e" or "--remote-live" or "--remote-live-memory" or "--remote-live-reattach" or "--live-memory-soak" or "--live-memory-child" or "--delivery-capability-check" or "--startup-gate" or "-w" or "--check-test-isolation")
+if(args.Length==0||args.Length>0&&args[0] is "--repair-checks" or "--live-startup" or "--integration" or "--terminal-batch-checks" or "--parallel-batch-checks" or "--startup-queue-checks" or "--admission-integration" or "--remote-execution-integration" or "--sync-reliability-checks" or "--sync-reliability-integration" or "--workspace-sync" or "--remote-startup-e2e" or "--remote-live" or "--remote-live-memory" or "--remote-live-reattach" or "--live-memory-soak" or "--live-memory-child" or "--delivery-capability-check" or "--omp-handshake-checks" or "--startup-gate" or "-w" or "--check-test-isolation")
 {
     try{AgentLauncher.Tests.TestIsolation.Require();}
     catch(Exception error)when(error is not OutOfMemoryException){Console.Error.WriteLine("REFUSED: "+error.Message);return 78;}
@@ -49,6 +49,12 @@ if(args.Length>=2&&args[0]=="--mode"&&args[1]=="rpc"&&Environment.GetEnvironment
     if(line is null)return 3;
     if(Environment.GetEnvironmentVariable("AGENT_LAUNCHER_SOAK_RPC_CAPTURE") is {Length:>0} rpcCapture)File.AppendAllText(rpcCapture,line+"\n");
     return 8;
+}
+if(args is ["--omp-handshake-checks"])
+{
+    var handshakeRoot=Path.Combine(Store.Root,"omp-handshake");Directory.CreateDirectory(handshakeRoot);var handshakeFailures=0;
+    void HandshakeTest(string name,Action action){try{action();Console.WriteLine("PASS "+name);}catch(Exception error){handshakeFailures++;Console.WriteLine("FAIL "+name+": "+error.Message);}}
+    MemoryAdmissionChecks.RunHandshakeChecks(HandshakeTest,handshakeRoot);return handshakeFailures==0?0:1;
 }
 if(args is ["--repair-checks"]) return RepairChecks.Run();
 if(args is ["--live-startup",var startupAgent]) return await LiveStartupChecks.RunAsync(startupAgent);
