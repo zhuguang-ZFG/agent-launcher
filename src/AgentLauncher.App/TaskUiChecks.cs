@@ -221,20 +221,47 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             RenderTasks();
             check("ACC-B10 a completed first run exposes explicit session registration",
                 ReviewFind<Button>(TaskList).Any(button => AutomationProperties.GetName(button) == "登记会话 队列 shim"));
+            void RecordSessionDiagnostic(string action, FormWindow? dialog = null, Button? applyButton = null)
+            {
+                TaskBook? persisted = null; string? readError = null;
+                try { persisted = taskStore.Load(); } catch (Exception e) when (e is IOException or JsonException or InvalidDataException) { readError = e.Message; }
+                var report = this.arguments is ["--ui-check", var folder] ? folder : Store.Root;
+                Store.Save(Path.Combine(report, "task-session-diagnostic.json"), new
+                {
+                    Action = action, At = DateTimeOffset.UtcNow, Title = dialog?.Title, Visible = dialog?.IsVisible,
+                    ApplyError = dialog?.ApplyError, ApplyEnabled = applyButton?.IsEnabled, Error = ErrorText.Text,
+                    QueueStatus = QueueStatusText.Text, queueEnabled, queuePumping, ExpectedParent = runs[^1].AttemptId,
+                    ReadError = readError, Queue = persisted?.Queue.Where(entry => entry.TaskId == taskId).ToArray(),
+                    Attempts = persisted?.Attempts.Where(run => run.TaskId == taskId).ToArray()
+                });
+            }
             async Task AnswerDialogAsync(string action, string value, bool apply)
             {
+                var priorDialogs = OwnedWindows.OfType<FormWindow>().ToHashSet();
                 ReviewFind<Button>(TaskList).Single(button => AutomationProperties.GetName(button) == action).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 FormWindow? dialog = null;
                 for (var i = 0; i < 100 && dialog is null; i++)
                 {
-                    dialog = OwnedWindows.OfType<FormWindow>().FirstOrDefault(window => window.IsVisible);
+                    dialog = OwnedWindows.OfType<FormWindow>().FirstOrDefault(window => window.IsVisible && !priorDialogs.Contains(window));
                     if (dialog is null) await Task.Delay(50);
                 }
+                if (dialog is null) RecordSessionDiagnostic(action);
                 check("ACC-B10 the requested session dialog opens", dialog is not null);
-                dialog!.SetValue("session",value);
-                ReviewFind<Button>(dialog!).Single(button => apply ? button.IsDefault : button.IsCancel).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                if (!apply && dialog!.IsVisible) dialog.Close();
-                await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+                var applyButton = ReviewFind<Button>(dialog!).Single(button => button.IsDefault);
+                var closed = false;
+                dialog!.Closed += (_, _) => closed = true;
+                try
+                {
+                    dialog.SetValue("session",value);
+                    ReviewFind<Button>(dialog).Single(button => apply ? button.IsDefault : button.IsCancel).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    if (!apply && dialog.IsVisible) dialog.Close();
+                    // ApplyAsync persists before closing; a dispatcher tick is not a completion boundary.
+                    for (var i = 0; i < 100 && !closed && dialog.ApplyError.Length == 0; i++) await Task.Delay(50);
+                    if (!closed || dialog.ApplyError.Length > 0) RecordSessionDiagnostic(action, dialog, applyButton);
+                    check("ACC-B10 session dialog completes before the next action", closed && dialog.ApplyError.Length == 0);
+                    await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+                }
+                finally { if (dialog.IsVisible && applyButton.IsEnabled) dialog.Close(); }
             }
             var beforeCancel = File.ReadAllText(taskStore.FilePath);
             await AnswerDialogAsync("登记会话 队列 shim", "cancelled-session", false);
@@ -256,6 +283,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
                 if (resumed?.ResumeOf == runs[1].AttemptId) break;
                 await Task.Delay(50);
             }
+            if (resumed?.ResumeOf != runs[1].AttemptId || resumed.SessionRef != session || resumed.AttemptId == runs[1].AttemptId)
+                RecordSessionDiagnostic("resume linkage");
             check("ACC-B10 resume creates a linked new attempt", resumed?.ResumeOf == runs[1].AttemptId && resumed.SessionRef == session && resumed.AttemptId != runs[1].AttemptId);
             for (var i = 0; i < 100 && ReadStoreSettled<Receipt>(Store.ReceiptPath(resumed!.AttemptId))?.Phase != "Finished"; i++) await Task.Delay(100);
             check("ACC-B10 resumed shim finishes through the real Terminal pane", ReadStoreSettled<Receipt>(Store.ReceiptPath(resumed!.AttemptId)) is { Phase: "Finished", ExitCode: 0 });

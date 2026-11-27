@@ -28,6 +28,22 @@ public partial class MainWindow
         var diskBefore = File.Exists(configPath) ? File.ReadAllBytes(configPath) : null;
         try
         {
+            var initialWindowState = WindowState; var initiallyActive = IsActive; var initiallyVisible = IsVisible;
+            var pendingAtEntry = new { Launch = !launchTask.IsCompleted, Queue = !queuePumpTask.IsCompleted, QuickQueue = !quickQueueTask.IsCompleted, Cancel = !cancelTask.IsCompleted, queuePumping, config.MinimizeAfterLaunch };
+            // RaiseEvent bypasses the native visibility/activation prerequisites of a real rail click.
+            // Establish them before exercising navigation; never repair focus after the click under test.
+            Show(); WindowState = WindowState.Normal; Activate();
+            var activation = System.Diagnostics.Stopwatch.StartNew();
+            var readyForClick = false;
+            while (activation.Elapsed < TimeSpan.FromSeconds(2))
+            {
+                await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
+                readyForClick = IsVisible && IsActive && WindowState == WindowState.Normal && windowHandle != IntPtr.Zero && !WindowPlacementNative.IsIconic(windowHandle);
+                if (readyForClick) break;
+                await Task.Delay(25);
+            }
+            Store.Save(Path.Combine(folder, "quick-actions-entry.json"), new { InitialWindowState = initialWindowState, InitiallyActive = initiallyActive, InitiallyVisible = initiallyVisible, Pending = pendingAtEntry, ReadyForClick = readyForClick, WindowState, IsActive, IsVisible, WaitMs = activation.ElapsedMilliseconds });
+            check("UX10 navigation fixture establishes a visible active window before clicks", readyForClick);
             config = new Configuration(); config.Draft.Project = Store.Root;
             config.Draft.Slots = [new() { AgentId = "omp", Enabled = true }, new() { AgentId = "codex", Enabled = false }];
             config.Draft.Slots[0].Profiles["omp"] = new() { Arguments = ["SECRET-QUICK-ACTION-ARG"] };

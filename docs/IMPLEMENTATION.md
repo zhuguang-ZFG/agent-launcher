@@ -1629,3 +1629,10 @@ powershell -NoProfile -File scripts/test.ps1
 - 测试清理复验：同步套件改为持有自己创建的监控进程句柄，启动/清理均要求同一隔离根、文件路径与启动时间；通过 `using/finally` 在成功或失败时清理自身进程，保留证据文件。带输出管道的专项复跑 **12/0、退出 0、11.71 秒**；注入首次握手断开时按预期 **1 项失败、退出 1、9.58 秒**，两条路径都确认监控退出且正常返回管道 EOF。证据 `artifacts/remote-fixes-20261127/sync-cleanup-piped.log`、`sync-cleanup-result.json` 及 `sync-cleanup-failure-*`。该变更仅影响测试，未改生产 App/Worker。
 - UI 测试清理：部分夹具在 custody 的下一次 Reap 前恢复旧 ledger，已结束 Git 尝试的身份记录因此从夹具账本移除；生产保管器按保守策略保留未知空 Job 句柄。新增仅集成构建的 teardown，核对本轮隔离根、boot/PID/程序路径/创建时间，证明 scope 根 Job 已空后停止精确保管进程。专项完整 WPF **534/0、退出 0、83.87 秒**，仍满足 90 秒门限，`ui-fixture-cleanup.json` 为 `Passed=true / stopped-after-empty-root`；见 `artifacts/usability-fixes-20261127/ui-cleanup-final/`。不修改生产 retain-unknown 行为。
 - 清理边界补验：最后补齐根 Job 已自然消失时的清理路径，无额外等待。直接编译同一 `UiFixtureCleanup.cs`，使用真实 Worker custody 和受管 `Tests --hold` 子进程，**3/3** 验证根不存在即时退出、根非空拒绝并保留 custody、子进程自然退出后清理空根；证据 `artifacts/ui-fixture-cleanup-probe/targeted-results.json`。此后只重编 App 和执行定向清理检查，未重复完整 WPF/门禁；生产代码与已交付包不受影响。
+
+## 104. PR #13 的 CI 测试时序修复（2026-11-28，Asia/Shanghai）
+
+- CI run `46025890188` 在原生和集成阶段通过后，WPF 的 `ACC-B10 resume creates a linked new attempt` 失败；续接表单仍可见，之后触发 30 秒无进度超时。原诊断没有表单内错误及队列快照，不能据此断定具体保存失败原因。检查发现测试在点击异步应用后只等待一次 Dispatcher 调度，并可能选中上一个仍可见的表单。
+- 测试修复：只选择本次新建的表单，按原 100 × 50 ms 界限等待关闭或表单错误，再继续后续操作；原关联尝试及真实 Terminal 断言保留。失败时写出 `task-session-diagnostic.json`，包含表单错误、保存按钮状态、队列及尝试身份，已结束保存的错误表单会关闭。
+- 本机首次复验通过会话检查，随后在 UX10 精确焦点断言失败；诊断为窗口最小化。相同运行时第二次完整复跑 **538/0、退出 0、72.81 秒**，不能据此证明最小化的来源。快捷导航夹具现于点击前建立窗口可见、激活、非最小化的前提，记录进入状态及待完成任务；点击后不修正焦点，原精确焦点断言不变。
+- 最终集成构建零警告、零错误；完整 WPF **539/0、退出 0、68.72 秒**，清理 `Passed=true / stopped-after-empty-root`。证据 `artifacts/commit-20261127/ui-ci-final/`；前两次结果保留在 `ui-session-fix/`、`ui-session-repeat/`。本次只改测试夹具和诊断，未改生产逻辑、30 秒无进度限制或 90 秒总时限；远端全门禁以本次提交后的 CI 结果为准。
