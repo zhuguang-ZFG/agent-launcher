@@ -71,10 +71,20 @@ public partial class MainWindow
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
             var focusedElement = Keyboard.FocusedElement as FrameworkElement;
             var sessionRecord = ActiveSessions.Children.OfType<FrameworkElement>().FirstOrDefault(item => Equals(item.Tag, attemptId));
-            var moreHeaders = ((FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "更多") && b.IsVisible).ContextMenu as ContextMenu)?.Items.OfType<MenuItem>().Select(item => item.Header as string).ToArray()) ?? [];
-            var sessionOpened = sessionRecord != null && (ActiveNow.Visibility == Visibility.Visible || SessionExpander.IsExpanded) && moreHeaders.Contains("运行历史与导出");
-            Store.Save(Path.Combine(folder, "quick-session-focus.json"), new { IsActive, IsVisible, WindowState, Expanded = SessionExpander.IsExpanded, ActiveNow = ActiveNow.Visibility, ExpectedId = attemptId, FocusedType = focusedElement?.GetType().Name, FocusedName = focusedElement?.Name, FocusedId = focusedElement?.Tag is Guid tag ? (Guid?)tag : null, FocusedLoaded = focusedElement?.IsLoaded, FocusedVisible = focusedElement?.IsVisible, LogicalFocusType = FocusManager.GetFocusedElement(this)?.GetType().Name, RecordPresent = sessionRecord != null, MoreHistory = moreHeaders.Contains("运行历史与导出") });
+            var moreButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "更多") && b.IsVisible);
+            var moreHeaders = ((moreButton.ContextMenu as ContextMenu)?.Items.OfType<MenuItem>().Select(item => item.Header as string).ToArray()) ?? [];
+            moreButton.ContextMenu!.Items.OfType<MenuItem>().Single(item => item.Header as string == "运行历史与导出").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Window? historyWindow=null;
+            for(var i=0;i<50 && historyWindow is null;i++)
+            {
+                await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
+                historyWindow=OwnedWindows.OfType<Window>().FirstOrDefault(window=>window.Title=="任务历史与诊断");
+                if(historyWindow is null) await Task.Delay(50);
+            }
+            var sessionOpened = sessionRecord != null && historyWindow is { IsVisible: true } && moreHeaders.Contains("运行历史与导出");
+            Store.Save(Path.Combine(folder, "quick-session-focus.json"), new { IsActive, IsVisible, WindowState, HistoryTitle = historyWindow?.Title, HistoryVisible = historyWindow?.IsVisible, ExpectedId = attemptId, RecordPresent = sessionRecord != null });
             if (!sessionOpened) CaptureQuickActions(this, Path.Combine(folder, "quick-session-focus-failure.png"));
+            historyWindow?.Close();
             check("UX10 rail session opens and focuses the exact record", sessionOpened);
             check("UX10 session navigation reveals the record without closing the terminal", EmbeddedPanel.Visibility == Visibility.Collapsed && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);
             CaptureQuickActions(this, Path.Combine(folder, "quick-session-navigation.png"));
@@ -84,7 +94,7 @@ public partial class MainWindow
             EmbeddedTabs.SelectedItem = null; EmbeddedTabs.SelectedItem = terminalTab;
             queueButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
-            check("UX10 rail queue navigation never dispatches or edits the queue", TaskExpander.IsExpanded && QueueList.Children.OfType<FrameworkElement>().Any(item => Equals(item.Tag, queueId)) && !queueEnabled && taskBook.Queue.Count == 1 && config.Draft.Revision == revision);
+            check("UX10 rail queue navigation never dispatches or edits the queue", QueueList.Children.OfType<FrameworkElement>().Any(item => Equals(item.Tag, queueId)) && !queueEnabled && taskBook.Queue.Count == 1 && config.Draft.Revision == revision);
             check("UX10 queue navigation reveals the record without closing the terminal", EmbeddedPanel.Visibility == Visibility.Collapsed && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);
             ShowEmbeddedClick(this, new());
             NavigateToSlot(config.Draft.Slots[1].Id);
@@ -144,7 +154,7 @@ public partial class MainWindow
                 config.TextScalePercent = scale; ApplyTheme(); Render();
                 await resize(650, 700);
                 var choosePoint = ChooseProjectButton.TranslatePoint(new Point(), this);
-                var moreButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "更多") && b.IsVisible);
+                moreButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "更多") && b.IsVisible);
                 var morePoint = moreButton.TranslatePoint(new Point(), this);
                 var settingsButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "设置") && b.IsVisible);
                 var settingsPoint = settingsButton.TranslatePoint(new Point(), this);

@@ -10,6 +10,7 @@ public partial class MainWindow
 {
     private MainWindowMode windowMode = MainWindowMode.StartPage;
     private readonly Dictionary<Guid, (bool Ready, string Reason)> chipStatus = [];
+    private bool capDeniedSticky;
 
     private void ApplyWindowMode()
     {
@@ -78,9 +79,15 @@ public partial class MainWindow
                     HorizontalContentAlignment = HorizontalAlignment.Left,
                     VerticalContentAlignment = VerticalAlignment.Top,
                     IsChecked = slot.Enabled,
-                    IsEnabled = ready && !readOnly && !busy && !loading && !closeRequested
+                    IsEnabled = (slot.Enabled || ready) && !readOnly && !busy && !loading && !closeRequested
                 };
                 AutomationProperties.SetName(chip, slot.DisplayName);
+                var menu = new ContextMenu();
+                var edit = new MenuItem { Header = "编辑此项" };
+                var slotId = slot.Id;
+                edit.Click += (_, _) => EditSlot(slotId);
+                menu.Items.Add(edit);
+                chip.ContextMenu = menu;
                 var body = new StackPanel();
                 body.Children.Add(new TextBlock { Text = slot.DisplayName, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis });
                 body.Children.Add(new TextBlock { Text = place, Margin = new Thickness(0, 4, 0, 0), Style = (Style)FindResource("Caption") });
@@ -104,10 +111,9 @@ public partial class MainWindow
         if (slot is null) return false;
         if (enable)
         {
-            var already = config.Draft.Slots.Count(item => item.Enabled && item.Id != id && IsSlotReady(item));
-            if (!StartPageSurface.CanSelect(already, IsSlotReady(slot)))
+            if (!IsSlotReady(slot) || !StartPageSurface.CanSelect(config.Draft.Slots.Count(item => item.Enabled && item.Id != id && IsSlotReady(item)), IsSlotReady(slot)))
             {
-                LaunchHint.Text = StartPageSurface.CapDenied;
+                if (IsSlotReady(slot)) capDeniedSticky = true;
                 if (chip is not null && chip.IsChecked != false)
                 {
                     var previous = rendering;
@@ -115,17 +121,18 @@ public partial class MainWindow
                     chip.IsChecked = false;
                     rendering = previous;
                 }
+                UpdateLaunch();
                 return false;
             }
         }
+        capDeniedSticky = false;
         return Edit(draft => draft.Slots.Single(item => item.Id == id).Enabled = enable);
     }
 
 #if INTEGRATION_TESTS
     private void TrySelectOverCapReadyAgent()
     {
-        var candidate = config.Draft.Slots.FirstOrDefault(slot => !slot.Enabled && IsSlotReady(slot))
-            ?? config.Draft.Slots.FirstOrDefault(slot => !slot.Enabled);
+        var candidate = config.Draft.Slots.FirstOrDefault(slot => !slot.Enabled && IsSlotReady(slot));
         if (candidate is null) return;
         var chip = FindLogical(AgentChipPanel).OfType<ToggleButton>().FirstOrDefault(button => button.Tag is Guid id && id == candidate.Id);
         if (chip is null) return;

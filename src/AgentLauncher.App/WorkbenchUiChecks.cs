@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Threading;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
@@ -17,11 +18,13 @@ public partial class MainWindow
         var previous = config;
         var previousStatus = status;
         var previousReadOnly = readOnly;
+        var previousError = ErrorText.Text;
         var previousTimer = timer.IsEnabled;
         timer.Stop();
         try
         {
             windowMode = MainWindowMode.StartPage;
+            capDeniedSticky = false;
             config = new()
             {
                 Theme = "dark",
@@ -45,26 +48,51 @@ public partial class MainWindow
             await commandCheckTask;
             UpdateLaunch();
             check("start page hides rail preview and extra launch actions",
-                StartPagePanel.Visibility == Visibility.Visible
-                && Rail.Visibility == Visibility.Collapsed
-                && PreviewCard.Visibility == Visibility.Collapsed
-                && RefreshLaunchButton.Visibility == Visibility.Collapsed
-                && (LaunchOptionsExpander.Visibility == Visibility.Collapsed || !LaunchOptionsExpander.IsVisible));
+                StartPagePanel.IsVisible
+                && !Rail.IsVisible
+                && !PreviewCard.IsVisible
+                && !RefreshLaunchButton.IsVisible
+                && !LaunchOptionsExpander.IsVisible);
             check("start page has a single launch button with the approved label",
                 LaunchButton.IsVisible
                 && Equals(LaunchButton.Content, StartPageSurface.LaunchButtonText(CountReadySelected(), false))
                 && !LaunchHint.Text.Contains("预览不是")
                 && !LaunchHint.Text.Contains("启动授权"));
-            check("agent chips live on the start page", AgentChipPanel.IsVisible && ReviewFind<ToggleButton>(AgentChipPanel).Any());
+            check("agent chips live on the start page", AgentChipPanel.IsVisible && ReviewFind<ToggleButton>(AgentChipPanel).Count() == 7);
 
-            var selected = CountReadySelected();
+            var readyCount = config.Draft.Slots.Count(IsSlotReady);
+            check("seven ready chips are available before the cap click", readyCount == 7 && CountReadySelected() == WorkbenchLayout.MaxPanes);
             TrySelectOverCapReadyAgent();
             check("seventh ready agent stays unselected and explains the cap",
-                CountReadySelected() == Math.Min(selected, WorkbenchLayout.MaxPanes)
-                && (CountReadySelected() < WorkbenchLayout.MaxPanes || LaunchHint.Text.Contains(StartPageSurface.CapDenied)));
+                CountReadySelected() == WorkbenchLayout.MaxPanes
+                && !config.Draft.Slots[6].Enabled
+                && LaunchHint.Text.Contains(StartPageSurface.CapDenied));
+            UpdateLaunch();
+            check("cap denial stays visible after a later refresh",
+                CountReadySelected() == WorkbenchLayout.MaxPanes
+                && LaunchHint.Text.Contains(StartPageSurface.CapDenied));
+
+            var selectedUnready = config.Draft.Slots.First(slot => slot.Enabled);
+            chipStatus[selectedUnready.Id] = (false, "命令不可用");
+            RenderAgentChips();
+            var unreadyChip = ReviewFind<ToggleButton>(AgentChipPanel).Single(button => Equals(button.Tag, selectedUnready.Id));
+            check("already-selected unready chip can still be turned off", unreadyChip.IsEnabled && unreadyChip.IsChecked == true);
+            unreadyChip.IsChecked = false;
+            check("already-selected unready chip unchecks", !config.Draft.Slots.Single(slot => slot.Id == selectedUnready.Id).Enabled && unreadyChip.IsChecked == false);
+
+            await GuardAsync(() => throw new System.IO.IOException("启动失败：没有启动任何 Agent"));
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("start-page launch failure is visible",
+                StartPagePanel.IsVisible
+                && ErrorBanner.IsVisible
+                && ErrorText.IsVisible
+                && ErrorText.Text.Contains("启动失败")
+                && LaunchHint.Text.Contains("启动失败"));
         }
         finally
         {
+            ErrorText.Text = previousError;
+            capDeniedSticky = false;
             config = previous;
             status = previousStatus;
             readOnly = previousReadOnly;

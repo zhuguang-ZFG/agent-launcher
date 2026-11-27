@@ -1,6 +1,8 @@
 #if INTEGRATION_TESTS
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
@@ -21,7 +23,7 @@ public partial class MainWindow
             status = new(true, "simple-ui", [], sample);readOnly = false;Render();
             await commandCheckTask;
             check("ACC-U04 advanced configuration starts collapsed", (LaunchOptionsExpander.Visibility == Visibility.Collapsed || !LaunchOptionsExpander.IsVisible) && (ConfigurationToolsExpander.Visibility == Visibility.Collapsed || !ConfigurationToolsExpander.IsVisible) && (SessionExpander.Visibility == Visibility.Collapsed || !SessionExpander.IsVisible));
-            var more = ReviewFind<System.Windows.Controls.Button>(this).First(button => Equals(button.Content, "更多"));
+            var more = ReviewFind<Button>(this).First(button => Equals(button.Content, "更多") && button.IsVisible);
             var moreHeaders = (more.ContextMenu as System.Windows.Controls.ContextMenu)!.Items.OfType<System.Windows.Controls.MenuItem>().Select(item => item.Header as string).ToArray();
             check("ACC-U04 low Omp and Qoder budgets have a direct repair action", moreHeaders.Contains("长任务资源") && LongTaskButton.IsEnabled);
             var oldResource = config.Draft.Resource;var oldRevision = config.Draft.Revision;
@@ -36,13 +38,39 @@ public partial class MainWindow
             firstSlot.RequiresDirectory = true;
             check("F04 direct folder selection preserves other agents and the default project", SetSlotDirectory(firstSlot.Id, Store.Root) && !config.Draft.Slots[0].RequiresDirectory && config.Draft.Project == projectBefore && JsonSerializer.Serialize(config.Draft.Slots[1], Store.Json) == secondBefore);
             await saveTask;await commandCheckTask;
-            check("F04 direct folder is saved and visible without probing CLI presets", Store.Read<Configuration>(configPath)!.Draft.Slots[0].Directory == Store.Root && ProjectGuide.Text.Contains("各自") && moreHeaders.Contains("工作目录"));
+            var workspacesOpened=false;var workspacesVisible=false;
+            var workspacesTimer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(50)};
+            workspacesTimer.Tick+=(_,_)=>
+            {
+                var window=OwnedWindows.OfType<Window>().FirstOrDefault(item=>item.Title=="独立工作目录与人工整合");
+                if(window is null)return;
+                workspacesTimer.Stop();workspacesOpened=true;workspacesVisible=window.IsVisible;window.Close();
+            };
+            workspacesTimer.Start();
+            more.ContextMenu!.Items.OfType<MenuItem>().Single(item=>item.Header as string=="工作目录").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            for(var i=0;i<80&&workspacesTimer.IsEnabled;i++)await Dispatcher.InvokeAsync(()=>{},DispatcherPriority.ApplicationIdle);
+            workspacesTimer.Stop();
+            check("F04 direct folder is saved and visible without probing CLI presets", Store.Read<Configuration>(configPath)!.Draft.Slots[0].Directory == Store.Root && workspacesOpened && workspacesVisible);
             readOnly = true;
             check("F04 direct folder action respects read-only configuration", !SetSlotDirectory(firstSlot.Id, "") && config.Draft.Slots[0].Directory == Store.Root);
             readOnly = false;
             check("F04 explicit inherit action clears the per-agent folder", SetSlotDirectory(firstSlot.Id, "") && config.Draft.Slots[0].Directory == "");
             await saveTask;await commandCheckTask;
-            check("ACC-U04 advanced controls remain reachable", moreHeaders.Contains("工作目录") && moreHeaders.Contains("资源设置") && moreHeaders.Contains("远程主机（VPS）") && moreHeaders.Contains("恢复与诊断") && moreHeaders.Contains("运行历史与导出") && moreHeaders.Contains("恢复备份") && ReviewFind<System.Windows.Controls.Button>(this).Any(button => Equals(button.Content, "设置")));
+            Window? OpenNamed(string title, Action open)
+            {
+                Window? seen=null;
+                Dispatcher.BeginInvoke(new Action(()=>
+                {
+                    seen=OwnedWindows.OfType<Window>().FirstOrDefault(window=>window.Title==title);
+                    seen?.Close();
+                }),DispatcherPriority.ApplicationIdle);
+                open();
+                return seen;
+            }
+            var templatesWindow=OpenNamed("管理组合",()=>more.ContextMenu!.Items.OfType<MenuItem>().Single(item=>item.Header as string=="管理组合").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)));
+            var remotesWindow=OpenNamed("管理远程主机（VPS）",()=>more.ContextMenu!.Items.OfType<MenuItem>().Single(item=>item.Header as string=="远程主机（VPS）").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)));
+            var settingsWindow=OpenNamed("设置",()=>ReviewFind<Button>(this).First(button=>Equals(button.Content,"设置")&&button.IsVisible).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+            check("ACC-U04 advanced controls remain reachable", moreHeaders.Contains("工作目录") && moreHeaders.Contains("资源设置") && moreHeaders.Contains("远程主机（VPS）") && moreHeaders.Contains("恢复与诊断") && moreHeaders.Contains("运行历史与导出") && moreHeaders.Contains("恢复备份") && moreHeaders.Contains("目录方式") && moreHeaders.Contains("管理组合") && workspacesOpened && templatesWindow is { } && remotesWindow is { } && settingsWindow is { });
             var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("qoder.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "qoder");
             var entry = new ControlEntry { Plan = plan, State = "Started", Detail = "已启动进程；" + ToolRecovery.BlockedMarker + "整机余量不足" };
             status = new(true, "guard-ui", [entry], sample);RenderSessionsNow();

@@ -53,7 +53,37 @@ public partial class MainWindow
         LongTaskButton.IsEnabled = !busy && !readOnly && !loading && !closeRequested && !launchFinalizing && launchCancellation is null;
         LongTaskText.Text = $"Omp 当前上限 {config.Draft.Resource.JobMemoryLimit / (double)ResourcePolicy.GiB:0.#} GiB，触顶可能中断。扩容可增加余量，仍需限制并发。";
         var toolProfile = config.Draft.Resource.JobMemoryLimit >= LongTaskResources.MemoryLimit;
-        LaunchOptionsExpander.Header = toolProfile ? $"启动选项 · 上限 {config.Draft.Resource.JobMemoryLimit / (double)ResourcePolicy.GiB:0.#} GiB" : "启动选项 · 目录与分屏";
+        if (windowMode != MainWindowMode.StartPage)
+            LaunchOptionsExpander.Header = toolProfile ? $"启动选项 · 上限 {config.Draft.Resource.JobMemoryLimit / (double)ResourcePolicy.GiB:0.#} GiB" : "启动选项 · 目录与分屏";
+    }
+
+    private void DirectoryModeClick(object sender, RoutedEventArgs e)
+    {
+        if (busy || readOnly || loading || closeRequested) return;
+        var dialog = CreateDirectoryModeDialog();
+        if (dialog.ShowDialog() == true && dialog.Values.TryGetValue("mode", out var mode) && !string.IsNullOrWhiteSpace(mode))
+            Edit(draft => draft.DirectoryMode = mode);
+    }
+
+    private FormWindow CreateDirectoryModeDialog()
+    {
+        var mode = string.IsNullOrWhiteSpace(config.Draft.DirectoryMode) ? "isolated" : config.Draft.DirectoryMode;
+        var note = DirectoryModeHelp();
+        if (mode == "shared") note += "\n\n" + LaunchSurface.SharedDirectoryRisk;
+        return new FormWindow(this, "目录方式",
+            [("mode", "同项目目录策略", mode, false)],
+            note,
+            choices: new() { ["mode"] = [("isolated", "各自独立（互不影响）"), ("prepared", "用已准备好的目录"), ("shared", "共用同一个文件夹")] });
+    }
+
+    private void ManageTemplatesClick(object sender, RoutedEventArgs e) => ManageTemplates(this);
+
+    private async void EditSelectedClick(object sender, RoutedEventArgs e)
+    {
+        var slot = config.Draft.Slots.FirstOrDefault(item => item.Id == selectedSlotId)
+            ?? config.Draft.Slots.FirstOrDefault(item => item.Enabled)
+            ?? config.Draft.Slots.FirstOrDefault();
+        if (slot is not null) await GuardAsync(() => EditSlotAsync(slot.Id));
     }
 
     private async void LongTaskClick(object sender, RoutedEventArgs e) => await GuardAsync(ApplyLongTaskResourcesAsync);

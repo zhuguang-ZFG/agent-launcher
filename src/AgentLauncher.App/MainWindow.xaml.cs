@@ -86,6 +86,7 @@ public partial class MainWindow : Window
     private async Task GuardAsync(Func<Task> action)
     {
         try{await action();}catch(OperationCanceledException){ErrorText.Text="已停止后续步骤。已创建的目录和已运行任务保留。";}catch(Exception e)when(e is not OutOfMemoryException){ErrorText.Text=e.Message;}
+        UpdateLaunch();
     }
     private async Task LoadAsync()
     {
@@ -599,6 +600,8 @@ public partial class MainWindow : Window
             parts.Add(StartPageSurface.SelectionLine(count));
             if(commandsChecking&&status?.Memory is null)parts.Add(StartPageSurface.CheckingCapacity);
             else parts.Add(StartPageSurface.CapacityLine(RemainingCapacity(count)));
+            if(ErrorText.Text.Length>0)parts.Insert(0,ErrorText.Text);
+            if(capDeniedSticky)parts.Add(StartPageSurface.CapDenied);
             if(pendingProject)parts.Add("项目路径输入尚未应用；请按 Enter 或移开焦点完成校验");
             if(readOnly)parts.Add("当前配置只读，已禁止启动与保存");
             else if(admissionBlocked)parts.Add(admissionBlockedReason!);
@@ -610,7 +613,7 @@ public partial class MainWindow : Window
             else if(admission is {Launchable:false})parts.Add(admission.Reason);
             else if(admission is {Advisory:true})parts.Add(admission.Reason);
             LaunchHint.Text=string.Join(" · ",parts.Where(part=>part.Length>0&&!part.Contains("预览不是")&&!part.Contains("启动授权")));
-            LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,LaunchButton.IsEnabled?"Ink":"Muted");
+            LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,ErrorText.Text.Length>0||capDeniedSticky?"WarningInk":LaunchButton.IsEnabled?"Ink":"Muted");
         }
         else
         {

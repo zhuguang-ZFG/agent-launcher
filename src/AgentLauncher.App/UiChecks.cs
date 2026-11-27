@@ -170,8 +170,8 @@ public partial class MainWindow
         finally{TestConfirm=null;}
         System.IO.File.Delete(configPath+".bak");ErrorText.Text="";
         config=new Configuration();Render();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
-        Check("empty state shows guidance not error",ErrorBanner.Visibility==Visibility.Collapsed&&LaunchHint.Text.Contains("项目")&&!LaunchButton.IsEnabled);
-        ErrorText.Text="模拟错误";await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);Check("error state shows banner",ErrorBanner.Visibility==Visibility.Visible);ErrorText.Text="";
+        Check("empty state shows guidance not error",!ErrorBanner.IsVisible&&LaunchHint.Text.Contains("项目")&&!LaunchButton.IsEnabled);
+        ErrorText.Text="模拟错误";UpdateLaunch();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);Check("error state shows banner",StartPagePanel.IsVisible&&ErrorBanner.IsVisible&&ErrorText.IsVisible&&LaunchHint.Text.Contains("模拟错误"));ErrorText.Text="";UpdateLaunch();
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
         var exe=System.IO.Path.Combine(AppContext.BaseDirectory,"AgentLauncher.App.exe");
         foreach(var slot in config.Draft.Slots)slot.Profiles[slot.AgentId]=new(){Executable=exe};
@@ -211,9 +211,17 @@ public partial class MainWindow
         Check("UX14 picking cloud place binds host and derives remote dir",boundSlot.RemoteHostId==cloudHost.Id&&boundSlot.AgentId=="omp"&&RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(boundSlot.RemoteDirectory??"")&&boundSlot.RemoteDirectory!.StartsWith("~/work/"));
         PlaceCombo().SelectedValue="local";
         Check("UX14 picking local place unbinds host",config.Draft.Slots[1].RemoteHostId==null&&config.Draft.Slots[1].RemoteDirectory==null);
-        Check("UX15 shared directory risk stays outside the collapsed options",SharedDirectoryRisk.Visibility==Visibility.Collapsed&&!LaunchOptionsExpander.IsExpanded);
+        Check("UX15 shared directory risk stays outside the collapsed options",!SharedDirectoryRisk.IsVisible&&!LaunchOptionsExpander.IsVisible);
         Edit(d=>d.DirectoryMode="shared");
-        Check("UX15 shared directory risk is visible while options stay collapsed",SharedDirectoryRisk.Visibility==Visibility.Visible&&SharedDirectoryRiskText.Text.Contains("互相覆盖")&&!LaunchOptionsExpander.IsExpanded);
+        Window? directoryDialog=null;var sharedRiskVisible=false;
+        _=Dispatcher.BeginInvoke(new Action(()=>
+        {
+            directoryDialog=OwnedWindows.OfType<Window>().FirstOrDefault(window=>window.Title=="目录方式");
+            sharedRiskVisible=directoryDialog is {IsVisible:true}&&FindLogical<TextBlock>(directoryDialog).Any(block=>block.IsVisible&&block.Text.Contains("互相覆盖"));
+            directoryDialog?.Close();
+        }),DispatcherPriority.ApplicationIdle);
+        DirectoryModeClick(this,new RoutedEventArgs());
+        Check("UX15 shared directory risk is visible while options stay collapsed",directoryDialog is { }&&sharedRiskVisible&&!LaunchOptionsExpander.IsVisible);
         Edit(d=>d.DirectoryMode="isolated");
         var otherHost=new RemoteHost(Guid.NewGuid(),"另一云","other.example.com",22,"root","agent",["omp"],null,WorkspaceSyncMode.None);
         config.RemoteHosts=[cloudHost,otherHost];
