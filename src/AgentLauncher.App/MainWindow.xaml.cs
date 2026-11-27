@@ -167,11 +167,11 @@ public partial class MainWindow : Window
     {
         if(rendering||loading||busy||closeRequested)return false;
         if(readOnly){Render();return false;}
-        var focusName=Keyboard.FocusedElement is DependencyObject focused&&(Within(focused,SlotList)||Within(focused,RailSlots))?AutomationProperties.GetName(focused):null;
+        var focusName=Keyboard.FocusedElement is DependencyObject focused&&(Within(focused,SlotList)||Within(focused,RailSlots)||Within(focused,AgentChipPanel))?AutomationProperties.GetName(focused):null;
         var before=config.Draft;config.Edit(change);TrackMultipaneSlotEdits(before,config.Draft);validationError="";ErrorText.Text="";QueueSave();
         // Keeps the rail selection on the edited slot: Render falls back to the first item only for a wholesale draft replacement (template/backup/reload).
         draftEditedByApp=true;Render();
-        if(focusName is {Length:>0}&&FindLogical(SlotList).Concat(FindLogical(RailSlots)).FirstOrDefault(el=>AutomationProperties.GetName(el)==focusName) is IInputElement target)Keyboard.Focus(target);
+        if(focusName is {Length:>0}&&FindLogical(SlotList).Concat(FindLogical(RailSlots)).Concat(FindLogical(AgentChipPanel)).FirstOrDefault(el=>AutomationProperties.GetName(el)==focusName) is IInputElement target)Keyboard.Focus(target);
         return true;
     }
     private static bool Within(DependencyObject? node,DependencyObject root){while(node!=null){if(node==root)return true;node=LogicalTreeHelper.GetParent(node)??(node is Visual v?VisualTreeHelper.GetParent(v):null);}return false;}
@@ -255,7 +255,8 @@ public partial class MainWindow : Window
             ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用下方各自的工作目录；修改此处不会改变它们。":noProject?"从上方选择项目，或把文件夹拖进窗口；本机 CLI 可点「补齐本机 Agent」。":"未单独指定目录的 Agent 使用此项目";
             ProjectGuide.Visibility=Visibility.Visible;
             RenderRecentProjects();
-            Recent.Visibility=Visibility.Collapsed;ProjectPath.Visibility=Visibility.Collapsed;ChooseProjectButton.Visibility=Visibility.Collapsed;
+            Recent.Visibility=Visibility.Collapsed;ProjectPath.Visibility=Visibility.Collapsed;
+            ApplyWindowMode();
             DirectoryMode.SelectedIndex=config.Draft.DirectoryMode switch{"prepared"=>1,"shared"=>2,_=>0};Layout.SelectedIndex=config.Draft.Layout=="horizontal"?1:0;
             DirectoryHelp.Text=DirectoryModeHelp();
             SharedDirectoryRiskText.Text=LaunchSurface.SharedDirectoryRisk;
@@ -281,8 +282,9 @@ public partial class MainWindow : Window
             for(var i=0;i<slots.Count;i++)AddRailSlot(slots[i],i+1);
             AddButton.IsEnabled=CanAddSlot;InstalledAgentsButton.IsEnabled=CanEditSlots;
             var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
-            RenderLaunchPreview(active);Layout.IsEnabled=!config.EmbeddedTerminal&&active.Length==2;
-            ArrangePanels();
+            RenderMultipanePreview(active);Layout.IsEnabled=active.Length==2;
+            PaneCount.Text=$"{active.Length} 个窗格";ArrangePanels();
+            RenderAgentChips();
             UpdateLaunch();
             RenderRail();
         }
@@ -311,6 +313,11 @@ public partial class MainWindow : Window
     }
     private void ArrangePanels()
     {
+        if(windowMode==MainWindowMode.StartPage)
+        {
+            ApplyWindowMode();
+            return;
+        }
         var logicalWidth=ActualWidth/UiScale.Value;var compact=logicalWidth<650;var narrow=logicalWidth<900;
         // Below 900 logical pixels the rail keeps the launch checkbox and a separate numbered navigation target.
         Rail.Width=narrow?72:232;
@@ -522,20 +529,29 @@ public partial class MainWindow : Window
             // Deterministic in-flight edit fixture; no pause exists in the production build.
             if(commandCheckPause is {} pause){commandCheckPause=null;await pause;}
 #endif
-            foreach(var slot in draft.Slots.Where(s=>s.Enabled))
+            foreach(var slot in draft.Slots)
             {
                 var position=draft.Slots.IndexOf(slot)+1;
-                string detail;string? resolvedPath=null;
+                string detail;string? resolvedPath=null;var ready=true;
                 try{resolvedPath=await ResolveCommandLabelAsync(slot);detail="程序与目录就绪";}
-                catch(Exception e)when(e is not OutOfMemoryException){detail=e.Message;errors.Add($"第 {position} 项：{detail}");}
+                catch(Exception e)when(e is not OutOfMemoryException)
+                {
+                    detail=e.Message;ready=false;
+                    if(slot.Enabled)errors.Add($"第 {position} 项：{detail}");
+                }
                 var directory=string.IsNullOrWhiteSpace(slot.Directory)?draft.Project:slot.Directory;
-                if(string.IsNullOrWhiteSpace(directory))detail+=" · 未设置工作目录";
+                if(string.IsNullOrWhiteSpace(directory)){detail+=" · 未设置工作目录";ready=false;}
                 else
                 {
                     try{await Task.Run(()=>PhysicalDirectory.Resolve(directory));}
-                    catch(Exception e)when(e is not OutOfMemoryException){detail+=" · 目录不可用";errors.Add($"第 {position} 项目录不可用：{e.Message}");}
+                    catch(Exception e)when(e is not OutOfMemoryException)
+                    {
+                        detail+=" · 目录不可用";ready=false;
+                        if(slot.Enabled)errors.Add($"第 {position} 项目录不可用：{e.Message}");
+                    }
                 }
                 labels[slot.Id]=(detail,(resolvedPath??detail)+"\n"+SlotCostText(slot));
+                chipStatus[slot.Id]=(ready,detail);
             }
             if(draft.Revision!=config.Draft.Revision){pendingCommandCheck=config.Draft.Copy();continue;}
             if(!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal)){commandsChecking=false;validationError="项目路径输入尚未应用；请按 Enter 或移开焦点完成校验。";UpdateLaunch();break;}
@@ -546,7 +562,7 @@ public partial class MainWindow : Window
                 if(railLabels.TryGetValue(id,out var railText)){railText.Text=label.Text;railText.ToolTip=label.Tooltip;}
                 if(railDots.TryGetValue(id,out var dot))dot.SetResourceReference(Ellipse.FillProperty,label.Text.Contains("未找到")?"StatusBad":"StatusOk");
             }
-            commandsChecking=false;validationError=string.Join("\n",errors.Distinct());UpdateLaunch();
+            commandsChecking=false;validationError=string.Join("\n",errors.Distinct());RenderAgentChips();UpdateLaunch();
         }
         }
         catch(Exception e)when(e is not OutOfMemoryException){commandsChecking=false;validationError="命令/目录检查中断："+e.Message;}
@@ -560,7 +576,7 @@ public partial class MainWindow : Window
     }
     private void UpdateLaunch()
     {
-        var count=config.Draft.Slots.Count(s=>s.Enabled);
+        var count=CountReadySelected();
         var places=config.Draft.Slots.Where(s=>s.Enabled).Select(PlaceLabel).ToArray();
         var admission=DecideAdmission(config.Draft,status?.Memory,status?.Entries,budgets:status?.Budgets);
         var admissionBlockedReason=status?.AdmissionHardBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
@@ -568,12 +584,38 @@ public partial class MainWindow : Window
         var explicitDirectoryMissing=config.Draft.Slots.Any(s=>s.Enabled&&s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory));
         var missing=explicitDirectoryMissing||config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
-        var concurrencyBlocked=ConcurrencyBlocked(count);
-        LaunchButton.Content=LaunchSurface.LaunchButtonText(count,places,busy,previewOnly);
+        var concurrencyBlocked=ConcurrencyBlocked(config.Draft.Slots.Count(s=>s.Enabled));
+        var starting=busy||checkingLaunch||launchCancellation!=null;
+        LaunchButton.Content=StartPageSurface.LaunchButtonText(count,starting);
         var targetTip=LaunchSurface.TargetTooltip(places);
         LaunchButton.ToolTip=targetTip.Length>0?targetTip:"Ctrl+Enter · 启动已勾选项";
         LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&(admission.Launchable||IsPreviewStale)&&!admissionBlocked&&!admissionPressureBlocked&&!concurrencyBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
-        var hint=LaunchHintState(admission);LaunchHint.Text=hint.Text;LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,hint.Key);
+        if(windowMode==MainWindowMode.StartPage)
+        {
+            var hasProject=!string.IsNullOrWhiteSpace(config.Draft.Project);
+            var parts=new List<string>();
+            var disabled=StartPageSurface.DisabledReason(hasProject,count);
+            if(disabled.Length>0)parts.Add(disabled);
+            parts.Add(StartPageSurface.SelectionLine(count));
+            if(commandsChecking&&status?.Memory is null)parts.Add(StartPageSurface.CheckingCapacity);
+            else parts.Add(StartPageSurface.CapacityLine(RemainingCapacity(count)));
+            if(pendingProject)parts.Add("项目路径输入尚未应用；请按 Enter 或移开焦点完成校验");
+            if(readOnly)parts.Add("当前配置只读，已禁止启动与保存");
+            else if(admissionBlocked)parts.Add(admissionBlockedReason!);
+            else if(admissionPressureBlocked)parts.Add(PressureMessage);
+            else if(concurrencyBlocked)parts.Add(ConcurrencyLimitMessage);
+            else if(!SaveHealthy)parts.Add(saveError!=null?"配置尚未保存："+saveError:"正在保存配置…");
+            else if(validationError.Length>0)parts.Add(validationError);
+            else if(status?.Ok!=true)parts.Add("正在等待后台检查就绪，暂时不能启动");
+            else if(admission is {Launchable:false})parts.Add(admission.Reason);
+            else if(admission is {Advisory:true})parts.Add(admission.Reason);
+            LaunchHint.Text=string.Join(" · ",parts.Where(part=>part.Length>0&&!part.Contains("预览不是")&&!part.Contains("启动授权")));
+            LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,LaunchButton.IsEnabled?"Ink":"Muted");
+        }
+        else
+        {
+            var hint=LaunchHintState(admission);LaunchHint.Text=hint.Text;LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,hint.Key);
+        }
         ReconcileButton.Visibility=status?.ReconcileOffered==true&&!busy?Visibility.Visible:Visibility.Collapsed;
         UpdateQuickQueueButton();
         UpdateMultipaneSummary();UpdateSimpleStatus();UpdatePollingInterval();

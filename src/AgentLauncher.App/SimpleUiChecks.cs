@@ -20,8 +20,10 @@ public partial class MainWindow
             var sample = new MemorySnapshot(16 * ResourcePolicy.GiB, 12 * ResourcePolicy.GiB, 32 * ResourcePolicy.GiB, 24 * ResourcePolicy.GiB, 5, DateTimeOffset.UtcNow);
             status = new(true, "simple-ui", [], sample);readOnly = false;Render();
             await commandCheckTask;
-            check("ACC-U04 advanced configuration starts collapsed", !ConfigurationToolsExpander.IsExpanded && !LaunchOptionsExpander.IsExpanded);
-            check("ACC-U04 low Omp and Codex budgets have a direct repair action", LongTaskNotice.Visibility == Visibility.Visible && LongTaskButton.IsEnabled);
+            check("ACC-U04 advanced configuration starts collapsed", (LaunchOptionsExpander.Visibility == Visibility.Collapsed || !LaunchOptionsExpander.IsVisible) && (ConfigurationToolsExpander.Visibility == Visibility.Collapsed || !ConfigurationToolsExpander.IsVisible) && (SessionExpander.Visibility == Visibility.Collapsed || !SessionExpander.IsVisible));
+            var more = ReviewFind<System.Windows.Controls.Button>(this).First(button => Equals(button.Content, "更多"));
+            var moreHeaders = (more.ContextMenu as System.Windows.Controls.ContextMenu)!.Items.OfType<System.Windows.Controls.MenuItem>().Select(item => item.Header as string).ToArray();
+            check("ACC-U04 low Omp and Qoder budgets have a direct repair action", moreHeaders.Contains("长任务资源") && LongTaskButton.IsEnabled);
             var oldResource = config.Draft.Resource;var oldRevision = config.Draft.Revision;
             readOnly = true;UpdateSimpleStatus();
             check("ACC-U04 read-only cannot apply long-task settings", !LongTaskButton.IsEnabled && !ApplyLongTaskResources(sample) && config.Draft.Revision == oldRevision);
@@ -34,33 +36,27 @@ public partial class MainWindow
             firstSlot.RequiresDirectory = true;
             check("F04 direct folder selection preserves other agents and the default project", SetSlotDirectory(firstSlot.Id, Store.Root) && !config.Draft.Slots[0].RequiresDirectory && config.Draft.Project == projectBefore && JsonSerializer.Serialize(config.Draft.Slots[1], Store.Json) == secondBefore);
             await saveTask;await commandCheckTask;
-            check("F04 direct folder is saved and visible without probing CLI presets", Store.Read<Configuration>(configPath)!.Draft.Slots[0].Directory == Store.Root && ProjectGuide.Text.Contains("各自") && ReviewFind<System.Windows.Controls.Button>(SlotList).Any(button => System.Windows.Automation.AutomationProperties.GetName(button) == "第 1 项工作目录"));
+            check("F04 direct folder is saved and visible without probing CLI presets", Store.Read<Configuration>(configPath)!.Draft.Slots[0].Directory == Store.Root && ProjectGuide.Text.Contains("各自") && moreHeaders.Contains("工作目录"));
             readOnly = true;
             check("F04 direct folder action respects read-only configuration", !SetSlotDirectory(firstSlot.Id, "") && config.Draft.Slots[0].Directory == Store.Root);
             readOnly = false;
             check("F04 explicit inherit action clears the per-agent folder", SetSlotDirectory(firstSlot.Id, "") && config.Draft.Slots[0].Directory == "");
             await saveTask;await commandCheckTask;
-            LaunchOptionsExpander.IsExpanded = true;ConfigurationToolsExpander.IsExpanded = true;UpdateLayout();
-            check("ACC-U04 advanced controls remain reachable", SummaryPanel.IsVisible && DirectoryMode.IsVisible && ScalePresets.IsVisible && Templates.IsVisible);
-            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("omp.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "omp");
+            check("ACC-U04 advanced controls remain reachable", moreHeaders.Contains("工作目录") && moreHeaders.Contains("资源设置") && moreHeaders.Contains("远程主机（VPS）") && moreHeaders.Contains("恢复与诊断") && moreHeaders.Contains("运行历史与导出") && moreHeaders.Contains("恢复备份") && ReviewFind<System.Windows.Controls.Button>(this).Any(button => Equals(button.Content, "设置")));
+            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("qoder.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "qoder");
             var entry = new ControlEntry { Plan = plan, State = "Started", Detail = "已启动进程；" + ToolRecovery.BlockedMarker + "整机余量不足" };
             status = new(true, "guard-ui", [entry], sample);RenderSessionsNow();
             check("ACC-U05 a denied live tool offers a copy-only recovery action", ReviewFind<System.Windows.Controls.Button>(ActiveSessions).Any(button => Equals(button.Content, "复制继续提示")));
             if (screenshotFolder is not null)
             {
                 LaunchOptionsExpander.IsExpanded = false;ConfigurationToolsExpander.IsExpanded = false;
-                SessionExpander.IsExpanded = true;UpdateLayout();ContentScroll.ScrollToEnd();
+                SessionExpander.IsExpanded = false;UpdateLayout();
                 await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Render);UpdateLayout();
-                var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(Sessions);
-                var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)(Sessions.ActualWidth * dpi.DpiScaleX), (int)(Sessions.ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, System.Windows.Media.PixelFormats.Pbgra32);
-                var visual = new System.Windows.Media.DrawingVisual();
-                using (var drawing = visual.RenderOpen())
-                {
-                    var area = new Rect(0, 0, Sessions.ActualWidth, Sessions.ActualHeight);
-                    drawing.DrawRectangle((System.Windows.Media.Brush)FindResource("Page"), null, area);
-                    drawing.DrawRectangle(new System.Windows.Media.VisualBrush(Sessions), null, area);
-                }
-                bitmap.Render(visual);var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+                var capture = StartPagePanel.IsVisible ? (FrameworkElement)this : Sessions;
+                if (capture.ActualWidth < 1 || capture.ActualHeight < 1) capture = this;
+                var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(capture);
+                var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(Math.Max(1, (int)(capture.ActualWidth * dpi.DpiScaleX)), Math.Max(1, (int)(capture.ActualHeight * dpi.DpiScaleY)), dpi.PixelsPerInchX, dpi.PixelsPerInchY, System.Windows.Media.PixelFormats.Pbgra32);
+                bitmap.Render(capture);var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
                 using var output = System.IO.File.Create(System.IO.Path.Combine(screenshotFolder, "memory-recovery.png"));encoder.Save(output);
             }
             entry.Detail = "已启动进程；最近一次工具已通过内存检查";RenderSessionsNow();
@@ -71,12 +67,12 @@ public partial class MainWindow
             status = new(true, "low-memory-ui", [], sample with { Available = ResourcePolicy.GiB, At = DateTimeOffset.UtcNow });
             previewOnly = false;
             Render();QueueSave();await saveTask;await commandCheckTask;UpdateLaunch();
-            check("ACC-U06 practical low memory keeps launch available with an advisory hint", LaunchButton.IsEnabled && LaunchButton.Visibility == Visibility.Visible && QueueQuickButton.IsEnabled && Equals(QueueQuickButton.Content, "按资源依次启动") && LaunchHint.Text.Contains("可用内存") && LaunchHint.Text.Contains("实用模式不拦截") && !LaunchHint.Text.Contains("等待资源后启动"));
+            check("ACC-U06 practical low memory keeps launch available with an advisory hint", LaunchButton.IsEnabled && LaunchButton.IsVisible && QueueQuickButton.Visibility == Visibility.Collapsed && LaunchHint.Text.Contains("可用内存") && LaunchHint.Text.Contains("实用模式不拦截") && !LaunchHint.Text.Contains("等待资源后启动"));
             config.Draft.Resource = new() { Mode = "conservative" };UpdateLaunch();
-            check("ACC-U06 conservative low memory still blocks launch and offers the waiting queue", !LaunchButton.IsEnabled && LaunchButton.Visibility == Visibility.Visible && QueueQuickButton.IsEnabled && Equals(QueueQuickButton.Content, "等待资源后启动") && LaunchHint.Text.Contains("可用内存") && LaunchHint.Text.Contains("等待资源"));
+            check("ACC-U06 conservative low memory still blocks launch and offers the waiting queue", !LaunchButton.IsEnabled && LaunchButton.IsVisible && QueueQuickButton.Visibility == Visibility.Collapsed && moreHeaders.Contains("按资源依次启动") && LaunchHint.Text.Contains("可用内存") && LaunchHint.Text.Contains("等待资源"));
             config.Draft.Resource = new ResourceSettings();
             status = new(true, "recovered-memory-ui", [], sample with { At = DateTimeOffset.UtcNow });UpdateLaunch();
-            check("ACC-U06 recovered memory restores immediate launch", LaunchButton.IsEnabled && LaunchButton.Visibility == Visibility.Visible && Equals(QueueQuickButton.Content, "按资源依次启动"));
+            check("ACC-U06 recovered memory restores immediate launch", LaunchButton.IsEnabled && LaunchButton.IsVisible && QueueQuickButton.Visibility == Visibility.Collapsed);
             if (screenshotFolder is not null)
             {
                 SessionExpander.IsExpanded = false;TaskExpander.IsExpanded = false;ContentScroll.ScrollToTop();UpdateLayout();

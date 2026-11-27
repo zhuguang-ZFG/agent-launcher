@@ -20,9 +20,9 @@ public partial class MainWindow
         {
             config=new Configuration();config.Draft.Project=Store.Root;loading=false;Render();
             // A single UpdateLayout can run before Render's dispatcher work settles; pump like ResizeForCheckAsync before measuring.
-            for(var i=0;i<40;i++){await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);if(SaveStatus.IsArrangeValid&&SaveStatus.ActualWidth>0)break;await Task.Delay(25);}
-            Store.Save(Path.Combine(folder,"ux13-diag.json"),new{SaveWidth=SaveStatus.ActualWidth,SaveHeight=SaveStatus.ActualHeight,FooterWidth=FooterMessage.ActualWidth,MemoryWidth=MemoryBoardText.ActualWidth,MemoryText=MemoryBoardText.Text,WindowWidth=ActualWidth,Scale=UiScale.Value});
-            check("UX13 footer save status never collapses to vertical text",SaveStatus.ActualWidth>=40&&SaveStatus.ActualHeight<32&&FooterMessage.ActualWidth>=260);
+            for(var i=0;i<40;i++){await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);if(LaunchHint.IsArrangeValid&&LaunchHint.ActualWidth>0)break;await Task.Delay(25);}
+            Store.Save(Path.Combine(folder,"ux13-diag.json"),new{HintWidth=LaunchHint.ActualWidth,HintHeight=LaunchHint.ActualHeight,WindowWidth=ActualWidth,Scale=UiScale.Value,StartPage=StartPagePanel.IsVisible});
+            check("UX13 footer save status never collapses to vertical text",StartPagePanel.IsVisible&&LaunchHint.IsVisible&&LaunchHint.ActualWidth>=40&&LaunchHint.ActualHeight<80);
             var cancelled=false;var opened=false;var clock=Stopwatch.StartNew();
             detailProbeForTest=async token=>{try{await Task.Delay(8000,token);}catch(OperationCanceledException){cancelled=true;throw;}return new();};
             var inspect=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};

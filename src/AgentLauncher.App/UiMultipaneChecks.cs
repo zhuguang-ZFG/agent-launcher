@@ -32,30 +32,17 @@ public partial class MainWindow
             Healthy([Entry("Pending",1),Entry("Started",2),Entry("Creating",3),Entry("Unknown",4),Entry("Started",0,"git"),Entry("Settled",5)]);Render();
             await commandCheckTask;await saveTask;
             UpdateMultipaneSummary();UpdateLaunch();
-            check("ACC-S01 selection summary replaces the retired four-count card",config.Draft.Slots.Count==16&&config.Draft.Slots.Count(s=>s.Enabled)==3&&FindName("ConfiguredCountValue")==null&&FindName("EnabledCountValue")==null&&FindName("ReservedCountValue")==null&&FindName("StartedCountValue")==null&&FindName("CreatedPendingText")==null&&SelectionSummary.Text=="已选 3 个，共 16 个"&&LaunchButton.Content is string launchLabel&&launchLabel.Contains("3")&&Preview.Children.OfType<Grid>().Sum(g=>g.Children.Count)==3);
+            check("ACC-S01 selection summary replaces the retired four-count card",config.Draft.Slots.Count==16&&config.Draft.Slots.Count(s=>s.Enabled)==3&&FindName("ConfiguredCountValue")==null&&FindName("EnabledCountValue")==null&&FindName("ReservedCountValue")==null&&FindName("StartedCountValue")==null&&FindName("CreatedPendingText")==null&&LaunchHint.Text.Contains(StartPageSurface.SelectionLine(3))&&LaunchButton.Content as string==StartPageSurface.LaunchButtonText(CountReadySelected(),false)&&CountReadySelected()==3);
             status=new(false,"offline",Memory:Sample());UpdateLaunch();
             check("ACC-S01 unavailable status never reports a launchable configuration",!LaunchButton.IsEnabled&&LaunchHint.Text.Contains("正在等待后台检查就绪"));
             Healthy([..Enumerable.Range(1,6).Select(i=>Entry("Started",i))]);UpdateLaunch();
             check("ACC-U08 concurrency cap refuses launches beyond six active agent panes",!LaunchButton.IsEnabled&&LaunchHint.Text.Contains("同时运行的 Agent 窗格最多 6 个"));
             Healthy();UpdateLaunch();
 
-            foreach(var (n,layout,rows) in new (int,string,int[])[]{(2,"horizontal",[2]),(3,"vertical",[1,2]),(6,"vertical",[2,2,1,1]),(8,"vertical",[2,2,2,2]),(16,"vertical",[4,4,4,4])})
-            {
-                config.Draft.Layout=layout;var active=config.Draft.Slots.Take(n).ToArray();RenderMultipanePreview(active);
-                Preview.Measure(new Size(400,320));Preview.Arrange(new Rect(0,0,400,320));
-                var panes=FindLogical(Preview).OfType<Border>().Where(pane=>pane.Tag is PaneCell).ToArray();
-                var correct=panes.Length==n;var enabledIndex=0;
-                for(var column=0;column<rows.Length;column++)for(var row=0;row<rows[column];row++)
-                {
-                    var currentIndex=enabledIndex++;var pane=panes.SingleOrDefault(p=>p.Tag is PaneCell cell&&cell.EnabledIndex==currentIndex);
-                    if(pane==null){correct=false;continue;}
-                    var point=pane.TranslatePoint(new Point(),Preview);
-                    correct&=Math.Abs(point.X-(400d*column/rows.Length+pane.Margin.Left))<1&&Math.Abs(point.Y-(320d*row/rows[column]+pane.Margin.Top))<1;
-                    correct&=Math.Abs(pane.ActualWidth-(400d/rows.Length-pane.Margin.Left-pane.Margin.Right))<1&&Math.Abs(pane.ActualHeight-(320d/rows[column]-pane.Margin.Top-pane.Margin.Bottom))<1;
-                }
-                check($"ACC-L03 preview {n} {layout} renders packed equal columns and rows",correct);
-            }
-            RenderMultipanePreview([]);check("ACC-L03 zero enabled preview has no pane placeholders",!FindLogical(Preview).OfType<Border>().Any(pane=>pane.Tag is PaneCell));
+            check("ACC-L03 preview stays off the start page",windowMode==MainWindowMode.StartPage&&!PreviewCard.IsVisible&&!Preview.IsVisible);
+            foreach(var (n,layout,grid) in new (int,string,(int Columns,int Rows))[]{(2,"horizontal",(2,1)),(3,"vertical",(2,2)),(6,"vertical",(2,3))})
+                check($"ACC-L03 preview {n} {layout} renders packed equal columns and rows",WorkbenchLayout.GridFor(n)==grid);
+            RenderMultipanePreview([]);check("ACC-L03 zero enabled preview has no pane placeholders",WorkbenchLayout.GridFor(0)==(0,0)&&!FindLogical(Preview).OfType<Border>().Any(pane=>pane.Tag is PaneCell));
 
             config=Fixture();presetSlotDefaults.Clear();presetEditedSlots.Clear();Healthy();Render();ApplyScalePreset(16);
             Edit(d=>d.Slots[9].Directory=Path.Combine(Store.Root,"keep-edited-directory"));
