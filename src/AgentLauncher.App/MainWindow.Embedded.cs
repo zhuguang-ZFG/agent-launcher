@@ -60,7 +60,9 @@ public partial class MainWindow
             var marker=Store.FilePath(Path.Combine("attempts",plan.Id.ToString("N"),"embedded.json"));
             if(!await Task.Run(()=>EmbeddedHostAlive(marker)))return false;
         }
-        OpenEmbedded(plan);return true;
+        OpenEmbedded(plan);
+        if(windowMode==MainWindowMode.Workbench){AttachWorkbenchPane(plan);RelayoutWorkbench();}
+        return true;
     }
     // 重新打开必须核对记录的宿主仍在：只看文件存在会把已死或已崩溃的会话当成可重开；PID 复用不算存活，启动时间（FILETIME UTC）必须一致。启动时间读不出时保持可重开，方向与 Worker 的 ProcessAlive 相同。
     private static bool EmbeddedHostAlive(string marker)
@@ -77,12 +79,13 @@ public partial class MainWindow
         catch{return false;}
     }
 
-    private void OpenEmbedded(LaunchItem plan)
+    private void OpenEmbedded(LaunchItem plan,bool connect=true)
     {
-        EmbeddedPanel.Visibility=ShowTerminalsButton.Visibility=Visibility.Visible;
+        EmbeddedPanel.Visibility=ShowTerminalsButton.Visibility=Visibility.Collapsed;
         if(embeddedViews.TryGetValue(plan.Id,out var existing))
         {
-            EmbeddedTabs.SelectedItem=existing.Tab;existing.Card.Focus();
+            if(windowMode==MainWindowMode.Workbench)AttachWorkbenchPane(plan);
+            existing.Card.Focus();
             if(existing.Finished)_=ConnectEmbeddedAsync(plan,existing);
             return;
         }
@@ -203,7 +206,16 @@ public partial class MainWindow
         resize.Tick+=async(_,_)=>{resize.Stop();await ResizeEmbeddedAsync(view);};
         card.SizeChanged+=(_,_)=>{if(!view.Finished&&!view.Stop.IsCancellationRequested){resize.Stop();resize.Start();}};
         card.PreviewMouseDown+=(_,_)=>card.Focus();
-        _=ConnectEmbeddedAsync(plan,view);
+        card.PreviewKeyDown+=(_,e)=>
+        {
+            if(e.Key==Key.V&&Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+            {
+                e.Handled=true;
+                try{if(!card.Paste(Clipboard.GetText()))statusText.Text=card.RejectedPaste;}
+                catch(System.Runtime.InteropServices.COMException){statusText.Text="剪贴板忙，请重试。";}
+            }
+        };
+        if(connect)_=ConnectEmbeddedAsync(plan,view);
     }
 
     private static async Task ResizeEmbeddedAsync(PaneView view)
@@ -250,7 +262,8 @@ public partial class MainWindow
     {
         if(!embeddedViews.Remove(id,out var view))return;
         view.Stop.Cancel();view.Client?.Dispose();EmbeddedTabs.Items.Remove(view.Tab);
-        if(EmbeddedTabs.Items.Count==0)EmbeddedPanel.Visibility=ShowTerminalsButton.Visibility=Visibility.Collapsed;
+        DetachWorkbenchPane(id);
+        EmbeddedPanel.Visibility=ShowTerminalsButton.Visibility=Visibility.Collapsed;
     }
     protected override void OnClosed(EventArgs e)
     {

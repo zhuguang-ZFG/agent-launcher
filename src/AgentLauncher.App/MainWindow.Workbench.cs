@@ -2,21 +2,32 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Automation;
+using System.Windows.Media.Animation;
 using AgentLauncher.Core;
+using AgentLauncher.Windows;
 
 namespace AgentLauncher.App;
 
 public partial class MainWindow
 {
+    private sealed class WorkbenchPaneView
+    {
+        public required Guid Id;
+        public required LaunchItem Plan;
+        public required Border Root;
+        public required TerminalCard Card;
+    }
+
     private MainWindowMode windowMode = MainWindowMode.StartPage;
     private readonly Dictionary<Guid, (bool Ready, string Reason)> chipStatus = [];
+    private readonly List<WorkbenchPaneView> workbenchPanes = [];
     private bool capDeniedSticky;
 
     private void ApplyWindowMode()
     {
-        var start = windowMode == MainWindowMode.StartPage;
-        StartPagePanel.Visibility = start ? Visibility.Visible : Visibility.Collapsed;
-        WorkbenchPanel.Visibility = start ? Visibility.Collapsed : Visibility.Visible;
+        var workbench = windowMode == MainWindowMode.Workbench;
+        StartPagePanel.Visibility = workbench ? Visibility.Collapsed : Visibility.Visible;
+        WorkbenchPanel.Visibility = workbench ? Visibility.Visible : Visibility.Collapsed;
         LegacyWorkspace.Visibility = Visibility.Collapsed;
         Rail.Visibility = Visibility.Collapsed;
         PreviewCard.Visibility = Visibility.Collapsed;
@@ -26,8 +37,135 @@ public partial class MainWindow
         ConfigurationToolsExpander.Visibility = Visibility.Collapsed;
         SessionExpander.Visibility = Visibility.Collapsed;
         QueueQuickButton.Visibility = Visibility.Collapsed;
-        if (start) ChooseProjectButton.Visibility = Visibility.Visible;
+        EmbeddedPanel.Visibility = Visibility.Collapsed;
+        ShowTerminalsButton.Visibility = Visibility.Collapsed;
+        if (!workbench) ChooseProjectButton.Visibility = Visibility.Visible;
+        UpdateWorkbenchChrome();
+        if (workbench) RelayoutWorkbench();
     }
+
+    private void EnterWorkbench(IReadOnlyList<ControlEntry> entries) =>
+        EnterWorkbench(entries.Select(entry => entry.Plan).ToList());
+
+    private void EnterWorkbench(IReadOnlyList<LaunchItem> started)
+    {
+        var fromStart = windowMode == MainWindowMode.StartPage;
+        windowMode = WorkbenchLayout.AfterLaunchAttempt(started.Count);
+        ApplyWindowMode();
+        if (windowMode != MainWindowMode.Workbench) return;
+        if (WorkbenchNotice is not null) WorkbenchNotice.Text = "";
+        if (fromStart) FadeIntoWorkbench();
+        foreach (var plan in started)
+        {
+            var marker = Store.FilePath(System.IO.Path.Combine("attempts", plan.Id.ToString("N"), "embedded.json"));
+            OpenEmbedded(plan, EmbeddedHostAlive(marker));
+            AttachWorkbenchPane(plan);
+        }
+        RelayoutWorkbench();
+        UpdateWorkbenchChrome();
+    }
+
+    private void AttachWorkbenchPane(LaunchItem plan)
+    {
+        if (workbenchPanes.Any(pane => pane.Id == plan.Id)) return;
+        if (!embeddedViews.ContainsKey(plan.Id)) OpenEmbedded(plan, false);
+        if (!embeddedViews.TryGetValue(plan.Id, out var view)) return;
+        var content = view.Tab.Content as UIElement;
+        view.Tab.Content = null;
+        var root = new Border
+        {
+            Child = content,
+            CornerRadius = new CornerRadius(6),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(0),
+            ClipToBounds = true
+        };
+        root.SetResourceReference(Border.BackgroundProperty, "Surface");
+        root.SetResourceReference(Border.BorderBrushProperty, "Line");
+        WorkbenchHost.Children.Add(root);
+        workbenchPanes.Add(new WorkbenchPaneView { Id = plan.Id, Plan = plan, Root = root, Card = view.Card });
+        EmbeddedPanel.Visibility = Visibility.Collapsed;
+        ShowTerminalsButton.Visibility = Visibility.Collapsed;
+    }
+
+    private void DetachWorkbenchPane(Guid id)
+    {
+        var pane = workbenchPanes.FirstOrDefault(item => item.Id == id);
+        if (pane is null) return;
+        workbenchPanes.Remove(pane);
+        WorkbenchHost.Children.Remove(pane.Root);
+        if (windowMode == MainWindowMode.Workbench) RelayoutWorkbench();
+        UpdateWorkbenchChrome();
+    }
+
+    private void RelayoutWorkbench()
+    {
+        if (WorkbenchHost is null || windowMode != MainWindowMode.Workbench) return;
+        var width = Math.Max(WorkbenchScroll?.ViewportWidth > 0 ? WorkbenchScroll.ViewportWidth : WorkbenchHost.ActualWidth, 1);
+        var height = Math.Max(WorkbenchScroll?.ViewportHeight > 0 ? WorkbenchScroll.ViewportHeight : WorkbenchHost.ActualHeight, 1);
+        var layout = WorkbenchLayout.Layout(width, height, workbenchPanes.Count);
+        var contentHeight = layout.Tiles.Count == 0 ? height : layout.Tiles[^1].Y + layout.Tiles[^1].Height;
+        WorkbenchHost.Width = width;
+        WorkbenchHost.Height = Math.Max(contentHeight, height);
+        for (var i = 0; i < workbenchPanes.Count; i++)
+        {
+            var tile = layout.Tiles[i];
+            var view = workbenchPanes[i];
+            Canvas.SetLeft(view.Root, tile.X);
+            Canvas.SetTop(view.Root, tile.Y);
+            view.Root.Width = tile.Width;
+            view.Root.Height = tile.Height;
+        }
+    }
+
+    private void WorkbenchHostSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (windowMode == MainWindowMode.Workbench) RelayoutWorkbench();
+    }
+
+    private void FadeIntoWorkbench()
+    {
+        WorkbenchPanel.Opacity = 0;
+        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220)) { FillBehavior = FillBehavior.Stop };
+        fade.Completed += (_, _) => WorkbenchPanel.Opacity = 1;
+        WorkbenchPanel.BeginAnimation(OpacityProperty, fade);
+    }
+
+    private void UpdateWorkbenchChrome()
+    {
+        if (WorkbenchProjectTitle is null) return;
+        var project = config.Draft.Project;
+        WorkbenchProjectTitle.Text = string.IsNullOrWhiteSpace(project) ? "未选择项目" : ProjectName(project);
+        WorkbenchProjectTitle.ToolTip = string.IsNullOrWhiteSpace(project) ? null : project;
+        WorkbenchCapacity.Text = workbenchPanes.Count + " / 最多 " + WorkbenchLayout.MaxPanes;
+        WorkbenchResource.Text = status?.Memory is { } sample
+            ? $"{RailResourceMode(config.Draft.Resource?.Mode)} · 可用 {GiB(sample.Available)} GiB"
+            : "资源：未读取";
+        BackToStartButton.Content = StartPageSurface.BackToStart;
+        BackToStartButton.Visibility = WorkbenchLayout.ShowBackToStart(windowMode, workbenchPanes.Count) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ShowPartialLaunchNotice(int started, int requested, string reason)
+    {
+        if (started < 1 || started >= requested) return;
+        WorkbenchNotice.Text = StartPageSurface.PartialLaunchLine(started, requested - started, reason);
+        WorkbenchNotice.SetResourceReference(TextBlock.ForegroundProperty, "WarningInk");
+    }
+
+#if INTEGRATION_TESTS
+    private void ResetWorkbenchForChecks()
+    {
+        foreach (var id in workbenchPanes.Select(pane => pane.Id).Concat(embeddedViews.Keys).Distinct().ToArray())
+            RemoveEmbedded(id);
+        workbenchPanes.Clear();
+        WorkbenchHost.Children.Clear();
+        if (WorkbenchNotice is not null) WorkbenchNotice.Text = "";
+        windowMode = MainWindowMode.StartPage;
+        WorkbenchPanel.BeginAnimation(OpacityProperty, null);
+        WorkbenchPanel.Opacity = 1;
+        ApplyWindowMode();
+    }
+#endif
 
     private int CountReadySelected() =>
         config.Draft.Slots.Count(slot => slot.Enabled && IsSlotReady(slot));

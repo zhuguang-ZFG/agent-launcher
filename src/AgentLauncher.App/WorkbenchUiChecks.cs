@@ -88,9 +88,45 @@ public partial class MainWindow
                 && ErrorText.IsVisible
                 && ErrorText.Text.Contains("启动失败")
                 && LaunchHint.Text.Contains("启动失败"));
+
+            EnterWorkbench(Array.Empty<ControlEntry>());
+            UpdateLaunch();
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("zero started stays on the start page with the reason visible and the button restored",
+                windowMode == MainWindowMode.StartPage
+                && StartPagePanel.Visibility == Visibility.Visible
+                && WorkbenchPanel.Visibility == Visibility.Collapsed
+                && Equals(LaunchButton.Content, StartPageSurface.LaunchButtonText(CountReadySelected(), false))
+                && ErrorBanner.IsVisible
+                && ErrorText.IsVisible
+                && ErrorText.Text.Contains("没有启动任何 Agent")
+                && LaunchHint.Text.Contains("没有启动任何 Agent"));
+
+            ErrorText.Text = "";
+            LaunchItem FakePlan(int position, string name) => new(
+                Guid.NewGuid(), Guid.NewGuid(), position, name, Store.Root,
+                new WorkspaceIdentity(Store.Root, "workbench-" + position), false,
+                new CommandSpec("fixture.exe", [], "exe"), ResourcePolicy.AgentBudget);
+            var entries = new ControlEntry[]
+            {
+                new() { Plan = FakePlan(1, "工作台甲"), State = "Started", Detail = "已启动进程" },
+                new() { Plan = FakePlan(2, "工作台乙"), State = "Started", Detail = "已启动进程" }
+            };
+            var startedCount = entries.Length;
+            EnterWorkbench(entries);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("launching at least one agent switches the window into the workbench",
+                startedCount >= 1
+                && windowMode == MainWindowMode.Workbench
+                && WorkbenchPanel.Visibility == Visibility.Visible
+                && StartPagePanel.Visibility == Visibility.Collapsed);
+            check("workbench hosts real terminal cards rather than the static preview",
+                ReviewFind<TerminalCard>(WorkbenchHost).Count() == startedCount
+                && PreviewCard.Visibility != Visibility.Visible);
         }
         finally
         {
+            ResetWorkbenchForChecks();
             ErrorText.Text = previousError;
             capDeniedSticky = false;
             config = previous;

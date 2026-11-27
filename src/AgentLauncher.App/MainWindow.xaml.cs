@@ -73,7 +73,7 @@ public partial class MainWindow : Window
         var work=SystemParameters.WorkArea;Width=Math.Min(920,work.Width-32);Height=Math.Min(760,work.Height-32);MinWidth=Math.Min(560,work.Width-32);MinHeight=Math.Min(460,work.Height-32);
         InitializeWindowPlacementTracking();
         ApplyWindowPlacement();
-        SizeChanged+=(_,_)=>ArrangePanels();
+        SizeChanged+=(_,_)=>{ArrangePanels();if(windowMode==MainWindowMode.Workbench)RelayoutWorkbench();};
         Loaded+=async (_,_)=>await GuardAsync(LoadAsync);
         timer.Tick+=async (_,_)=>await GuardAsync(PollResourcesAsync);
         taskTimer.Tick+=async (_,_)=>await GuardAsync(PumpQueueAsync);
@@ -617,7 +617,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            var hint=LaunchHintState(admission);LaunchHint.Text=hint.Text;LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,hint.Key);
+            UpdateWorkbenchChrome();
         }
         ReconcileButton.Visibility=status?.ReconcileOffered==true&&!busy?Visibility.Visible:Visibility.Collapsed;
         UpdateQuickQueueButton();
@@ -918,13 +918,27 @@ public partial class MainWindow : Window
             var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token,activeWorkspaces,configuration:config));
             launchCancellation.Token.ThrowIfCancellationRequested();
             var planned=plans.ToArray();
+            var requested=draft.Slots.Count(slot=>slot.Enabled);
             await AuthorizePlansAsync(planned);
             var launchBindings=ReservationBindings(planned);
             var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
-            try{await SubmitPanesAsync(terminal,plans,draft.Layout,launchCancellation.Token);}
-            catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
+            var started=new List<LaunchItem>();
+            try{await SubmitPanesAsync(terminal,plans,draft.Layout,launchCancellation.Token);started.AddRange(plans);}
+            catch
+            {
+                started.AddRange(plans.Where(plan=>embeddedViews.ContainsKey(plan.Id)));
+                ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";
+                if(started.Count>=1){EnterWorkbench(started);ShowPartialLaunchNotice(started.Count,Math.Max(requested,started.Count),admission.Reason);}
+                throw;
+            }
+            if(started.Count>=1)
+            {
+                EnterWorkbench(started);
+                ShowPartialLaunchNotice(started.Count,Math.Max(requested,started.Count),string.IsNullOrWhiteSpace(admission.Reason)?"未能全部启动":admission.Reason);
+            }
+            else{ErrorText.Text="启动失败：没有启动任何 Agent";UpdateLaunch();return;}
             if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="已提交启动，正在等待各 Agent 的进程回执。";
             for(var i=0;i<10;i++)

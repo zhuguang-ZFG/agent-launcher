@@ -6,7 +6,18 @@
  Icon="pack://application:,,,/Assets/app.ico"
  AllowDrop="True" Drop="OnDrop" DragOver="OnDragOver">
  <Grid>
-  <DockPanel x:Name="StartPagePanel" Background="{DynamicResource Page}">
+  <DockPanel x:Name="ProductChrome" Background="{DynamicResource Page}">
+   <DockPanel DockPanel.Dock="Bottom" x:Name="SharedStatusBar" Margin="20,8,20,16">
+    <Border DockPanel.Dock="Top" x:Name="ErrorBanner" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12,8" Margin="0,0,0,8">
+     <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Visible"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ErrorText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>
+     <ScrollViewer MaxHeight="96" VerticalScrollBarVisibility="Auto"><TextBox x:Name="ErrorText" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource WarningInk}" AutomationProperties.Name="错误详情，可选择复制" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
+    </Border>
+    <TextBlock DockPanel.Dock="Top" x:Name="ProgressText" Margin="0,0,0,8" TextWrapping="Wrap" Style="{StaticResource Caption}" AutomationProperties.LiveSetting="Polite"/>
+    <Button DockPanel.Dock="Right" x:Name="CancelButton" Content="停止后续步骤" Style="{StaticResource QuietButton}" IsEnabled="False" Click="CancelClick" Margin="0,0,8,0"><Button.Visibility><Binding Path="IsEnabled" RelativeSource="{RelativeSource Self}" Converter="{StaticResource BooleanVisibility}"/></Button.Visibility></Button>
+    <Button DockPanel.Dock="Right" x:Name="RetrySaveButton" Content="重试保存" Style="{StaticResource QuietButton}" Padding="8,2" Margin="0,0,8,0" Visibility="Collapsed" Click="RetrySaveClick" AutomationProperties.Name="重试保存"/>
+   </DockPanel>
+   <Grid>
+  <DockPanel x:Name="StartPagePanel">
    <DockPanel DockPanel.Dock="Top" Margin="20,12,20,4">
     <Button DockPanel.Dock="Right" Content="更多" Style="{StaticResource QuietButton}" Click="MoreClick" Margin="8,0,0,0" Padding="6,2" MinHeight="26" FontSize="12" ToolTip="工作目录、资源设置、远程主机、恢复与诊断、运行历史与导出">
      <Button.ContextMenu>
@@ -35,22 +46,34 @@
     <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" VerticalAlignment="Center"/>
     <TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
    </DockPanel>
-   <DockPanel DockPanel.Dock="Bottom" Margin="20,8,20,16">
-    <Border DockPanel.Dock="Top" x:Name="ErrorBanner" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12,8" Margin="0,0,0,8">
-     <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Visible"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ErrorText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>
-     <ScrollViewer MaxHeight="96" VerticalScrollBarVisibility="Auto"><TextBox x:Name="ErrorText" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource WarningInk}" AutomationProperties.Name="错误详情，可选择复制" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
-    </Border>
-    <TextBlock DockPanel.Dock="Top" x:Name="ProgressText" Margin="0,0,0,8" TextWrapping="Wrap" Style="{StaticResource Caption}" AutomationProperties.LiveSetting="Polite"/>
+   <DockPanel DockPanel.Dock="Bottom" Margin="20,8,20,8">
     <Button DockPanel.Dock="Right" x:Name="LaunchButton" Content="启动 0 个" Style="{StaticResource PrimaryButton}" MinWidth="168" Click="LaunchClick" AutomationProperties.AutomationId="Launch"/>
-    <Button DockPanel.Dock="Right" x:Name="CancelButton" Content="停止后续步骤" Style="{StaticResource QuietButton}" IsEnabled="False" Click="CancelClick" Margin="0,0,8,0"><Button.Visibility><Binding Path="IsEnabled" RelativeSource="{RelativeSource Self}" Converter="{StaticResource BooleanVisibility}"/></Button.Visibility></Button>
-    <Button DockPanel.Dock="Right" x:Name="RetrySaveButton" Content="重试保存" Style="{StaticResource QuietButton}" Padding="8,2" Margin="0,0,8,0" Visibility="Collapsed" Click="RetrySaveClick" AutomationProperties.Name="重试保存"/>
     <TextBlock x:Name="LaunchHint" Text="先选择项目文件夹" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,16,0"/>
    </DockPanel>
    <ScrollViewer x:Name="StartPageScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="20,4,20,4">
     <WrapPanel x:Name="AgentChipPanel"/>
    </ScrollViewer>
   </DockPanel>
-  <DockPanel x:Name="WorkbenchPanel" Visibility="Collapsed"/>
+  <DockPanel x:Name="WorkbenchPanel" Visibility="Collapsed">
+   <DockPanel x:Name="WorkbenchTopBar" DockPanel.Dock="Top" Margin="20,12,20,8">
+    <Button DockPanel.Dock="Right" x:Name="BackToStartButton" Content="回到起步页" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" Visibility="Collapsed" FontSize="12"/>
+    <Button DockPanel.Dock="Right" Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="WorkbenchSettings" Padding="6,2" MinHeight="26" FontSize="12"/>
+    <Button DockPanel.Dock="Right" x:Name="AddPaneButton" Content="+" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" MinWidth="32" Margin="0,0,8,0" ToolTip="添加窗格" AutomationProperties.Name="添加窗格" FontSize="16"/>
+    <StackPanel VerticalAlignment="Center">
+     <DockPanel>
+      <TextBlock x:Name="WorkbenchCapacity" DockPanel.Dock="Right" Text="0 / 最多 6" Style="{StaticResource Caption}" Margin="16,0,0,0" VerticalAlignment="Center"/>
+      <TextBlock x:Name="WorkbenchProjectTitle" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+     </DockPanel>
+     <TextBlock x:Name="WorkbenchResource" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+     <TextBlock x:Name="WorkbenchNotice" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+    </StackPanel>
+   </DockPanel>
+   <ScrollViewer x:Name="WorkbenchScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="12,0,12,12" SizeChanged="WorkbenchHostSizeChanged">
+    <Canvas x:Name="WorkbenchHost"/>
+   </ScrollViewer>
+  </DockPanel>
+   </Grid>
+  </DockPanel>
   <Grid x:Name="LegacyWorkspace" Visibility="Collapsed">
   <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
   <Border Grid.Column="0" x:Name="Rail" Width="232" Background="{DynamicResource RailSurface}" BorderBrush="{DynamicResource Line}" BorderThickness="0,0,1,0" Padding="10,12">

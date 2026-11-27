@@ -64,7 +64,8 @@ public static class WorkbenchLayout
 
         var (columns, rows) = GridFor(paneCount);
         var tileWidth = (width - gap * (columns - 1)) / columns;
-        var tileHeightWide = (height - gap * (rows - 1)) / rows;
+        var evenWide = (height - gap * (rows - 1)) / rows;
+        var tileHeightWide = evenWide < MinPaneHeight ? MinPaneHeight : evenWide;
         var tilesWide = new List<WorkbenchTile>(paneCount);
         for (var i = 0; i < paneCount; i++)
         {

@@ -115,6 +115,7 @@ public partial class MainWindow
         finally
         {
             await saveTask;await commandCheckTask;
+            ResetWorkbenchForChecks();
             LaunchOptionsExpander.IsExpanded = false;ConfigurationToolsExpander.IsExpanded = false;
             SessionExpander.IsExpanded = previousExpanded;
             config = previous;status = previousStatus;readOnly = previousReadOnly;Render();QueueSave();await saveTask;await commandCheckTask;

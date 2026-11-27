@@ -42,7 +42,16 @@ internal static class WorkbenchLayoutChecks
             Assert(!wide.SingleColumn && wide.Columns == 2 && wide.Rows == 3 && wide.Tiles.Count == 5, "2x3");
             Assert(wide.Tiles[0].X == 0 && wide.Tiles[1].X > wide.Tiles[0].X, "row-major");
             Assert(wide.Tiles[4].X == 0 && wide.Tiles[4].Width == wide.Tiles[0].Width, "last cell stays one column wide");
-            Assert(wide.Tiles.All(t => t.Width > 0 && t.Height > 0), "positive sizes");
+            Assert(wide.Tiles.All(t => t.Width > 0 && t.Height >= WorkbenchLayout.MinPaneHeight), "positive sizes at min height");
+        });
+
+        Test("wide layout never shrinks tiles below the minimum height", () =>
+        {
+            var tight = WorkbenchLayout.Layout(848, 400, 6);
+            Assert(!tight.SingleColumn && tight.Columns == 2 && tight.Rows == 3 && tight.Tiles.Count == 6, "2x3 at 848x400");
+            Assert(tight.Tiles.All(t => t.Height >= WorkbenchLayout.MinPaneHeight && t.Width >= WorkbenchLayout.MinPaneWidth), "min size");
+            Assert(tight.Tiles[0].Y == 0 && tight.Tiles[2].Y == tight.Tiles[0].Height + WorkbenchLayout.DefaultGap, "row gap");
+            Assert(tight.Tiles.Max(t => t.Y + t.Height) > 400, "overflows so the host can scroll");
         });
 
         Test("two panes are side by side when wide and stacked when narrow", () =>
