@@ -413,6 +413,7 @@ public partial class MainWindow
         await RunConfigurationFormFailureChecksAsync(Check);
         await RunTaskChecksAsync(Check);
         await RunQuickQueueChecksAsync(Check);
+        ResetWorkbenchForChecks();
         ReviewUiChecks.Run(Check);
         await RunReviewUiChecksAsync(Check);
         await RunMultipaneChecksAsync(Check);

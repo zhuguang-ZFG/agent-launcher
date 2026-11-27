@@ -44,6 +44,38 @@ public partial class MainWindow
         if (workbench) RelayoutWorkbench();
     }
 
+    private void PresentStartedPlans(IReadOnlyList<LaunchItem> started)
+    {
+        if (started.Count == 0) return;
+        if (windowMode == MainWindowMode.StartPage) EnterWorkbench(started);
+        else
+        {
+            foreach (var plan in started)
+            {
+                if (!embeddedViews.ContainsKey(plan.Id))
+                {
+                    var marker = Store.FilePath(System.IO.Path.Combine("attempts", plan.Id.ToString("N"), "embedded.json"));
+                    OpenEmbedded(plan, EmbeddedHostAlive(marker));
+                }
+                AttachWorkbenchPane(plan);
+            }
+            RelayoutWorkbench();
+            UpdateWorkbenchChrome();
+        }
+    }
+
+    private void CompleteLaunchSurface(IReadOnlyList<LaunchItem> started, int requested, string? reason = null)
+    {
+        if (started.Count >= 1)
+        {
+            PresentStartedPlans(started);
+            ShowPartialLaunchNotice(started.Count, Math.Max(requested, started.Count), string.IsNullOrWhiteSpace(reason) ? "未能全部启动" : reason);
+            return;
+        }
+        ErrorText.Text = string.IsNullOrWhiteSpace(reason) ? "启动失败：没有启动任何 Agent" : reason;
+        UpdateLaunch();
+    }
+
     private void EnterWorkbench(IReadOnlyList<ControlEntry> entries) =>
         EnterWorkbench(entries.Select(entry => entry.Plan).ToList());
 

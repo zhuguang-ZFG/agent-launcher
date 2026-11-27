@@ -48,7 +48,12 @@ public partial class MainWindow
             };
             workspacesTimer.Start();
             more.ContextMenu!.Items.OfType<MenuItem>().Single(item=>item.Header as string=="工作目录").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            for(var i=0;i<80&&workspacesTimer.IsEnabled;i++)await Dispatcher.InvokeAsync(()=>{},DispatcherPriority.ApplicationIdle);
+            var workspacesDeadline=DateTime.UtcNow.AddSeconds(5);
+            while(workspacesTimer.IsEnabled && DateTime.UtcNow<workspacesDeadline)
+            {
+                await Dispatcher.InvokeAsync(()=>{},DispatcherPriority.ApplicationIdle);
+                if(workspacesTimer.IsEnabled) await Task.Delay(50);
+            }
             workspacesTimer.Stop();
             check("F04 direct folder is saved and visible without probing CLI presets", Store.Read<Configuration>(configPath)!.Draft.Slots[0].Directory == Store.Root && workspacesOpened && workspacesVisible);
             readOnly = true;

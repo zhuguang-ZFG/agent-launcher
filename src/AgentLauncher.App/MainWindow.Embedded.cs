@@ -27,29 +27,30 @@ public partial class MainWindow
 
     private readonly Dictionary<Guid,PaneView> embeddedViews=[];
 
-    private Task<string> ResolveLaunchTerminalAsync(CancellationToken ct=default)=>
-        config.EmbeddedTerminal?Task.FromResult(""):Task.Run(()=>Commands.Terminal(config.TerminalPath),ct);
+    // Launch always uses the in-app terminal host. A saved EmbeddedTerminal=false must not open Windows Terminal.
+    private Task<string> ResolveLaunchTerminalAsync(CancellationToken ct=default)=>Task.FromResult("");
 
-    private async Task SubmitPanesAsync(string terminal,IReadOnlyList<LaunchItem> plans,string layout,CancellationToken ct=default,bool reattach=false)
+    private Task SubmitPanesAsync(string terminal,IReadOnlyList<LaunchItem> plans,string layout,CancellationToken ct=default,bool reattach=false)
     {
-        if(terminal.Length!=0)
+        var opened=new List<LaunchItem>();
+        try
         {
-            await Task.Run(()=>
+            foreach(var plan in plans)
             {
-                if(reattach)Commands.SubmitReattachPane(terminal,plans.Single());
-                else Commands.SubmitTerminal(terminal,plans,layout,ct,TerminalProfile.TryPrepare(out _));
-            },ct);
-            return;
+                ct.ThrowIfCancellationRequested();
+                var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true};
+                start.ArgumentList.Add("terminal-host");start.ArgumentList.Add(plan.Id.ToString());start.ArgumentList.Add(reattach?"reattach":"start");
+                using var host=Process.Start(start)??throw new IOException("无法打开应用内终端。");
+                if(reattach&&embeddedViews.ContainsKey(plan.Id))RemoveEmbedded(plan.Id);
+                OpenEmbedded(plan);
+                opened.Add(plan);
+            }
         }
-        foreach(var plan in plans)
+        finally
         {
-            ct.ThrowIfCancellationRequested();
-            var start=new ProcessStartInfo(Store.WorkerPath){UseShellExecute=false,CreateNoWindow=true};
-            start.ArgumentList.Add("terminal-host");start.ArgumentList.Add(plan.Id.ToString());start.ArgumentList.Add(reattach?"reattach":"start");
-            using var host=Process.Start(start)??throw new IOException("无法打开应用内终端。");
-            if(reattach&&embeddedViews.ContainsKey(plan.Id))RemoveEmbedded(plan.Id);
-            OpenEmbedded(plan);
+            if(opened.Count>=1)PresentStartedPlans(opened);
         }
+        return Task.CompletedTask;
     }
 
     private sealed record EmbeddedMarker(int Pid,long ProcessTime);
@@ -60,8 +61,8 @@ public partial class MainWindow
             var marker=Store.FilePath(Path.Combine("attempts",plan.Id.ToString("N"),"embedded.json"));
             if(!await Task.Run(()=>EmbeddedHostAlive(marker)))return false;
         }
-        OpenEmbedded(plan);
-        if(windowMode==MainWindowMode.Workbench){AttachWorkbenchPane(plan);RelayoutWorkbench();}
+        if(windowMode==MainWindowMode.StartPage)EnterWorkbench([plan]);
+        else{OpenEmbedded(plan);AttachWorkbenchPane(plan);RelayoutWorkbench();UpdateWorkbenchChrome();}
         return true;
     }
     // 重新打开必须核对记录的宿主仍在：只看文件存在会把已死或已崩溃的会话当成可重开；PID 复用不算存活，启动时间（FILETIME UTC）必须一致。启动时间读不出时保持可重开，方向与 Worker 的 ProcessAlive 相同。
@@ -84,7 +85,7 @@ public partial class MainWindow
         EmbeddedPanel.Visibility=ShowTerminalsButton.Visibility=Visibility.Collapsed;
         if(embeddedViews.TryGetValue(plan.Id,out var existing))
         {
-            if(windowMode==MainWindowMode.Workbench)AttachWorkbenchPane(plan);
+            if(windowMode==MainWindowMode.Workbench){AttachWorkbenchPane(plan);RelayoutWorkbench();}
             existing.Card.Focus();
             if(existing.Finished)_=ConnectEmbeddedAsync(plan,existing);
             return;
@@ -216,6 +217,7 @@ public partial class MainWindow
             }
         };
         if(connect)_=ConnectEmbeddedAsync(plan,view);
+        if(windowMode==MainWindowMode.Workbench){AttachWorkbenchPane(plan);RelayoutWorkbench();}
     }
 
     private static async Task ResizeEmbeddedAsync(PaneView view)

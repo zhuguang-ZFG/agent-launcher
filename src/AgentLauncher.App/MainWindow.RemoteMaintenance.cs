@@ -246,14 +246,13 @@ public partial class MainWindow
         try
         {
             await saveTask;if(!SaveHealthy)throw new IOException("请先解决配置保存失败或等待保存完成。");
-            var terminal=await ResolveLaunchTerminalAsync();
             var plan=previousPlan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=null,Command=previousPlan.Command with{Arguments=arguments},RemoteExecution=previousPlan.RemoteExecution! with{Arguments=arguments}};
             await AuthorizePlansAsync([plan]);
             var bindings=ReservationBindings([plan]);
             var reserve=await Ipc.ReserveWithCleanupAsync([plan],launchCancellation.Token,UnlockForCleanup,bindings.Policy,bindings.Revision,bindings.Hash,bindings.Digest,bindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=config.Draft.Revision;submittedAttempts=[plan.Id];submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
-            try{await SubmitPanesAsync(terminal,[plan],"vertical");}
+            try{await SubmitPanesAsync("",[plan],"vertical");}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
             if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="已提交远程续接尝试，正在等待回执。进程出现不代表 Agent 已就绪。";

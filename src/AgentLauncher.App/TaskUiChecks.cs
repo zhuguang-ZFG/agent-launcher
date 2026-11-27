@@ -365,6 +365,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\queue
             config.MinimizeAfterLaunch = priorMinimize;
             Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE", priorSample);
             ReviewKillMonitor();
+            ResetWorkbenchForChecks();
         }
     }
 

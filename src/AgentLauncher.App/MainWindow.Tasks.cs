@@ -578,17 +578,6 @@ public partial class MainWindow
         var admission = ResourcePolicy.Evaluate(status.Memory, policy, reserved, requested);
         if (admission.Kind == AdmissionKind.Deny) { await HoldEntryAsync(entry, "资源不足：" + admission.Reason); return; }
 
-        string terminal;
-        try
-        {
-            terminal = await ResolveLaunchTerminalAsync(cancellationToken);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
-        {
-            await HoldEntryAsync(entry, "尚未找到可用的 Windows Terminal，请在「设置」选择已安装的 WindowsTerminal.exe / wt.exe。排队项已保留：" + e.Message);
-            return;
-        }
-
         var draft = new Draft
         {
             SchemaVersion = config.Draft.SchemaVersion,
@@ -664,7 +653,7 @@ public partial class MainWindow
             cancellationToken.ThrowIfCancellationRequested();
             QueueStatusText.Text = $"正在提交任务：{task.Name}";
             cancellationToken.ThrowIfCancellationRequested();
-            await SubmitPanesAsync(terminal,[plan],"vertical");
+            await SubmitPanesAsync("",[plan],"vertical");
             submitted = true;
             QueueStatusText.Text = $"已提交任务：{task.Name}。进程出现不代表 Agent 已就绪。";
             if (!closeRequested && config.MinimizeAfterLaunch) WindowState = WindowState.Minimized;

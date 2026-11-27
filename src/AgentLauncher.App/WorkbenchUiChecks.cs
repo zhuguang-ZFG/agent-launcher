@@ -1,5 +1,6 @@
 #if INTEGRATION_TESTS
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
@@ -89,8 +90,9 @@ public partial class MainWindow
                 && ErrorText.Text.Contains("启动失败")
                 && LaunchHint.Text.Contains("启动失败"));
 
-            EnterWorkbench(Array.Empty<ControlEntry>());
+            ErrorText.Text = "";
             UpdateLaunch();
+            CompleteLaunchSurface([], CountReadySelected(), "零启动原因：没有启动任何 Agent");
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
             check("zero started stays on the start page with the reason visible and the button restored",
                 windowMode == MainWindowMode.StartPage
@@ -99,8 +101,8 @@ public partial class MainWindow
                 && Equals(LaunchButton.Content, StartPageSurface.LaunchButtonText(CountReadySelected(), false))
                 && ErrorBanner.IsVisible
                 && ErrorText.IsVisible
-                && ErrorText.Text.Contains("没有启动任何 Agent")
-                && LaunchHint.Text.Contains("没有启动任何 Agent"));
+                && ErrorText.Text.Contains("零启动原因")
+                && LaunchHint.Text.Contains("零启动原因"));
 
             ErrorText.Text = "";
             LaunchItem FakePlan(int position, string name) => new(
@@ -123,6 +125,44 @@ public partial class MainWindow
             check("workbench hosts real terminal cards rather than the static preview",
                 ReviewFind<TerminalCard>(WorkbenchHost).Count() == startedCount
                 && PreviewCard.Visibility != Visibility.Visible);
+
+            config.EmbeddedTerminal = false;
+            config.TerminalPath = System.IO.Path.Combine(Store.Root, "missing-wt.exe");
+            var resolved = await ResolveLaunchTerminalAsync();
+            ResetWorkbenchForChecks();
+            EnterWorkbench([FakePlan(1, "仍走嵌入")]);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("saved external Terminal setting still opens the embedded workbench",
+                resolved.Length == 0
+                && windowMode == MainWindowMode.Workbench
+                && WorkbenchPanel.IsVisible
+                && !StartPagePanel.IsVisible
+                && !EmbeddedPanel.IsVisible
+                && ReviewFind<TerminalCard>(WorkbenchHost).Count() == 1
+                && PreviewCard.Visibility != Visibility.Visible);
+
+            ResetWorkbenchForChecks();
+            var reopen = FakePlan(3, "重开会话");
+            OpenEmbedded(reopen, false);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            var hiddenBefore = windowMode == MainWindowMode.StartPage && !ReviewFind<TerminalCard>(WorkbenchHost).Any();
+            var shown = await TryShowEmbeddedAsync(reopen);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            var reopenCard = ReviewFind<TerminalCard>(WorkbenchHost).FirstOrDefault(card => AutomationProperties.GetName(card) == "重开会话 终端");
+            check("reopening an embedded session from the start page shows a workbench terminal",
+                hiddenBefore
+                && shown
+                && windowMode == MainWindowMode.Workbench
+                && WorkbenchPanel.Visibility == Visibility.Visible
+                && StartPagePanel.Visibility == Visibility.Collapsed
+                && reopenCard is { IsVisible: true }
+                && !EmbeddedPanel.IsVisible);
+
+            ShowPartialLaunchNotice(1, 2, "内存不足");
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("partial admission explains the shortfall on the workbench",
+                WorkbenchNotice.IsVisible
+                && WorkbenchNotice.Text == StartPageSurface.PartialLaunchLine(1, 1, "内存不足"));
         }
         finally
         {

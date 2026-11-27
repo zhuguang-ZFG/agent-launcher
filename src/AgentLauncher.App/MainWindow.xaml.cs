@@ -877,14 +877,13 @@ public partial class MainWindow : Window
             var retryBook=await Task.Run(taskStore.Load);
             if(!AttemptIdentity.CanRetryOutsideQueue(previous.Plan,current.Entries!.Select(entry=>entry.Plan),retryBook))
                 throw new IOException("该记录来自任务队列或来源尚待核对，请从任务卡重新入队，保留并发限制与尝试记录。");
-            var terminal=await ResolveLaunchTerminalAsync();
             var retry=previous.Plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=previous.Plan.Id};
             await AuthorizePlansAsync([retry]);
             var retryBindings=ReservationBindings([retry]);
             var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token,UnlockForCleanup,retryBindings.Policy,retryBindings.Revision,retryBindings.Hash,retryBindings.Digest,retryBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=config.Draft.Revision;submittedAttempts=[retry.Id];submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
-            try{await SubmitPanesAsync(terminal,[retry],"vertical");}
+            try{await SubmitPanesAsync("",[retry],"vertical");}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
             if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="只提交了这一项的新尝试；已有会话保持不变，正在等待回执。";
@@ -906,7 +905,7 @@ public partial class MainWindow : Window
             await CheckFreshCommandsAsync();if(validationError.Length>0)throw new IOException(validationError);
             await saveTask;if(!SaveHealthy)throw new IOException(saveError!=null?"先解决配置保存失败，再启动。":"正在保存配置，请稍候。");
             var draft=config.Draft.Copy();
-            var terminal=await ResolveLaunchTerminalAsync();await RefreshAsync();
+            await RefreshAsync();
             if(status?.Ok!=true)throw new IOException(status?.Message??"监控状态不可用");
             var admissionBlocked=status?.AdmissionHardBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
             // A pressure latch only stops a conservative launch; practical/custom launches stay advisory and are re-authorized by the monitor.
@@ -925,26 +924,22 @@ public partial class MainWindow : Window
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
             var started=new List<LaunchItem>();
-            try{await SubmitPanesAsync(terminal,plans,draft.Layout,launchCancellation.Token);started.AddRange(plans);}
+            try{await SubmitPanesAsync("",plans,draft.Layout,launchCancellation.Token);started.AddRange(plans);}
             catch
             {
                 started.AddRange(plans.Where(plan=>embeddedViews.ContainsKey(plan.Id)));
                 ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";
-                if(started.Count>=1){EnterWorkbench(started);ShowPartialLaunchNotice(started.Count,Math.Max(requested,started.Count),admission.Reason);}
+                CompleteLaunchSurface(started,requested,admission.Reason);
                 throw;
             }
-            if(started.Count>=1)
-            {
-                EnterWorkbench(started);
-                ShowPartialLaunchNotice(started.Count,Math.Max(requested,started.Count),string.IsNullOrWhiteSpace(admission.Reason)?"未能全部启动":admission.Reason);
-            }
-            else{ErrorText.Text="启动失败：没有启动任何 Agent";UpdateLaunch();return;}
+            CompleteLaunchSurface(started,requested,admission.Reason);
+            if(started.Count==0)return;
             if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="已提交启动，正在等待各 Agent 的进程回执。";
             for(var i=0;i<10;i++)
             {
                 if(launchCancellation.Token.IsCancellationRequested)break;
-                await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true)){if(config.MinimizeAfterLaunch&&!config.EmbeddedTerminal)WindowState=WindowState.Minimized;break;}
+                await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true))break;
                 // A short command can finish before the first poll; its verified terminal entry also completes observation.
                 // Missing entries remain unknown and keep the existing bounded wait.
                 if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&Store.IsTerminal(x))==true))break;
@@ -1082,7 +1077,7 @@ public partial class MainWindow : Window
     }
     private static string[] PresetArguments(AgentProfile profile,string[] preset)=>[..profile.Arguments.Take(Commands.ProfileProgramArgumentCount(profile)),..preset];
     private async void ResourceClick(object sender,RoutedEventArgs e)=>await GuardAsync(ShowResourceSettingsAsync);
-    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("host","Agent 窗口",config.EmbeddedTerminal?"internal":"external",false),("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["host"]=[("internal","启动器内"),("external","外置 Windows Terminal")],["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates,["管理远程主机"]=ManageRemoteHosts});
+    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates,["管理远程主机"]=ManageRemoteHosts});
     private async void SettingsClick(object sender,RoutedEventArgs e)=>await GuardAsync(()=>
     {
         if(applyingSettings)return Task.CompletedTask;applyingSettings=true;
@@ -1092,7 +1087,7 @@ public partial class MainWindow : Window
             if(readOnly||busy)throw new IOException("当前配置不可编辑，设置未保存。");
             if(!new[]{"system","light","dark"}.Contains(dialog.Values["theme"])||!bool.TryParse(dialog.Values["minimize"],out var minimize)||!bool.TryParse(dialog.Values["notify"],out var notify)||!int.TryParse(dialog.Values["scale"],out var scale)||scale is not (100 or 125 or 150))throw new IOException("设置值无效，未应用。");
             var destination=dialog.Values["worktree"].Trim();if(destination.Length>0)destination=await Task.Run(()=>PhysicalDirectory.Resolve(destination).Path);
-            if(readOnly||busy)throw new IOException("当前配置不可编辑，设置未保存。");var original=(config.EmbeddedTerminal,config.WorktreeDirectory,config.TerminalPath,config.Theme,config.TextScalePercent,config.MinimizeAfterLaunch,config.NotifyOnSessionEvents);config.EmbeddedTerminal=dialog.Values["host"]=="internal";config.WorktreeDirectory=destination;config.TerminalPath=dialog.Values["terminal"].Trim();config.Theme=dialog.Values["theme"];config.TextScalePercent=scale;config.MinimizeAfterLaunch=minimize;config.NotifyOnSessionEvents=notify;await SaveFormConfigurationAsync(()=>(config.EmbeddedTerminal,config.WorktreeDirectory,config.TerminalPath,config.Theme,config.TextScalePercent,config.MinimizeAfterLaunch,config.NotifyOnSessionEvents)=original);ApplyTheme();Render();return true;};dialog.ShowDialog();
+            if(readOnly||busy)throw new IOException("当前配置不可编辑，设置未保存。");var original=(config.EmbeddedTerminal,config.WorktreeDirectory,config.Theme,config.TextScalePercent,config.MinimizeAfterLaunch,config.NotifyOnSessionEvents);config.EmbeddedTerminal=true;config.WorktreeDirectory=destination;config.Theme=dialog.Values["theme"];config.TextScalePercent=scale;config.MinimizeAfterLaunch=minimize;config.NotifyOnSessionEvents=notify;await SaveFormConfigurationAsync(()=>(config.EmbeddedTerminal,config.WorktreeDirectory,config.Theme,config.TextScalePercent,config.MinimizeAfterLaunch,config.NotifyOnSessionEvents)=original);ApplyTheme();Render();return true;};dialog.ShowDialog();
         }
         finally{applyingSettings=false;}
         return Task.CompletedTask;

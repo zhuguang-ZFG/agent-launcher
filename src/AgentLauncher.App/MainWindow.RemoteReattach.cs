@@ -54,13 +54,12 @@ public partial class MainWindow
         ProgressText.Text = result.Message;
         try
         {
-            var terminal = await ResolveLaunchTerminalAsync();
-            await SubmitPanesAsync(terminal,[entry.Plan],"vertical",reattach:true);
-            ProgressText.Text = result.Message + " 已提交远程工作 Shell；未恢复原 Agent 的终端或对话。";
+            await SubmitPanesAsync("",[entry.Plan],"vertical",reattach:true);
+            ProgressText.Text = result.Message + " 已提交本地 SSH 窗格。";
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or FileNotFoundException)
         {
-            ErrorText.Text = "重新挂接已授权，但未能打开终端窗格：" + ex.Message + " 条目保持「正在重新挂接」，占用未释放。请确认 Windows Terminal 后再次挂接。";
+            ErrorText.Text = "重新挂接已授权，但未能打开终端窗格：" + ex.Message + " 条目保持「正在重新挂接」，占用未释放。请稍后再次挂接。";
         }
         await RefreshAsync();
     }
