@@ -1,8 +1,10 @@
 # 工作台界面重设计 Implementation Plan
 
+> 2026-11-27 修订：用户将并发上限从 8 个改为 6 个。本计划一律以 6 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把主窗口改成「一页起步、启动后变成最多 8 个真实可交互窗格的工作台」，看起来更干净，用起来只做选项目、勾选、启动和看着它们一起跑。
+**Goal:** 把主窗口改成「一页起步、启动后变成最多 6 个真实可交互窗格的工作台」，看起来更干净，用起来只做选项目、勾选、启动和看着它们一起跑。
 
 **Architecture:** 先在 `AgentLauncher.Core` 里把窗口状态、网格几何、起步页文案和主题色值写成可单测的纯函数，WPF 只负责绑定和展示。起步页和工作台是同一主窗口的两种互斥状态；工作台复用已有嵌入终端（`TerminalCard` / `TryShowEmbeddedAsync`），用新的 `WorkbenchLayout` 排成网格，不再把静态分屏预览或外部 Windows Terminal 当作启动后的默认界面。不修改 `ResourcePolicy` 阈值，也不改现有的 `PaneLayout`（那是外部 Terminal 分屏算法，最多 16 格，与本设计无关）。
 
@@ -11,7 +13,7 @@
 ## Global Constraints
 
 - 规格文件：`docs/superpowers/specs/2026-11-27-workspace-ui-redesign.md`（提交 `51ab5f7`）。规格与本计划冲突时以规格为准。
-- 最多 8 个真实 Agent 并发，不回到 16 窗格目标。
+- 最多 6 个真实 Agent 并发，不以 8 或 16 为窗格目标。
 - 不修改资源阈值、CPU 默认、Job 默认或预留下限。界面只改变展示与操作合流，准入仍走现有 `ResourcePolicy`。
 - 空窗格、只保活、或串行排队都不算成功。
 - 启动按钮只有一颗，文案是「启动 N 个」或「正在启动…」，主表面不再出现「检查资源并启动」「等待资源后启动」并排按钮，也不再把「本机预览不是启动授权」写在主表面。
@@ -26,7 +28,7 @@
 ## File Structure
 
 - Create: `src/AgentLauncher.Core/WorkbenchLayout.cs` — 窗口模式、窗格状态、网格几何（1/2/2×2/2×3/2×4、窄屏单列、最小 420×240）。
-- Create: `src/AgentLauncher.Core/StartPageSurface.cs` — 起步页和工作台主路径文案（启动按钮、禁用原因、容量、部分启动、第 9 个拒绝）。
+- Create: `src/AgentLauncher.Core/StartPageSurface.cs` — 起步页和工作台主路径文案（启动按钮、禁用原因、容量、部分启动、第 7 个拒绝）。
 - Create: `src/AgentLauncher.Core/ThemeTokens.cs` — 深色/浅色色值常量，供 `ApplyTheme` 和测试共用。
 - Create: `tests/AgentLauncher.Tests/WorkbenchLayoutChecks.cs`
 - Create: `tests/AgentLauncher.Tests/StartPageSurfaceChecks.cs`
@@ -60,7 +62,7 @@
   - `public enum MainWindowMode { StartPage, Workbench }`
   - `public enum WorkbenchPaneStatus { Starting, Running, Waiting, Pressure, Exited }`
   - `public static class WorkbenchLayout`
-  - `public const int MaxPanes = 8`
+  - `public const int MaxPanes = 6`
   - `public const int MinPaneWidth = 420`
   - `public const int MinPaneHeight = 240`
   - `public const double DefaultGap = 8`
@@ -99,7 +101,7 @@ internal static class WorkbenchLayoutChecks
     {
         void Assert(bool value, string message) { if (!value) throw new Exception(message); }
 
-        Test("workbench grid maps 1-8 panes and rejects 9", () =>
+        Test("workbench grid maps 1-6 panes and rejects 7", () =>
         {
             Assert(WorkbenchLayout.GridFor(0) == (0, 0), "empty");
             Assert(WorkbenchLayout.GridFor(1) == (1, 1), "1");
@@ -108,9 +110,7 @@ internal static class WorkbenchLayoutChecks
             Assert(WorkbenchLayout.GridFor(4) == (2, 2), "4");
             Assert(WorkbenchLayout.GridFor(5) == (2, 3), "5");
             Assert(WorkbenchLayout.GridFor(6) == (2, 3), "6");
-            Assert(WorkbenchLayout.GridFor(7) == (2, 4), "7");
-            Assert(WorkbenchLayout.GridFor(8) == (2, 4), "8");
-            try { WorkbenchLayout.GridFor(9); throw new Exception("9 should throw"); }
+            try { WorkbenchLayout.GridFor(7); throw new Exception("7 should throw"); }
             catch (ArgumentOutOfRangeException) { }
             try { WorkbenchLayout.GridFor(-1); throw new Exception("-1 should throw"); }
             catch (ArgumentOutOfRangeException) { }
@@ -205,7 +205,7 @@ public sealed record WorkbenchLayoutResult(int Columns, int Rows, bool SingleCol
 
 public static class WorkbenchLayout
 {
-    public const int MaxPanes = 8;
+    public const int MaxPanes = 6;
     public const int MinPaneWidth = 420;
     public const int MinPaneHeight = 240;
     public const double DefaultGap = 8;
@@ -219,8 +219,7 @@ public static class WorkbenchLayout
             1 => (1, 1),
             2 => (2, 1),
             <= 4 => (2, 2),
-            <= 6 => (2, 3),
-            _ => (2, 4)
+            _ => (2, 3)
         };
     }
 
@@ -278,7 +277,7 @@ Run:
 dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Release
 ```
 
-Expected: 编译成功，输出含 `PASS workbench grid maps 1-8 panes and rejects 9` 等 5 条新检查，且最终失败数为 0。
+Expected: 编译成功，输出含 `PASS workbench grid maps 1-6 panes and rejects 7` 等 5 条新检查，且最终失败数为 0。
 
 - [ ] **Step 6: Commit**
 
@@ -302,7 +301,7 @@ git commit -m "feat: add workbench grid geometry and window mode transitions."
 - Consumes: `WorkbenchLayout.MaxPanes`
 - Produces:
   - `public static class StartPageSurface`
-  - `public const string NinthDenied = "最多同时 8 个"`
+  - `public const string CapDenied = "最多同时 6 个"`
   - `public const string StartingButton = "正在启动…"`
   - `public const string BackToStart = "回到起步页"`
   - `public const string RestartPane = "重新启动"`
@@ -335,16 +334,16 @@ internal static class StartPageSurfaceChecks
         {
             Assert(StartPageSurface.LaunchButtonText(3, false) == "启动 3 个", "idle");
             Assert(StartPageSurface.LaunchButtonText(0, false) == "启动 0 个", "zero still reports the count");
-            Assert(StartPageSurface.LaunchButtonText(8, true) == "正在启动…", "starting");
+            Assert(StartPageSurface.LaunchButtonText(6, true) == "正在启动…", "starting");
         });
 
-        Test("ninth ready agent cannot be selected", () =>
+        Test("seventh ready agent cannot be selected", () =>
         {
             Assert(StartPageSurface.CanSelect(0, true), "first");
-            Assert(StartPageSurface.CanSelect(7, true), "eighth");
-            Assert(!StartPageSurface.CanSelect(8, true), "ninth");
+            Assert(StartPageSurface.CanSelect(5, true), "sixth");
+            Assert(!StartPageSurface.CanSelect(6, true), "seventh");
             Assert(!StartPageSurface.CanSelect(0, false), "unready");
-            Assert(StartPageSurface.NinthDenied == "最多同时 8 个", "copy");
+            Assert(StartPageSurface.CapDenied == "最多同时 6 个", "copy");
         });
 
         Test("disabled and capacity lines stay factual", () =>
@@ -352,11 +351,11 @@ internal static class StartPageSurfaceChecks
             Assert(StartPageSurface.DisabledReason(false, 0) == "还没有选项目", "project");
             Assert(StartPageSurface.DisabledReason(true, 0) == "还没有选 Agent", "agents");
             Assert(StartPageSurface.DisabledReason(true, 2) == "", "ready");
-            Assert(StartPageSurface.SelectionLine(3) == "已选 3 / 最多 8", "selection");
+            Assert(StartPageSurface.SelectionLine(3) == "已选 3 / 最多 6", "selection");
             Assert(StartPageSurface.CapacityLine(2) == "按当前测量，大约还可再开 2 个", "remaining");
             Assert(StartPageSurface.CapacityLine(null) == "暂不清楚", "unknown");
             Assert(StartPageSurface.CheckingCapacity == "正在检查", "checking");
-            Assert(StartPageSurface.PartialLaunchLine(5, 3, "内存不足") == "当前运行 5 / 最多 8，还差 3，因为内存不足", "partial");
+            Assert(StartPageSurface.PartialLaunchLine(4, 2, "内存不足") == "当前运行 4 / 最多 6，还差 2，因为内存不足", "partial");
         });
     }
 }
@@ -412,7 +411,7 @@ namespace AgentLauncher.Core;
 
 public static class StartPageSurface
 {
-    public const string NinthDenied = "最多同时 8 个";
+    public const string CapDenied = "最多同时 6 个";
     public const string StartingButton = "正在启动…";
     public const string BackToStart = "回到起步页";
     public const string RestartPane = "重新启动";
@@ -727,10 +726,10 @@ public partial class MainWindow
             check("agent chips live on the start page", AgentChipPanel.IsVisible && ReviewFind<ToggleButton>(AgentChipPanel).Any());
 
             var selected = CountReadySelected();
-            TrySelectNinthReadyAgent();
+            TrySelectOverCapReadyAgent();
             check("ninth ready agent stays unselected and explains the cap",
                 CountReadySelected() == Math.Min(selected, WorkbenchLayout.MaxPanes)
-                && (CountReadySelected() < WorkbenchLayout.MaxPanes || LaunchHint.Text.Contains(StartPageSurface.NinthDenied)));
+                && (CountReadySelected() < WorkbenchLayout.MaxPanes || LaunchHint.Text.Contains(StartPageSurface.CapDenied)));
         }
         finally
         {
@@ -747,7 +746,7 @@ public partial class MainWindow
 #endif
 ```
 
-在同一文件或 `MainWindow.Workbench.cs` 里先加会编译但不满足断言的占位：`windowMode` 字段、`ApplyWindowMode()`（暂时什么都不做）、`CountReadySelected()`（可用现有已选且命令就绪的计数，若还没有就返回 `config.Draft.Slots.Count(s => s.Enabled)`）、`TrySelectNinthReadyAgent()`（尝试再勾选一个已就绪槽；没有第 9 个时检查应视为通过 cap 逻辑而不是虚构槽位——若当前测试配置只有 2 个槽，另写一个只测 `StartPageSurface.CanSelect` 已在 Task 2 覆盖的说明不够。窗口检查里要真正造出 8 个已就绪槽再点第 9 个）。把测试配置扩成 9 个已启用槽（可重复 AgentId，但 Id 不同），再调用勾选逻辑。
+在同一文件或 `MainWindow.Workbench.cs` 里先加会编译但不满足断言的占位：`windowMode` 字段、`ApplyWindowMode()`（暂时什么都不做）、`CountReadySelected()`（可用现有已选且命令就绪的计数，若还没有就返回 `config.Draft.Slots.Count(s => s.Enabled)`）、`TrySelectOverCapReadyAgent()`（尝试再勾选一个已就绪槽；没有第 7 个时检查应视为通过 cap 逻辑而不是虚构槽位——若当前测试配置只有 2 个槽，另写一个只测 `StartPageSurface.CanSelect` 已在 Task 2 覆盖的说明不够。窗口检查里要真正造出 6 个已就绪槽再点第 7 个）。把测试配置扩成 7 个已启用槽（可重复 AgentId，但 Id 不同），再调用勾选逻辑。
 
 在 `UiChecks.cs` 的 `RunUiChecksAsync` 中调用 `await RunWorkbenchUiChecksAsync(Check);`。
 
@@ -766,8 +765,8 @@ Expected: 因缺少 `StartPagePanel` / `AgentChipPanel` 或预览仍可见而失
 - `Rail`、`PreviewCard`、`Preview` 默认 `Visibility="Collapsed"`。
 - 三个折叠区移出主表面：放到设置或「更多」已经打开的窗口/菜单中；起步页不要再渲染它们。如果现有代码仍按名字引用这些控件，保留控件但 `Visibility="Collapsed"`，并在设置页需要时再显示，避免编译中断。
 - 删除或折叠 `RefreshLaunchButton`。不要在主按钮旁再放「等待资源后启动」。
-- Agent 卡片由代码在 `AgentChipPanel`（`WrapPanel`）里生成：显示短名、本机/远程、就绪或未就绪。未就绪的卡片可见但 `IsEnabled=false`，并带原因。勾选走现有 `slot.Enabled` 或与当前勾选模型等价的字段；在写入前调用 `StartPageSurface.CanSelect`。拒绝第 9 个时把 `StartPageSurface.NinthDenied` 写到 `LaunchHint`。
-- `UpdateLaunch()` 设置 `LaunchButton.Content = StartPageSurface.LaunchButtonText(readyCount, busy || checkingLaunch || launchCancellation!=null)`。`readyCount==0` 或没有项目时禁用按钮，并用 `StartPageSurface.DisabledReason` 和 `SelectionLine`、`CapacityLine` 组成 `LaunchHint`。容量数字必须来自已有 `status.Memory` / 准入结果：算不出就用 `CheckingCapacity` 或 `CapacityLine(null)`，禁止把空值显示成 0，也禁止在没有测量时说一定能开满 8 个。
+- Agent 卡片由代码在 `AgentChipPanel`（`WrapPanel`）里生成：显示短名、本机/远程、就绪或未就绪。未就绪的卡片可见但 `IsEnabled=false`，并带原因。勾选走现有 `slot.Enabled` 或与当前勾选模型等价的字段；在写入前调用 `StartPageSurface.CanSelect`。拒绝第 7 个时把 `StartPageSurface.CapDenied` 写到 `LaunchHint`。
+- `UpdateLaunch()` 设置 `LaunchButton.Content = StartPageSurface.LaunchButtonText(readyCount, busy || checkingLaunch || launchCancellation!=null)`。`readyCount==0` 或没有项目时禁用按钮，并用 `StartPageSurface.DisabledReason` 和 `SelectionLine`、`CapacityLine` 组成 `LaunchHint`。容量数字必须来自已有 `status.Memory` / 准入结果：算不出就用 `CheckingCapacity` 或 `CapacityLine(null)`，禁止把空值显示成 0，也禁止在没有测量时说一定能开满 6 个。
 - 项目标题继续用短名；完整路径只放 `ToolTip`。可复用已有 `MiddleEllipsis`。
 - `ApplyWindowMode()`：`windowMode==StartPage` 时 `StartPagePanel.Visible`、工作台面板 `Collapsed`（若 Task 5 前工作台面板还不存在，先在 XAML 放一个 `WorkbenchPanel` `Collapsed` 空壳）。
 
@@ -804,7 +803,7 @@ git commit -m "feat: replace the start page with a single project, chip, and lau
 **Interfaces:**
 - Consumes: `WorkbenchLayout.AfterLaunchAttempt`、`Layout`、`ShowBackToStart`、已有 `TryShowEmbeddedAsync` / `TerminalCard`
 - Produces:
-  - `WorkbenchPanel`、顶栏显示项目短名、`运行中数 / 最多 8`、资源一句、`AddPaneButton`、设置、条件显示的 `BackToStartButton`（内容为 `StartPageSurface.BackToStart`）
+  - `WorkbenchPanel`、顶栏显示项目短名、`运行中数 / 最多 6`、资源一句、`AddPaneButton`、设置、条件显示的 `BackToStartButton`（内容为 `StartPageSurface.BackToStart`）
   - `WorkbenchHost` 为可滚动容器，按 `WorkbenchLayout.Layout(host.ActualWidth, host.ActualHeight, paneCount)` 放置格子
   - `ApplyWindowMode()` 在 `Workbench` 时隐藏 `StartPagePanel`、显示 `WorkbenchPanel`
   - 启动成功（`startedCount >= 1`）后 `windowMode = WorkbenchLayout.AfterLaunchAttempt(startedCount)`，即使其余 Agent 仍在启动
@@ -899,12 +898,12 @@ git commit -m "feat: switch the main window into a live embedded workbench after
 - Modify: `src/AgentLauncher.App/TerminalCard.cs`（只在必须把标题条和卡片组合在一起时改；能在外层包一层 Border 就不要改终端绘制）
 
 **Interfaces:**
-- Consumes: `WorkbenchPaneStatus`、`StartPageSurface.RestartPane`、`StartPageSurface.BackToStart`、`StartPageSurface.NinthDenied`、`WorkbenchLayout.MaxPanes`
-- Produces: 每格标题条约 28–32px，含序号、短名、本机/远程、状态点、菜单、停止。状态点颜色：`Starting`/`Waiting`/`Pressure` 用 `StatusWait`，`Running` 用 `StatusOk`，`Exited` 用 `StatusBad`。命令与完整路径进菜单。停止后格子留在网格，显示退出原因和「重新启动」。菜单「关闭格子」移出网格并 `RelayoutWorkbench()`。全部结束后不自动回到起步页，显示 `BackToStartButton`。`AddPaneButton` 在未满 8 格时打开短列表并新增启动；满 8 格（含已退出未关闭的格子）时禁用并提示已满。已退出的格子用「重新启动」，不另开重复格。双击标题铺满；再双击或「回到网格」恢复。焦点窗格用 `Accent` 细描边。
+- Consumes: `WorkbenchPaneStatus`、`StartPageSurface.RestartPane`、`StartPageSurface.BackToStart`、`StartPageSurface.CapDenied`、`WorkbenchLayout.MaxPanes`
+- Produces: 每格标题条约 28–32px，含序号、短名、本机/远程、状态点、菜单、停止。状态点颜色：`Starting`/`Waiting`/`Pressure` 用 `StatusWait`，`Running` 用 `StatusOk`，`Exited` 用 `StatusBad`。命令与完整路径进菜单。停止后格子留在网格，显示退出原因和「重新启动」。菜单「关闭格子」移出网格并 `RelayoutWorkbench()`。全部结束后不自动回到起步页，显示 `BackToStartButton`。`AddPaneButton` 在未满 6 格时打开短列表并新增启动；满 6 格（含已退出未关闭的格子）时禁用并提示已满。已退出的格子用「重新启动」，不另开重复格。双击标题铺满；再双击或「回到网格」恢复。焦点窗格用 `Accent` 细描边。
 
 - [ ] **Step 1: 写失败检查**
 
-覆盖：停止一格后 `windowMode` 仍是 `Workbench` 且该格有「重新启动」；全部结束后出现「回到起步页」且模式不变；按下后回到起步页；已有 8 格时 `AddPaneButton.IsEnabled==false`；双击铺满后 `WorkbenchHost` 只显示一格，再双击恢复。用假状态，不要杀真实进程；停止测试可以只走 UI 状态机（把该格标为 `Exited`）再另测真正的停止命令接线。
+覆盖：停止一格后 `windowMode` 仍是 `Workbench` 且该格有「重新启动」；全部结束后出现「回到起步页」且模式不变；按下后回到起步页；已有 6 格时 `AddPaneButton.IsEnabled==false`；双击铺满后 `WorkbenchHost` 只显示一格，再双击恢复。用假状态，不要杀真实进程；停止测试可以只走 UI 状态机（把该格标为 `Exited`）再另测真正的停止命令接线。
 
 - [ ] **Step 2: 实现铬条与状态机**
 
@@ -946,7 +945,7 @@ git commit -m "feat: keep exited workbench panes and add restart, layout, and re
 
 - [ ] **Step 1: 写失败检查**
 
-用 `ResizeForCheckAsync` 把窗口缩到宽度 `< 420 * 2 + 8`，放 3 个假格子，断言 `WorkbenchLayout.Layout` 为单列且 `ScrollViewer` 可滚动、停止按钮 `IsVisible`。再测 `Ctrl+Tab` 把焦点从格 0 移到格 1。起步页测空格勾选与第 9 个拒绝（若 Task 4 已覆盖则不要重复造冲突断言）。
+用 `ResizeForCheckAsync` 把窗口缩到宽度 `< 420 * 2 + 8`，放 3 个假格子，断言 `WorkbenchLayout.Layout` 为单列且 `ScrollViewer` 可滚动、停止按钮 `IsVisible`。再测 `Ctrl+Tab` 把焦点从格 0 移到格 1。起步页测空格勾选与第 7 个拒绝（若 Task 4 已覆盖则不要重复造冲突断言）。
 
 - [ ] **Step 2: 实现键盘与窄屏**
 
@@ -962,9 +961,9 @@ dotnet run --project tests/AgentLauncher.Tests/AgentLauncher.Tests.csproj -c Rel
 powershell -NoProfile -File scripts/test.ps1 -SkipBrowser
 ```
 
-Expected: 模型测试和 launch-surface 检查失败数为 0；`test.ps1 -SkipBrowser` 中的原生/模型/集成/UI 检查通过。不要跑会启动真实 8 Agent 或改机器全局设置的套件。若个别与本设计无关的远程 live 检查未在 `-SkipBrowser` 路径里，不要为了「全绿」去放宽阈值或跳过失败而不记载。
+Expected: 模型测试和 launch-surface 检查失败数为 0；`test.ps1 -SkipBrowser` 中的原生/模型/集成/UI 检查通过。不要跑会启动真实 6 Agent 或改机器全局设置的套件。若个别与本设计无关的远程 live 检查未在 `-SkipBrowser` 路径里，不要为了「全绿」去放宽阈值或跳过失败而不记载。
 
-对照规格第 8 节逐条勾验收：无预览、无三套重复、无并排两颗启动按钮、1/2/4/8 真实窗格、第 9 个拒绝、部分启动说明、退出留格、全部结束不自动返回、窄屏单列、默认深色与浅色可切换。缺哪条就补检查，不要只在文档里声称完成。
+对照规格第 8 节逐条勾验收：无预览、无三套重复、无并排两颗启动按钮、1/2/4/6 真实窗格、第 7 个拒绝、部分启动说明、退出留格、全部结束不自动返回、窄屏单列、默认深色与浅色可切换。缺哪条就补检查，不要只在文档里声称完成。
 
 - [ ] **Step 4: Commit**
 
