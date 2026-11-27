@@ -37,6 +37,17 @@ public partial class MainWindow
                 foreach (var nested in FindLogical<T>(child)) yield return nested;
             }
         }
+        async Task<bool> WaitForPublishedTaskEditAsync(Func<TaskBook, bool> ready)
+        {
+            bool Published()
+            {
+                var persisted = taskStore.Load();
+                // Disk publication precedes the event handler's dispatcher continuation and taskBook assignment.
+                return taskBook is { } current && current.Revision == persisted.Revision && ready(current) && ready(persisted);
+            }
+            for (var i = 0; i < 50 && !Published(); i++) await Task.Delay(100);
+            return Published();
+        }
         var tasksPath = Store.FilePath("tasks.json");
         File.Delete(tasksPath);
         File.Delete(tasksPath + ".bak");
@@ -57,8 +68,8 @@ public partial class MainWindow
         var acceptance = FindLogical<CheckBox>(TaskList).First(box => AutomationProperties.GetName(box).StartsWith("验收 ", StringComparison.Ordinal));
         acceptance.IsChecked = true;
         acceptance.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
-        for (var i = 0; i < 50 && !taskStore.Load().Tasks.Single(task => task.Id == waiting.Id).Acceptance[0].Checked; i++) await Task.Delay(100);
-        check("ACC-B05 accepting a checkbox persists without dropping the queue", taskStore.Load().Tasks.Single(task => task.Id == waiting.Id).Acceptance[0].Checked && taskStore.Load().Queue.Count == 1);
+        var acceptancePublished = await WaitForPublishedTaskEditAsync(current => current.Tasks.Single(task => task.Id == waiting.Id).Acceptance[0].Checked);
+        check("ACC-B05 accepting a checkbox persists without dropping the queue", acceptancePublished && taskStore.Load().Tasks.Single(task => task.Id == waiting.Id).Acceptance[0].Checked && taskStore.Load().Queue.Count == 1);
         check("ACC-B05 resume action appears only for a settled session", FindLogical<Button>(TaskList).Any(button => AutomationProperties.GetName(button) == "续接会话 任务乙")
             && !FindLogical<Button>(TaskList).Any(button => AutomationProperties.GetName(button) == "续接会话 任务甲"));
         await ToggleQueueAsync();
@@ -99,9 +110,9 @@ public partial class MainWindow
         var dequeueButton = FindLogical<Button>(TaskList).FirstOrDefault(button => AutomationProperties.GetName(button) == "移出队列 任务甲");
         check("ACC-B07 queued task exposes queue-only removal", dequeueButton != null);
         dequeueButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        for (var i = 0; i < 50 && taskStore.Load().Queue.Count > 0; i++) await Task.Delay(100);
+        var dequeuePublished = await WaitForPublishedTaskEditAsync(current => current.Queue.Count == 0);
         check("ACC-B07 removing a queued item keeps attempts and the task record",
-            taskStore.Load().Queue.Count == 0 && taskStore.Load().Attempts.Count == attemptsBeforeDequeue && taskStore.Load().Tasks.Any(task => task.Id == waiting.Id));
+            dequeuePublished && taskStore.Load().Queue.Count == 0 && taskStore.Load().Attempts.Count == attemptsBeforeDequeue && taskStore.Load().Tasks.Any(task => task.Id == waiting.Id));
         await RunTaskCommandChecksAsync(check);
         var retainedItem = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "retained", Store.Root, PhysicalDirectory.Workspace(Store.Root), false, new CommandSpec(Path.Combine(Environment.SystemDirectory, "cmd.exe"), [], "exe"), ResourcePolicy.AgentBudget,SourceSlotId:Guid.NewGuid());
         var retainedRun=new TaskRun{AttemptId=retainedItem.Id,BatchId=retainedItem.BatchId,TaskId=retainedItem.SourceSlotId!.Value,WorkspaceKey=retainedItem.Workspace.Key};
