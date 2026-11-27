@@ -156,7 +156,7 @@ public partial class MainWindow
     private void MainKeyDown(object sender, KeyEventArgs e)
     {
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
-        var modifiers = Keyboard.Modifiers;
+        var modifiers = EventModifiers(e);
         if (TryHandleWorkbenchFocusKey(key, modifiers, e.IsRepeat))
         { e.Handled = true; return; }
         if(Keyboard.FocusedElement is TerminalCard)return;
@@ -177,5 +177,13 @@ public partial class MainWindow
             var index = (int)key - (int)Key.D1;
             if (!e.IsRepeat && index < config.Draft.Slots.Count) NavigateToSlot(config.Draft.Slots[index].Id);
         }
+    }
+
+    private ModifierKeys EventModifiers(KeyEventArgs e)
+    {
+#if INTEGRATION_TESTS
+        if (previewModifiersForChecks is { } forced) return forced;
+#endif
+        return Keyboard.Modifiers;
     }
 }

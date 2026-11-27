@@ -892,6 +892,10 @@ public partial class MainWindow : Window
     }
     private async void LaunchClick(object sender,RoutedEventArgs e)
     {
+#if INTEGRATION_TESTS
+        startPageLaunchClicksForChecks++;
+        if (suppressLaunchForChecks) return;
+#endif
         if(closeRequested||busy||launchFinalizing||launchCancellation!=null||!cancelTask.IsCompleted||readOnly||submittedAttempts.Length>0)return;
         launchTask=LaunchAsync();
         await GuardAsync(()=>launchTask);

@@ -129,18 +129,42 @@ public partial class MainWindow
             var seventhId = config.Draft.Slots[6].Id;
             ToggleButton ChipFor(Guid id) => ReviewFind<ToggleButton>(AgentChipPanel).Single(button => Equals(button.Tag, id));
             Slot SlotFor(Guid id) => config.Draft.Slots.Single(slot => slot.Id == id);
-            ToggleStartPageChipForChecks(ChipFor(toggleId));
+            await FocusElementForChecksAsync(ChipFor(toggleId));
+            var spaceOff = RaiseWindowPreviewKeyDownForChecks(Key.Space, ModifierKeys.None);
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
-            var toggledOff = !SlotFor(toggleId).Enabled && ChipFor(toggleId).IsChecked != true;
-            ToggleStartPageChipForChecks(ChipFor(toggleId));
+            var toggledOff = spaceOff.Handled && !SlotFor(toggleId).Enabled && ChipFor(toggleId).IsChecked != true;
+            await FocusElementForChecksAsync(ChipFor(toggleId));
+            var spaceOn = RaiseWindowPreviewKeyDownForChecks(Key.Space, ModifierKeys.None);
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
-            check("Space toggles the current agent chip when selection is allowed",
-                toggledOff && SlotFor(toggleId).Enabled && ChipFor(toggleId).IsChecked == true);
+            check("window PreviewKeyDown Space toggles the current agent chip when selection is allowed",
+                spaceOn.Handled && toggledOff && SlotFor(toggleId).Enabled && ChipFor(toggleId).IsChecked == true);
 
-            ToggleStartPageChipForChecks(ChipFor(seventhId));
+            await FocusElementForChecksAsync(ChipFor(seventhId));
+            var spaceSeventh = RaiseWindowPreviewKeyDownForChecks(Key.Space, ModifierKeys.None);
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
-            check("Space does not select the seventh ready agent",
-                !SlotFor(seventhId).Enabled && ChipFor(seventhId).IsChecked != true && CountReadySelected() == WorkbenchLayout.MaxPanes);
+            check("window PreviewKeyDown Space does not select the seventh ready agent",
+                spaceSeventh.Handled && !SlotFor(seventhId).Enabled && ChipFor(seventhId).IsChecked != true && CountReadySelected() == WorkbenchLayout.MaxPanes);
+
+            await commandCheckTask;
+            await saveTask;
+            UpdateLaunch();
+            check("start-page launch button is enabled and still the default button", LaunchButton.IsEnabled && LaunchButton.IsDefault);
+            suppressLaunchForChecks = true;
+            startPageLaunchClicksForChecks = 0;
+            try
+            {
+                await FocusElementForChecksAsync(LaunchButton);
+                var enterStart = RaiseWindowPreviewKeyDownForChecks(Key.Enter, ModifierKeys.None);
+                check("window PreviewKeyDown Enter on the start page calls launch and stays on the start page",
+                    enterStart.Handled
+                    && startPageLaunchClicksForChecks == 1
+                    && windowMode == MainWindowMode.StartPage
+                    && LaunchButton.IsDefault);
+            }
+            finally
+            {
+                suppressLaunchForChecks = false;
+            }
 
             var selectedUnready = config.Draft.Slots.First(slot => slot.Enabled);
             chipStatus[selectedUnready.Id] = (false, "命令不可用");
@@ -468,14 +492,52 @@ public partial class MainWindow
             var focusB = FakePlan(2, "焦点乙");
             EnterWorkbench([focusA, focusB]);
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
-            FocusWorkbenchPane(workbenchPanes[0]);
-            var moved = HandleWorkbenchFocusKeyForChecks(Key.Tab, ModifierKeys.Control);
+            check("entering the workbench clears LaunchButton.IsDefault", !LaunchButton.IsDefault);
+            var first = workbenchPanes[0];
+            var second = workbenchPanes[1];
+            FocusWorkbenchPane(first);
+            await FocusElementForChecksAsync(first.Card);
+            check("Ctrl+Tab is raised with a TerminalCard focused", Keyboard.FocusedElement is TerminalCard);
+            var tab = RaiseWindowPreviewKeyDownForChecks(Key.Tab, ModifierKeys.Control);
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
-            check("Ctrl+Tab moves focus from the first pane to the second",
-                moved
-                && focusedPaneId == workbenchPanes[1].Id
-                && workbenchPanes[1].Root.BorderThickness == new Thickness(2)
-                && workbenchPanes[0].Root.BorderThickness == new Thickness(1));
+            check("window PreviewKeyDown Ctrl+Tab moves focus from the first pane to the second",
+                tab.Handled
+                && focusedPaneId == second.Id
+                && ReferenceEquals(Keyboard.FocusedElement, second.Card)
+                && second.Root.BorderThickness == new Thickness(2)
+                && first.Root.BorderThickness == new Thickness(1));
+            var shiftTab = RaiseWindowPreviewKeyDownForChecks(Key.Tab, ModifierKeys.Control | ModifierKeys.Shift);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("window PreviewKeyDown Ctrl+Shift+Tab moves focus back to the first pane",
+                shiftTab.Handled
+                && focusedPaneId == first.Id
+                && ReferenceEquals(Keyboard.FocusedElement, first.Card)
+                && first.Root.BorderThickness == new Thickness(2)
+                && second.Root.BorderThickness == new Thickness(1));
+            startPageLaunchClicksForChecks = 0;
+            var enterWorkbench = RaiseWindowPreviewKeyDownForChecks(Key.Enter, ModifierKeys.None);
+            check("Enter on the workbench does not launch and IsDefault stays false",
+                !enterWorkbench.Handled
+                && windowMode == MainWindowMode.Workbench
+                && startPageLaunchClicksForChecks == 0
+                && !LaunchButton.IsDefault);
+            var focusTitle = ReviewFind<FrameworkElement>(first.Root).FirstOrDefault(item => AutomationProperties.GetName(item) == "焦点甲 标题");
+            if (focusTitle is not null) DoubleClick(focusTitle);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("double-click maximize hides the unfocused sibling",
+                focusTitle is not null
+                && first.Root.Visibility == Visibility.Visible
+                && second.Root.Visibility == Visibility.Collapsed);
+            await FocusElementForChecksAsync(first.Card);
+            var maximizedTab = RaiseWindowPreviewKeyDownForChecks(Key.Tab, ModifierKeys.Control);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("Ctrl+Tab while maximized does not move focus to a collapsed sibling",
+                maximizedTab.Handled
+                && focusedPaneId == first.Id
+                && ReferenceEquals(Keyboard.FocusedElement, first.Card)
+                && second.Root.Visibility == Visibility.Collapsed);
+            if (focusTitle is not null) DoubleClick(focusTitle);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
 
             ResetWorkbenchForChecks();
             var narrowPlans = Enumerable.Range(1, 3).Select(index => FakePlan(index, "窄列" + index)).ToArray();
@@ -509,6 +571,14 @@ public partial class MainWindow
                 && WorkbenchScroll.ComputedVerticalScrollBarVisibility == Visibility.Visible
                 && stopVisible
                 && titleVisible);
+            check("narrow tiles all sit at X=0 with increasing Y",
+                narrowLayout.Tiles.Count >= 3
+                && narrowLayout.Tiles.All(tile => tile.X == 0)
+                && narrowLayout.Tiles[0].Y < narrowLayout.Tiles[1].Y
+                && narrowLayout.Tiles[1].Y < narrowLayout.Tiles[2].Y
+                && workbenchPanes.Take(3).All(pane => Canvas.GetLeft(pane.Root) == 0)
+                && Canvas.GetTop(workbenchPanes[0].Root) < Canvas.GetTop(workbenchPanes[1].Root)
+                && Canvas.GetTop(workbenchPanes[1].Root) < Canvas.GetTop(workbenchPanes[2].Root));
             if (!string.IsNullOrWhiteSpace(folder))
             {
                 var dpi = VisualTreeHelper.GetDpi(this);
@@ -519,6 +589,25 @@ public partial class MainWindow
                 using var output = System.IO.File.Create(System.IO.Path.Combine(folder, "native-narrow-workbench.png"));
                 encoder.Save(output);
             }
+            var narrowTitle = narrowRoot is null ? null : ReviewFind<FrameworkElement>(narrowRoot).FirstOrDefault(item => AutomationProperties.GetName(item) == "窄列1 标题");
+            if (narrowTitle is not null)
+            {
+                narrowTitle.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
+                {
+                    RoutedEvent = UIElement.MouseLeftButtonDownEvent,
+                    Source = narrowTitle
+                });
+            }
+            var narrowStopButton = narrowRoot is null ? null : ReviewFind<Button>(narrowRoot).FirstOrDefault(button => Equals(button.Content, "停止") && button.IsVisible);
+            if (narrowStopButton is not null) narrowStopButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("narrow column title and Stop remain clickable without leaving the workbench",
+                narrowTitle is not null
+                && narrowStopButton is not null
+                && windowMode == MainWindowMode.Workbench
+                && focusedPaneId == workbenchPanes[0].Id
+                && HasButton(PaneRoot("窄列1"), StartPageSurface.RestartPane)
+                && !HasButton(PaneRoot("窄列1"), "停止"));
             ResetWorkbenchForChecks();
             var slashRoot = System.IO.Path.Combine(Store.Root, "slash-root");
             var slashPlan = FakePlan(1, "斜杠甲") with { SourceSlotId = Guid.NewGuid(), AgentId = "slash", Cwd = slashRoot };

@@ -6,6 +6,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
@@ -492,11 +493,12 @@ public partial class MainWindow
 
     private void CycleWorkbenchFocus(bool backward)
     {
-        if (workbenchPanes.Count == 0) return;
-        var index = focusedPaneId is { } id ? workbenchPanes.FindIndex(pane => pane.Id == id) : -1;
-        if (index < 0) index = backward ? 0 : workbenchPanes.Count - 1;
-        var next = (index + (backward ? -1 : 1) + workbenchPanes.Count) % workbenchPanes.Count;
-        FocusWorkbenchPane(workbenchPanes[next]);
+        var visible = workbenchPanes.Where(pane => pane.Root.Visibility == Visibility.Visible).ToArray();
+        if (visible.Length == 0) return;
+        var index = focusedPaneId is { } id ? Array.FindIndex(visible, pane => pane.Id == id) : -1;
+        if (index < 0) index = backward ? 0 : visible.Length - 1;
+        var next = (index + (backward ? -1 : 1) + visible.Length) % visible.Length;
+        FocusWorkbenchPane(visible[next]);
     }
 
     private bool TryHandleWorkbenchFocusKey(Key key, ModifierKeys modifiers, bool isRepeat)
@@ -716,16 +718,42 @@ public partial class MainWindow
 
 #if INTEGRATION_TESTS
     private string? workbenchLaunchFailureForChecks;
+    private ModifierKeys? previewModifiersForChecks;
+    private bool suppressLaunchForChecks;
+    private int startPageLaunchClicksForChecks;
 
-    private bool HandleWorkbenchFocusKeyForChecks(Key key, ModifierKeys modifiers) =>
-        TryHandleWorkbenchFocusKey(key, modifiers, false);
+    private KeyEventArgs RaiseWindowPreviewKeyDownForChecks(Key key, ModifierKeys modifiers)
+    {
+        var source = PresentationSource.FromVisual(this)
+            ?? throw new InvalidOperationException("窗口尚未挂到 PresentationSource，无法触发 PreviewKeyDown。");
+        var args = new KeyEventArgs(Keyboard.PrimaryDevice, source, Environment.TickCount, key)
+        {
+            RoutedEvent = Keyboard.PreviewKeyDownEvent
+        };
+        previewModifiersForChecks = modifiers;
+        try
+        {
+            RaiseEvent(args);
+        }
+        finally
+        {
+            previewModifiersForChecks = null;
+        }
+        return args;
+    }
 
-    private bool ToggleStartPageChipForChecks(ToggleButton chip) => TryToggleStartPageChip(chip);
-
+    private async Task FocusElementForChecksAsync(IInputElement element)
+    {
+        if (!element.Focus()) throw new InvalidOperationException("无法把焦点放到目标控件。");
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Input);
+    }
 
     private void ResetWorkbenchForChecks()
     {
         workbenchLaunchFailureForChecks = null;
+        previewModifiersForChecks = null;
+        suppressLaunchForChecks = false;
+        startPageLaunchClicksForChecks = 0;
         ClearWorkbenchTiles();
         windowMode = MainWindowMode.StartPage;
         WorkbenchPanel.BeginAnimation(OpacityProperty, null);
