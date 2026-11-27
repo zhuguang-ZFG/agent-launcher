@@ -1,4 +1,4 @@
-﻿#if INTEGRATION_TESTS
+#if INTEGRATION_TESTS
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
@@ -251,11 +251,12 @@ public partial class MainWindow
             FindLogical<Button>(settingsDialog).Single(b=>b.Content as string=="应用").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         }));
         Check("settings apply selected theme scale minimize and notify values",settingsDialog.ShowDialog()==true&&settingsDialog.Values["theme"]=="dark"&&settingsDialog.Values["scale"]=="150"&&settingsDialog.Values["minimize"]=="true"&&settingsDialog.Values["notify"]=="true");
+        static string ToHex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
         config.Theme="dark";ApplyTheme();Render();var darkInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var darkPage=((SolidColorBrush)Background).Color;
-        Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1E2A3F")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#232733")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
+        Check("dark palette complete",SystemParameters.HighContrast||ToHex(((SolidColorBrush)Application.Current.Resources["Selected"]).Color)=="#1E2A3F"&&ToHex(((SolidColorBrush)Application.Current.Resources["Raised"]).Color)=="#232733"&&ThemeTokens.Dark.StatusWait==ToHex(((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color));
         LaunchOptionsExpander.ApplyTemplate();UpdateLayout();var expanderHeader=Find<System.Windows.Controls.Primitives.ToggleButton>(LaunchOptionsExpander).FirstOrDefault();
         Check("expander header text follows theme ink",SystemParameters.HighContrast||expanderHeader?.Foreground is SolidColorBrush headerInk&&headerInk.Color==darkInk);
-        Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#9AA3B2"));
+        Check("row labels follow theme",SystemParameters.HighContrast||ThemeTokens.Dark.Muted==ToHex(((SolidColorBrush)commandLabels.Values.First().Foreground).Color));
         var agentCombo=AgentCombo();ComboBoxItem? selectedItem=null;
         for(var i=0;i<20;i++)
         {
@@ -271,8 +272,8 @@ public partial class MainWindow
         Check("dropdown selection readable in dark",SystemParameters.HighContrast||(selectionBrush!=null&&selectionBrush.Color==(Color)ColorConverter.ConvertFromString("#1E2A3F")));
         agentCombo.IsDropDownOpen=false;
         config.Theme="light";ApplyTheme();Render();var lightInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var lightPage=((SolidColorBrush)Background).Color;
-        Check("theme resources switch",(Color)ColorConverter.ConvertFromString("#ECEFF5")==darkInk&&(Color)ColorConverter.ConvertFromString("#1F2430")==lightInk);
-        Check("window background follows theme",(Color)ColorConverter.ConvertFromString("#14161C")==darkPage&&(Color)ColorConverter.ConvertFromString("#F4F6FB")==lightPage);
+        Check("theme resources switch",ThemeTokens.Dark.Ink==ToHex(darkInk)&&ThemeTokens.Light.Ink==ToHex(lightInk));
+        Check("window background follows theme",ThemeTokens.Dark.Page==ToHex(darkPage)&&ThemeTokens.Light.Page==ToHex(lightPage));
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();await saveTask;
         await Task.Delay(1000);
         using(var process=Process.GetCurrentProcess()){process.Refresh();Store.Save(System.IO.Path.Combine(folder,"ui-idle-memory.json"),new{PrivateBytes=process.PrivateMemorySize64,WorkingSet=process.WorkingSet64});}

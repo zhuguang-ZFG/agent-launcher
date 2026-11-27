@@ -4,26 +4,31 @@
  xmlns:local="clr-namespace:AgentLauncher.App">
  <Application.Resources>
   <BooleanToVisibilityConverter x:Key="BooleanVisibility"/>
-  <SolidColorBrush x:Key="Page" Color="#F4F6FB"/>
+  <SolidColorBrush x:Key="Page" Color="#F6F8FA"/>
   <SolidColorBrush x:Key="Surface" Color="#FFFFFF"/>
+  <SolidColorBrush x:Key="HeaderSurface" Color="#F0F2F4"/>
   <SolidColorBrush x:Key="Raised" Color="#F0F3FA"/>
-  <SolidColorBrush x:Key="Ink" Color="#1F2430"/>
-  <SolidColorBrush x:Key="Muted" Color="#6E7686"/>
-  <SolidColorBrush x:Key="Line" Color="#E2E7F0"/>
+  <SolidColorBrush x:Key="Ink" Color="#1F2328"/>
+  <SolidColorBrush x:Key="Muted" Color="#656D76"/>
+  <SolidColorBrush x:Key="Line" Color="#D0D7DE"/>
   <SolidColorBrush x:Key="InputLine" Color="#C0C8D8"/>
-  <SolidColorBrush x:Key="Accent" Color="#3B82F6"/>
+  <SolidColorBrush x:Key="Accent" Color="#2F81F7"/>
   <SolidColorBrush x:Key="AccentSoft" Color="#60A5FA"/>
   <SolidColorBrush x:Key="AccentPressed" Color="#2563EB"/>
   <SolidColorBrush x:Key="AccentInk" Color="#FFFFFF"/>
   <SolidColorBrush x:Key="Selected" Color="#E7F0FE"/>
   <SolidColorBrush x:Key="WarningSurface" Color="#FFF5E5"/>
-  <SolidColorBrush x:Key="WarningInk" Color="#8A4B08"/>
-  <SolidColorBrush x:Key="StatusOk" Color="#22C55E"/>
+  <SolidColorBrush x:Key="WarningInk" Color="#D29922"/>
+  <SolidColorBrush x:Key="StatusOk" Color="#3FB950"/>
+  <SolidColorBrush x:Key="StatusWait" Color="#D29922"/>
   <SolidColorBrush x:Key="StatusOff" Color="#9AA3B2"/>
-  <SolidColorBrush x:Key="StatusBad" Color="#EF4444"/>
+  <SolidColorBrush x:Key="StatusBad" Color="#F85149"/>
   <SolidColorBrush x:Key="RailSurface" Color="#EDF1F8"/>
-  <SolidColorBrush x:Key="ErrorInk" Color="#EF4444"/>
-  <SolidColorBrush x:Key="SelectionInk" Color="#1F2430"/>
+  <SolidColorBrush x:Key="ErrorInk" Color="#F85149"/>
+  <SolidColorBrush x:Key="SelectionInk" Color="#1F2328"/>
+  <SolidColorBrush x:Key="AgentPi" Color="#3B82F6"/>
+  <SolidColorBrush x:Key="AgentKimi" Color="#8B5CF6"/>
+  <SolidColorBrush x:Key="AgentQoder" Color="#14B8A6"/>
   <SolidColorBrush x:Key="AgentCodex" Color="#22C55E"/>
   <SolidColorBrush x:Key="AgentOmp" Color="#F59E0B"/>
   <SolidColorBrush x:Key="PreviewPage" Color="#191B20"/>

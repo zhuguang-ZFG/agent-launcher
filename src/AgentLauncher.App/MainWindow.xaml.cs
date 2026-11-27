@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
@@ -1324,20 +1324,38 @@ var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的�
     {
         var dark=config.Theme=="dark";
         if(config.Theme=="system"){try{using var key=Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");dark=key?.GetValue("AppsUseLightTheme") is int value&&value==0;}catch(Exception e)when(e is IOException or UnauthorizedAccessException or System.Security.SecurityException){dark=false;}}
-        var colors=dark?new[]{"#1C1F27","#14161C","#ECEFF5","#9AA3B2","#2A2F3A","#232733","#1E2A3F","#3A4150","#3D3120","#E8B45C"}:new[]{"#FFFFFF","#F4F6FB","#1F2430","#6E7686","#E2E7F0","#F0F3FA","#E7F0FE","#C0C8D8","#FFF5E5","#8A4B08"};
-        var resources=Application.Current.Resources;var keys=new[]{"Surface","Page","Ink","Muted","Line","Raised","Selected","InputLine","WarningSurface","WarningInk"};for(var i=0;i<keys.Length;i++)resources[keys[i]]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(colors[i]));
-        resources["Accent"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#60A5FA":"#3B82F6"));resources["AccentInk"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#0B1220":"#FFFFFF"));resources["SelectionInk"]=resources["Ink"];resources["ErrorInk"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#F87171":"#EF4444"));
-        resources["AccentSoft"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#7CB8FC":"#60A5FA"));resources["AccentPressed"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#3B82F6":"#2563EB"));
-        foreach(var (key,color) in new[]{("PreviewPage","#191B20"),("PreviewSurface","#0F1116"),("PreviewLine","#34373F"),("PreviewInk","#D7DBE2"),("PreviewMuted","#A5ABB6")})resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
-        // Rail status tokens: the three dots and the rail surface keep their own light/dark pair so the rail reads as one layer below Page.
-        foreach(var (key,darkColor,lightColor) in new[]{("StatusOk","#4ADE80","#22C55E"),("StatusOff","#6B7280","#9AA3B2"),("StatusBad","#F87171","#EF4444"),("RailSurface","#171A21","#EDF1F8")})resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?darkColor:lightColor));
-        // Per-agent identity colors (variant C); dark uses brightened tints so badges stay legible on dark surfaces.
-        foreach(var (key,darkColor,lightColor) in new[]{("AgentCodex","#4ADE80","#22C55E"),("AgentOmp","#FBBF24","#F59E0B")})resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?darkColor:lightColor));
+        var resources=Application.Current.Resources;
+        var palette=dark?ThemeTokens.Dark:ThemeTokens.Light;
+        void Set(string key,string color)=>resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
+        Set("Page",palette.Page);
+        Set("Surface",palette.Surface);
+        Set("HeaderSurface",palette.Header);
+        Set("Line",palette.Line);
+        Set("Ink",palette.Ink);
+        Set("Muted",palette.Muted);
+        Set("Accent",palette.Accent);
+        Set("StatusOk",palette.StatusOk);
+        Set("StatusWait",palette.StatusWait);
+        Set("StatusBad",palette.StatusBad);
+        Set("ErrorInk",palette.StatusBad);
+        Set("WarningInk",palette.StatusWait);
+        Set("Raised",dark?"#232733":"#F0F3FA");
+        Set("Selected",dark?"#1E2A3F":"#E7F0FE");
+        Set("InputLine",dark?"#3A4150":"#C0C8D8");
+        Set("WarningSurface",dark?"#3D3120":"#FFF5E5");
+        Set("AccentInk",dark?"#0B1220":"#FFFFFF");
+        Set("AccentSoft",dark?"#7CB8FC":"#60A5FA");
+        Set("AccentPressed",dark?"#3B82F6":"#2563EB");
+        resources["SelectionInk"]=resources["Ink"];
+        foreach(var (key,color) in new[]{("PreviewPage","#191B20"),("PreviewSurface","#0F1116"),("PreviewLine","#34373F"),("PreviewInk","#D7DBE2"),("PreviewMuted","#A5ABB6")})Set(key,color);
+        Set("StatusOff",dark?"#6B7280":"#9AA3B2");
+        Set("RailSurface",dark?"#171A21":"#EDF1F8");
+        foreach(var (key,darkColor,lightColor) in new[]{("AgentPi","#60A5FA","#3B82F6"),("AgentKimi","#A78BFA","#8B5CF6"),("AgentQoder","#2DD4BF","#14B8A6"),("AgentCodex","#4ADE80","#22C55E"),("AgentOmp","#FBBF24","#F59E0B")})Set(key,dark?darkColor:lightColor);
         var shadow=new System.Windows.Media.Effects.DropShadowEffect{BlurRadius=14,ShadowDepth=2,Opacity=dark?0.35:0.10,Color=(Color)ColorConverter.ConvertFromString(dark?"#000000":"#1F2937")};shadow.Freeze();resources["CardShadow"]=shadow;
         if(SystemParameters.HighContrast)
         {
-            foreach(var key in new[]{"Surface","Page","PreviewPage","PreviewSurface","WarningSurface","RailSurface"})resources[key]=SystemColors.WindowBrush;
-            foreach(var key in new[]{"Ink","Muted","Line","InputLine","WarningInk","ErrorInk","PreviewInk","PreviewMuted","PreviewLine","StatusOk","StatusOff","StatusBad"})resources[key]=SystemColors.WindowTextBrush;
+            foreach(var key in new[]{"Surface","Page","PreviewPage","PreviewSurface","WarningSurface","RailSurface","HeaderSurface"})resources[key]=SystemColors.WindowBrush;
+            foreach(var key in new[]{"Ink","Muted","Line","InputLine","WarningInk","ErrorInk","PreviewInk","PreviewMuted","PreviewLine","StatusOk","StatusOff","StatusBad","StatusWait"})resources[key]=SystemColors.WindowTextBrush;
             resources["Raised"]=SystemColors.ControlBrush;resources["Selected"]=SystemColors.HighlightBrush;resources["Accent"]=SystemColors.HighlightBrush;resources["AccentSoft"]=SystemColors.HighlightBrush;resources["AccentPressed"]=SystemColors.HighlightBrush;resources["AccentInk"]=SystemColors.HighlightTextBrush;resources["SelectionInk"]=SystemColors.HighlightTextBrush;
         }
         SetResourceReference(BackgroundProperty,"Page");SetResourceReference(ForegroundProperty,"Ink");ErrorText.SetResourceReference(TextBlock.ForegroundProperty,"ErrorInk");LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,LaunchHintState().Key);

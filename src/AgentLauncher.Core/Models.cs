@@ -100,7 +100,7 @@ public sealed class Configuration
     public string TerminalPath { get; set; } = "";
     public string WorktreeDirectory { get; set; } = "";
     public bool MinimizeAfterLaunch { get; set; }
-    public string Theme { get; set; } = "system";
+    public string Theme { get; set; } = "dark";
     public int TextScalePercent { get; set; } = 100;
     public List<string> RecentProjects { get; set; } = [];
     public List<string> RecentAgents { get; set; } = [];
