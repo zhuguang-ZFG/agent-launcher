@@ -61,7 +61,7 @@ try {
     $embeddedReport=Join-Path $root 'artifacts/embedded-ui.json'
     $p=Start-Process (Join-Path $runtime 'AgentLauncher.App.exe') -WindowStyle Hidden -ArgumentList '--embedded-check',('"'+$embeddedReport+'"') -PassThru
     if(-not $p.WaitForExit(60000)){$p.Kill();throw 'Embedded terminal UI check timed out'}
-    if($p.ExitCode -ne 0 -or -not (Get-Content $embeddedReport -Raw | ConvertFrom-Json).Passed){throw 'Embedded terminal UI check failed'}
+    if($p.ExitCode -ne 0 -or -not (Get-Content $embeddedReport -Raw | ConvertFrom-Json).Passed){$embeddedDetail=if(Test-Path -LiteralPath $embeddedReport){Get-Content $embeddedReport -Raw}else{'No embedded report was written'};throw "Embedded terminal UI check failed (exit $($p.ExitCode)): $embeddedDetail"}
   }
   & node --test (Join-Path $root 'tests/prototype.test.cjs')
   if($LASTEXITCODE -ne 0){throw 'Prototype model tests failed'}

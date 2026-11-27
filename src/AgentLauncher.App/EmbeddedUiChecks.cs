@@ -67,8 +67,10 @@ public partial class MainWindow
         var view=embeddedViews[id];
         var originalTab=view.Tab;
         view.Client!.Dispose();await WaitFor(()=>view.Finished,"断开后未提供重连");
+        var framesBeforeReconnect=view.Card.View.AppliedCount;
         OpenEmbedded(plan);
-        await WaitFor(()=>view.Client is not null&&!view.Finished,"失效标签未重连");
+        // The client is published before setup returns to live mode; a new frame proves that setup has finished.
+        await WaitFor(()=>view.Client is not null&&!view.Finished&&view.Card.View.AppliedCount>framesBeforeReconnect&&ScreenText().Contains("READY"),"失效标签未重连");
         if(!ReferenceEquals(originalTab,view.Tab)||embeddedViews.Count!=1)throw new IOException("重连重复创建标签");
         view.Card.Find("history-0");
         await WaitFor(()=>view.Card.IsReadingHistory&&view.Card.ViewportText.Contains("history-0"),"历史搜索未返回已滚出的输出");

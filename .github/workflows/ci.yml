@@ -46,6 +46,7 @@ jobs:
           path: |
             artifacts/ci-diagnostics
             artifacts/ui/*.json
+            artifacts/embedded-ui.json
             artifacts/prototype-browser-results.json
             artifacts/prototype-browser-stderr.log
             artifacts/ci-preview/distribution.json
