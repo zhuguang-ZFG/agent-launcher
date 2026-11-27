@@ -42,19 +42,25 @@ public partial class MainWindow
                 start.ArgumentList.Add("terminal-host");start.ArgumentList.Add(plan.Id.ToString());start.ArgumentList.Add(reattach?"reattach":"start");
                 using var host=Process.Start(start)??throw new IOException("无法打开应用内终端。");
                 if(reattach&&embeddedViews.ContainsKey(plan.Id))RemoveEmbedded(plan.Id);
-                OpenEmbedded(plan);
+                OpenEmbeddedForSubmit(plan,replace);
                 opened.Add(plan);
             }
         }
         finally
         {
-            if(opened.Count>=1)
-            {
-                if(replace is not null)ReplaceWorkbenchPane(replace,opened[0]);
-                else PresentStartedPlans(opened);
-            }
+            PresentSubmittedPanes(opened,replace);
         }
         return Task.CompletedTask;
+    }
+
+    private void OpenEmbeddedForSubmit(LaunchItem plan,WorkbenchPaneView? replace,bool connect=true) =>
+        OpenEmbedded(plan,connect,attachPane:replace is null);
+
+    private void PresentSubmittedPanes(IReadOnlyList<LaunchItem> opened,WorkbenchPaneView? replace)
+    {
+        if(opened.Count<1)return;
+        if(replace is not null)ReplaceWorkbenchPane(replace,opened[0]);
+        else PresentStartedPlans(opened);
     }
 
     private sealed record EmbeddedMarker(int Pid,long ProcessTime);

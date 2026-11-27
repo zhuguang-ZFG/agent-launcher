@@ -379,6 +379,7 @@ public partial class MainWindow
 
     private void BackToStartClick(object sender, RoutedEventArgs e)
     {
+        workbenchLaunchFailureForChecks = null;
         ClearWorkbenchTiles();
         windowMode = MainWindowMode.StartPage;
         ApplyWindowMode();
@@ -437,8 +438,26 @@ public partial class MainWindow
         var byAgent = workbenchPanes.Where(pane =>
             !IsActiveWorkbenchStatus(pane.Status)
             && string.Equals(pane.Plan.AgentId, slot.AgentId, StringComparison.Ordinal)
-            && string.Equals(pane.Plan.Cwd, directory, StringComparison.OrdinalIgnoreCase)).ToArray();
+            && MatchesSlotDirectory(pane.Plan, directory)).ToArray();
         return byAgent.Length == 1 ? byAgent[0] : null;
+    }
+
+    private static bool MatchesSlotDirectory(LaunchItem plan, string directory)
+    {
+        if (string.IsNullOrWhiteSpace(directory)) return false;
+        if (SameOrContainedPath(plan.Cwd, directory) || SameOrContainedPath(plan.Workspace.Path, directory)) return true;
+        return false;
+    }
+
+    private static bool SameOrContainedPath(string path, string directory)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        if (string.Equals(path, directory, StringComparison.OrdinalIgnoreCase)) return true;
+        var full = path.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+        var root = directory.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+        if (root.Length == 0 || full.Length <= root.Length) return false;
+        return full.StartsWith(root + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            || full.StartsWith(root + System.IO.Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task AddOrRestartWorkbenchSlotAsync(Slot slot)
@@ -622,6 +641,13 @@ public partial class MainWindow
             var draft = config.Draft.Copy();
             var ids = slots.Select(slot => slot.Id).ToHashSet();
             foreach (var item in draft.Slots) item.Enabled = ids.Contains(item.Id);
+#if INTEGRATION_TESTS
+            if (workbenchLaunchFailureForChecks is { Length: > 0 } failure)
+            {
+                workbenchLaunchFailureForChecks = null;
+                throw new InvalidOperationException(failure);
+            }
+#endif
             await LaunchPreparedDraftAsync(draft, slots.Count, replace);
         }
         catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException or InvalidOperationException)
@@ -646,8 +672,11 @@ public partial class MainWindow
     }
 
 #if INTEGRATION_TESTS
+    private string? workbenchLaunchFailureForChecks;
+
     private void ResetWorkbenchForChecks()
     {
+        workbenchLaunchFailureForChecks = null;
         ClearWorkbenchTiles();
         windowMode = MainWindowMode.StartPage;
         WorkbenchPanel.BeginAnimation(OpacityProperty, null);

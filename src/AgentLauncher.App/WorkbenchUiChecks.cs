@@ -340,15 +340,50 @@ public partial class MainWindow
             var originalPane = workbenchPanes.Single(item => item.Id == original.Id);
             var originalRoot = originalPane.Root;
             var replacement = FakePlan(2, "新格");
-            ReplaceWorkbenchPane(originalPane, replacement);
+            var oneRestartThrew = false;
+            try
+            {
+                OpenEmbeddedForSubmit(replacement, originalPane, connect: false);
+                PresentSubmittedPanes([replacement], originalPane);
+                RelayoutWorkbench();
+            }
+            catch (ArgumentOutOfRangeException) { oneRestartThrew = true; }
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
             check("restarting a pane replaces the same tile",
-                windowMode == MainWindowMode.Workbench
+                !oneRestartThrew
+                && windowMode == MainWindowMode.Workbench
                 && VisibleHostTiles() == 1
                 && workbenchPanes.Count == 1
+                && workbenchPanes.Count(item => item.Id == replacement.Id) == 1
                 && ReferenceEquals(workbenchPanes[0].Root, originalRoot)
                 && workbenchPanes[0].Id == replacement.Id
                 && workbenchPanes[0].Plan.Name == "新格");
+
+            ResetWorkbenchForChecks();
+            var fullPlans = Enumerable.Range(1, WorkbenchLayout.MaxPanes).Select(index => FakePlan(index, "重开满" + index)).ToArray();
+            EnterWorkbench(fullPlans);
+            SetWorkbenchPaneStatusForChecks(fullPlans[0].Id, WorkbenchPaneStatus.Exited, "已退出");
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            var fullTarget = workbenchPanes.Single(item => item.Id == fullPlans[0].Id);
+            var fullRoot = fullTarget.Root;
+            var fullReplacement = FakePlan(10, "重开满新");
+            var sixRestartThrew = false;
+            try
+            {
+                OpenEmbeddedForSubmit(fullReplacement, fullTarget, connect: false);
+                PresentSubmittedPanes([fullReplacement], fullTarget);
+                RelayoutWorkbench();
+            }
+            catch (ArgumentOutOfRangeException) { sixRestartThrew = true; }
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("restarting one of six panes keeps six tiles and does not overflow the layout",
+                !sixRestartThrew
+                && windowMode == MainWindowMode.Workbench
+                && workbenchPanes.Count == WorkbenchLayout.MaxPanes
+                && VisibleHostTiles() == WorkbenchLayout.MaxPanes
+                && workbenchPanes.Count(item => item.Id == fullReplacement.Id) == 1
+                && ReferenceEquals(workbenchPanes.Single(item => item.Id == fullReplacement.Id).Root, fullRoot)
+                && PaneRoot("重开满2") is { IsVisible: true });
 
             ResetWorkbenchForChecks();
             var firstAgent = FakePlan(1, "同剂甲") with { SourceSlotId = Guid.NewGuid(), AgentId = "omp", Cwd = System.IO.Path.Combine(Store.Root, "one") };
@@ -360,7 +395,19 @@ public partial class MainWindow
             check("add-or-restart prefers SourceSlotId over a shared AgentId",
                 FindExitedWorkbenchPane(secondSlot)?.Id == secondAgent.Id);
 
-            PresentWorkbenchLaunchFailure("内存不足");
+            ResetWorkbenchForChecks();
+            var baseDirectory = System.IO.Path.Combine(Store.Root, "mapped-root");
+            var remapped = FakePlan(1, "映射甲") with { SourceSlotId = Guid.NewGuid(), AgentId = "pi", Cwd = System.IO.Path.Combine(baseDirectory, "worktree") };
+            var otherMapped = FakePlan(2, "映射乙") with { SourceSlotId = Guid.NewGuid(), AgentId = "pi", Cwd = System.IO.Path.Combine(Store.Root, "elsewhere") };
+            EnterWorkbench([remapped, otherMapped]);
+            SetWorkbenchPaneStatusForChecks(remapped.Id, WorkbenchPaneStatus.Exited, "已退出");
+            SetWorkbenchPaneStatusForChecks(otherMapped.Id, WorkbenchPaneStatus.Exited, "已退出");
+            var mappedSlot = new Slot { Id = Guid.NewGuid(), AgentId = "pi", Directory = baseDirectory };
+            check("add-or-restart AgentId fallback matches a remapped Cwd under the slot directory",
+                FindExitedWorkbenchPane(mappedSlot)?.Id == remapped.Id);
+
+            workbenchLaunchFailureForChecks = "内存不足";
+            await LaunchSlotsOnWorkbenchAsync([config.Draft.Slots[0]]);
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
             check("an add-pane admission failure stays on the workbench",
                 windowMode == MainWindowMode.Workbench
