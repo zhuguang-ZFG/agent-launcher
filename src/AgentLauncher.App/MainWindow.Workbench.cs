@@ -40,6 +40,7 @@ public partial class MainWindow
     private bool capDeniedSticky;
     private Guid? maximizedPaneId;
     private Guid? focusedPaneId;
+    private readonly HashSet<Guid> userStoppedPaneIds = [];
 
     private void ApplyWindowMode()
     {
@@ -107,6 +108,7 @@ public partial class MainWindow
     private void EnterWorkbench(IReadOnlyList<LaunchItem> started)
     {
         var fromStart = windowMode == MainWindowMode.StartPage;
+        if (fromStart) DetachStaleWorkbenchTiles(started);
         windowMode = WorkbenchLayout.AfterLaunchAttempt(started.Count);
         ApplyWindowMode();
         if (windowMode != MainWindowMode.Workbench) return;
@@ -138,11 +140,12 @@ public partial class MainWindow
 
     private void ReplaceWorkbenchPane(WorkbenchPaneView pane, LaunchItem plan)
     {
+        userStoppedPaneIds.Remove(pane.Id);
         if (pane.Id != plan.Id) RemoveEmbedded(pane.Id, detachPane: false);
         if (!embeddedViews.ContainsKey(plan.Id))
         {
             var marker = Store.FilePath(System.IO.Path.Combine("attempts", plan.Id.ToString("N"), "embedded.json"));
-            OpenEmbedded(plan, EmbeddedHostAlive(marker));
+            OpenEmbedded(plan, EmbeddedHostAlive(marker), attachPane: false);
         }
         if (!embeddedViews.TryGetValue(plan.Id, out var view)) return;
         if (pane.TerminalContent is not null) pane.Body.Children.Remove(pane.TerminalContent);
@@ -198,9 +201,9 @@ public partial class MainWindow
         titleDock.Children.Add(statusDot);
         titleDock.Children.Add(placeText);
         titleDock.Children.Add(titleText);
-        var titleBar = new Border { Height = 30, Child = titleDock, Background = Brushes.Transparent };
+        var titleBar = new ContentControl { Height = 30, Content = titleDock, Focusable = false };
         AutomationProperties.SetName(titleBar, plan.Name + " 标题");
-        titleBar.SetResourceReference(Border.BackgroundProperty, "HeaderSurface");
+        titleBar.SetResourceReference(Control.BackgroundProperty, "HeaderSurface");
         var exitReason = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
         exitReason.SetResourceReference(TextBlock.ForegroundProperty, "WarningInk");
         var restartButton = new Button { Content = StartPageSurface.RestartPane, Style = (Style)FindResource("QuietButton"), Padding = new Thickness(10, 4, 10, 4), HorizontalAlignment = HorizontalAlignment.Left };
@@ -252,12 +255,8 @@ public partial class MainWindow
             Body = body,
             TerminalContent = content
         };
-        titleBar.AddHandler(Control.MouseDoubleClickEvent, new MouseButtonEventHandler((_, _) => ToggleMaximizeWorkbenchPane(pane)));
-        titleBar.MouseLeftButtonDown += (_, e) =>
-        {
-            FocusWorkbenchPane(pane);
-            if (e.ClickCount == 2) { ToggleMaximizeWorkbenchPane(pane); e.Handled = true; }
-        };
+        titleBar.MouseDoubleClick += (_, _) => ToggleMaximizeWorkbenchPane(pane);
+        titleBar.MouseLeftButtonDown += (_, _) => FocusWorkbenchPane(pane);
         root.PreviewMouseDown += (_, _) => FocusWorkbenchPane(pane);
         stopButton.Click += (_, _) => StopWorkbenchPane(pane);
         menuButton.Click += (_, _) => OpenPaneMenu(pane, menuButton);
@@ -354,9 +353,33 @@ public partial class MainWindow
     private static bool IsActiveWorkbenchStatus(WorkbenchPaneStatus status) =>
         status is WorkbenchPaneStatus.Starting or WorkbenchPaneStatus.Running or WorkbenchPaneStatus.Waiting or WorkbenchPaneStatus.Pressure;
 
-    private void BackToStartClick(object sender, RoutedEventArgs e)
+    private void ClearWorkbenchTiles() => DetachStaleWorkbenchTiles([]);
+
+    private void DetachStaleWorkbenchTiles(IReadOnlyList<LaunchItem> keep)
     {
         maximizedPaneId = null;
+        focusedPaneId = null;
+        var keepIds = keep.Select(plan => plan.Id).ToHashSet();
+        userStoppedPaneIds.RemoveWhere(id => !keepIds.Contains(id));
+        foreach (var id in workbenchPanes.Select(pane => pane.Id).Concat(embeddedViews.Keys).Distinct().ToArray())
+        {
+            if (!keepIds.Contains(id)) RemoveEmbedded(id);
+        }
+        workbenchPanes.RemoveAll(pane => !keepIds.Contains(pane.Id));
+        if (WorkbenchHost is not null)
+        {
+            foreach (var child in WorkbenchHost.Children.OfType<UIElement>().ToArray())
+            {
+                if (!workbenchPanes.Any(pane => ReferenceEquals(pane.Root, child)))
+                    WorkbenchHost.Children.Remove(child);
+            }
+        }
+        if (WorkbenchNotice is not null) WorkbenchNotice.Text = "";
+    }
+
+    private void BackToStartClick(object sender, RoutedEventArgs e)
+    {
+        ClearWorkbenchTiles();
         windowMode = MainWindowMode.StartPage;
         ApplyWindowMode();
     }
@@ -405,11 +428,22 @@ public partial class MainWindow
         }
     }
 
+    private WorkbenchPaneView? FindExitedWorkbenchPane(Slot slot)
+    {
+        var bySlot = workbenchPanes.Where(pane => !IsActiveWorkbenchStatus(pane.Status) && pane.Plan.SourceSlotId == slot.Id).ToArray();
+        if (bySlot.Length == 1) return bySlot[0];
+        if (bySlot.Length > 1) return null;
+        var directory = string.IsNullOrWhiteSpace(slot.Directory) ? config.Draft.Project : slot.Directory;
+        var byAgent = workbenchPanes.Where(pane =>
+            !IsActiveWorkbenchStatus(pane.Status)
+            && string.Equals(pane.Plan.AgentId, slot.AgentId, StringComparison.Ordinal)
+            && string.Equals(pane.Plan.Cwd, directory, StringComparison.OrdinalIgnoreCase)).ToArray();
+        return byAgent.Length == 1 ? byAgent[0] : null;
+    }
+
     private async Task AddOrRestartWorkbenchSlotAsync(Slot slot)
     {
-        var exited = workbenchPanes.FirstOrDefault(pane =>
-            !IsActiveWorkbenchStatus(pane.Status)
-            && (pane.Plan.SourceSlotId == slot.Id || string.Equals(pane.Plan.AgentId, slot.AgentId, StringComparison.Ordinal)));
+        var exited = FindExitedWorkbenchPane(slot);
         if (exited is not null) await RestartWorkbenchPaneAsync(exited, slot);
         else await LaunchSlotsOnWorkbenchAsync([slot]);
     }
@@ -486,6 +520,7 @@ public partial class MainWindow
             view.Stop.Cancel();
             view.Client?.Dispose();
         }
+        userStoppedPaneIds.Add(pane.Id);
         var reason = string.IsNullOrWhiteSpace(pane.ExitReason) ? "已停止" : pane.ExitReason;
         SetWorkbenchPaneStatus(pane, WorkbenchPaneStatus.Exited, reason);
     }
@@ -527,6 +562,11 @@ public partial class MainWindow
             var entry = entries.FirstOrDefault(item => item.Plan.Id == pane.Id);
             if (entry is null) continue;
             var mapped = MapControlEntryStatus(entry);
+            if (userStoppedPaneIds.Contains(pane.Id))
+            {
+                if (mapped != WorkbenchPaneStatus.Exited) continue;
+                userStoppedPaneIds.Remove(pane.Id);
+            }
             var reason = mapped == WorkbenchPaneStatus.Exited
                 ? (string.IsNullOrWhiteSpace(entry.Detail) ? (entry.ExitCode is { } code ? "退出码 " + code : "已退出") : entry.Detail)
                 : pane.ExitReason;
@@ -584,7 +624,18 @@ public partial class MainWindow
             foreach (var item in draft.Slots) item.Enabled = ids.Contains(item.Id);
             await LaunchPreparedDraftAsync(draft, slots.Count, replace);
         }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            PresentWorkbenchLaunchFailure(ex.Message);
+            return;
+        }
         finally { await FinishLaunchAsync(); }
+    }
+
+    private void PresentWorkbenchLaunchFailure(string reason)
+    {
+        ErrorText.Text = string.IsNullOrWhiteSpace(reason) ? "无法启动新的窗格。" : reason;
+        UpdateWorkbenchChrome();
     }
 
     private void ShowPartialLaunchNotice(int started, int requested, string reason)
@@ -597,14 +648,8 @@ public partial class MainWindow
 #if INTEGRATION_TESTS
     private void ResetWorkbenchForChecks()
     {
-        foreach (var id in workbenchPanes.Select(pane => pane.Id).Concat(embeddedViews.Keys).Distinct().ToArray())
-            RemoveEmbedded(id);
-        workbenchPanes.Clear();
-        WorkbenchHost.Children.Clear();
-        if (WorkbenchNotice is not null) WorkbenchNotice.Text = "";
+        ClearWorkbenchTiles();
         windowMode = MainWindowMode.StartPage;
-        maximizedPaneId = null;
-        focusedPaneId = null;
         WorkbenchPanel.BeginAnimation(OpacityProperty, null);
         WorkbenchPanel.Opacity = 1;
         ApplyWindowMode();

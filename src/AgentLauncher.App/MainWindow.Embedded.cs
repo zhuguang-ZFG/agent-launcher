@@ -84,12 +84,12 @@ public partial class MainWindow
         catch{return false;}
     }
 
-    private void OpenEmbedded(LaunchItem plan,bool connect=true)
+    private void OpenEmbedded(LaunchItem plan,bool connect=true,bool attachPane=true)
     {
         EmbeddedPanel.Visibility=ShowTerminalsButton.Visibility=Visibility.Collapsed;
         if(embeddedViews.TryGetValue(plan.Id,out var existing))
         {
-            if(windowMode==MainWindowMode.Workbench){AttachWorkbenchPane(plan);RelayoutWorkbench();}
+            if(attachPane&&windowMode==MainWindowMode.Workbench){AttachWorkbenchPane(plan);RelayoutWorkbench();}
             existing.Card.Focus();
             if(existing.Finished)_=ConnectEmbeddedAsync(plan,existing);
             return;
@@ -221,7 +221,7 @@ public partial class MainWindow
             }
         };
         if(connect)_=ConnectEmbeddedAsync(plan,view);
-        if(windowMode==MainWindowMode.Workbench){AttachWorkbenchPane(plan);RelayoutWorkbench();}
+        if(attachPane&&windowMode==MainWindowMode.Workbench){AttachWorkbenchPane(plan);RelayoutWorkbench();}
     }
 
     private static async Task ResizeEmbeddedAsync(PaneView view)

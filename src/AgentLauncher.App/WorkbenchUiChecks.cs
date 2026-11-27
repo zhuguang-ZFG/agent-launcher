@@ -259,18 +259,31 @@ public partial class MainWindow
                 && StartPagePanel.Visibility == Visibility.Visible
                 && WorkbenchPanel.Visibility == Visibility.Collapsed);
 
+            var again = FakePlan(1, "再次启动");
+            EnterWorkbench([again]);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("returning to the start page and launching again shows only the new tiles",
+                windowMode == MainWindowMode.Workbench
+                && VisibleHostTiles() == 1
+                && PaneRoot("再次启动") is { IsVisible: true }
+                && PaneRoot("停止甲") is null
+                && PaneRoot("停止乙") is null);
+
             ResetWorkbenchForChecks();
             var waitPane = FakePlan(1, "等待甲");
             var pressurePane = FakePlan(2, "压力乙");
-            EnterWorkbench([waitPane, pressurePane]);
+            var endedPane = FakePlan(3, "退出丙");
+            EnterWorkbench([waitPane, pressurePane, endedPane]);
             SetWorkbenchPaneStatusForChecks(waitPane.Id, WorkbenchPaneStatus.Waiting);
-            SetWorkbenchPaneStatusForChecks(pressurePane.Id, WorkbenchPaneStatus.Exited, "已退出");
+            SetWorkbenchPaneStatusForChecks(pressurePane.Id, WorkbenchPaneStatus.Pressure);
+            SetWorkbenchPaneStatusForChecks(endedPane.Id, WorkbenchPaneStatus.Exited, "已退出");
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
             check("Waiting and Pressure panes stay active so the return button stays hidden",
                 windowMode == MainWindowMode.Workbench
                 && !BackToStartButton.IsVisible
-                && HasButton(PaneRoot("压力乙"), StartPageSurface.RestartPane)
-                && !HasButton(PaneRoot("等待甲"), StartPageSurface.RestartPane));
+                && HasButton(PaneRoot("退出丙"), StartPageSurface.RestartPane)
+                && !HasButton(PaneRoot("等待甲"), StartPageSurface.RestartPane)
+                && !HasButton(PaneRoot("压力乙"), StartPageSurface.RestartPane));
 
             ResetWorkbenchForChecks();
             var capPlans = Enumerable.Range(1, WorkbenchLayout.MaxPanes).Select(index => FakePlan(index, "满格" + index)).ToArray();
@@ -305,6 +318,55 @@ public partial class MainWindow
                 && VisibleHostTiles() == 2
                 && PaneRoot("铺满甲") is { IsVisible: true }
                 && PaneRoot("铺满乙") is { IsVisible: true });
+
+            ResetWorkbenchForChecks();
+            var live = FakePlan(1, "停后同步");
+            EnterWorkbench([live]);
+            var livePane = workbenchPanes.Single(item => item.Id == live.Id);
+            StopWorkbenchPane(livePane);
+            status = new Response(true, "workbench-ui", [new ControlEntry { Plan = live, State = "Started", Detail = "已启动进程" }], status?.Memory);
+            SyncWorkbenchPanesFromStatus();
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("a user-stopped pane stays exited when the monitor still reports it running",
+                windowMode == MainWindowMode.Workbench
+                && livePane.Status == WorkbenchPaneStatus.Exited
+                && HasButton(PaneRoot("停后同步"), StartPageSurface.RestartPane)
+                && !HasButton(PaneRoot("停后同步"), "停止"));
+
+            ResetWorkbenchForChecks();
+            var original = FakePlan(1, "原格");
+            EnterWorkbench([original]);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            var originalPane = workbenchPanes.Single(item => item.Id == original.Id);
+            var originalRoot = originalPane.Root;
+            var replacement = FakePlan(2, "新格");
+            ReplaceWorkbenchPane(originalPane, replacement);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("restarting a pane replaces the same tile",
+                windowMode == MainWindowMode.Workbench
+                && VisibleHostTiles() == 1
+                && workbenchPanes.Count == 1
+                && ReferenceEquals(workbenchPanes[0].Root, originalRoot)
+                && workbenchPanes[0].Id == replacement.Id
+                && workbenchPanes[0].Plan.Name == "新格");
+
+            ResetWorkbenchForChecks();
+            var firstAgent = FakePlan(1, "同剂甲") with { SourceSlotId = Guid.NewGuid(), AgentId = "omp", Cwd = System.IO.Path.Combine(Store.Root, "one") };
+            var secondAgent = FakePlan(2, "同剂乙") with { SourceSlotId = Guid.NewGuid(), AgentId = "omp", Cwd = System.IO.Path.Combine(Store.Root, "two") };
+            EnterWorkbench([firstAgent, secondAgent]);
+            SetWorkbenchPaneStatusForChecks(firstAgent.Id, WorkbenchPaneStatus.Exited, "已退出");
+            SetWorkbenchPaneStatusForChecks(secondAgent.Id, WorkbenchPaneStatus.Exited, "已退出");
+            var secondSlot = new Slot { Id = secondAgent.SourceSlotId!.Value, AgentId = "omp", Directory = secondAgent.Cwd };
+            check("add-or-restart prefers SourceSlotId over a shared AgentId",
+                FindExitedWorkbenchPane(secondSlot)?.Id == secondAgent.Id);
+
+            PresentWorkbenchLaunchFailure("内存不足");
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("an add-pane admission failure stays on the workbench",
+                windowMode == MainWindowMode.Workbench
+                && WorkbenchPanel.Visibility == Visibility.Visible
+                && StartPagePanel.Visibility == Visibility.Collapsed
+                && ErrorText.Text.Contains("内存不足"));
         }
         finally
         {
