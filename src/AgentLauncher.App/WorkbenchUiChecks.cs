@@ -1,6 +1,7 @@
 #if INTEGRATION_TESTS
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Input;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
@@ -163,6 +164,113 @@ public partial class MainWindow
             check("partial admission explains the shortfall on the workbench",
                 WorkbenchNotice.IsVisible
                 && WorkbenchNotice.Text == StartPageSurface.PartialLaunchLine(1, 1, "内存不足"));
+
+            FrameworkElement? PaneRoot(string name)
+            {
+                var card = ReviewFind<TerminalCard>(WorkbenchHost).FirstOrDefault(item => AutomationProperties.GetName(item) == name + " 终端");
+                DependencyObject? node = card;
+                while (node is not null)
+                {
+                    if (node is FrameworkElement element && WorkbenchHost.Children.Contains(element)) return element;
+                    node = VisualTreeHelper.GetParent(node) ?? LogicalTreeHelper.GetParent(node);
+                }
+                return null;
+            }
+            bool HasButton(FrameworkElement? root, string content) =>
+                root is not null && ReviewFind<Button>(root).Any(button => Equals(button.Content, content) && button.IsVisible);
+            void DoubleClick(FrameworkElement target)
+            {
+                var args = new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
+                {
+                    RoutedEvent = Control.MouseDoubleClickEvent,
+                    Source = target
+                };
+                target.RaiseEvent(args);
+            }
+            int VisibleHostTiles() =>
+                WorkbenchHost.Children.OfType<FrameworkElement>().Count(child => child.IsVisible);
+
+            ResetWorkbenchForChecks();
+            var stopA = FakePlan(1, "停止甲");
+            var stopB = FakePlan(2, "停止乙");
+            EnterWorkbench([stopA, stopB]);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            var stopRootA = PaneRoot("停止甲");
+            var stopButton = stopRootA is null ? null : ReviewFind<Button>(stopRootA).FirstOrDefault(button => Equals(button.Content, "停止"));
+            if (stopButton is not null) stopButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            else SetWorkbenchPaneStatusForChecks(stopA.Id, WorkbenchPaneStatus.Exited, "退出码 1");
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            stopRootA = PaneRoot("停止甲");
+            check("after stopping one pane the workbench stays open and that pane offers restart",
+                windowMode == MainWindowMode.Workbench
+                && WorkbenchPanel.Visibility == Visibility.Visible
+                && StartPagePanel.Visibility == Visibility.Collapsed
+                && VisibleHostTiles() == 2
+                && HasButton(stopRootA, StartPageSurface.RestartPane));
+
+            SetWorkbenchPaneStatusForChecks(stopB.Id, WorkbenchPaneStatus.Exited, "已退出");
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("after all panes end the window stays on the workbench and offers a return to the start page",
+                windowMode == MainWindowMode.Workbench
+                && WorkbenchLayout.AfterAllPanesExited() == MainWindowMode.Workbench
+                && WorkbenchPanel.Visibility == Visibility.Visible
+                && StartPagePanel.Visibility == Visibility.Collapsed
+                && BackToStartButton.IsVisible
+                && Equals(BackToStartButton.Content, StartPageSurface.BackToStart));
+
+            BackToStartButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("clicking back to start returns to the start page",
+                windowMode == MainWindowMode.StartPage
+                && StartPagePanel.Visibility == Visibility.Visible
+                && WorkbenchPanel.Visibility == Visibility.Collapsed);
+
+            ResetWorkbenchForChecks();
+            var waitPane = FakePlan(1, "等待甲");
+            var pressurePane = FakePlan(2, "压力乙");
+            EnterWorkbench([waitPane, pressurePane]);
+            SetWorkbenchPaneStatusForChecks(waitPane.Id, WorkbenchPaneStatus.Waiting);
+            SetWorkbenchPaneStatusForChecks(pressurePane.Id, WorkbenchPaneStatus.Exited, "已退出");
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("Waiting and Pressure panes stay active so the return button stays hidden",
+                windowMode == MainWindowMode.Workbench
+                && !BackToStartButton.IsVisible
+                && HasButton(PaneRoot("压力乙"), StartPageSurface.RestartPane)
+                && !HasButton(PaneRoot("等待甲"), StartPageSurface.RestartPane));
+
+            ResetWorkbenchForChecks();
+            var capPlans = Enumerable.Range(1, WorkbenchLayout.MaxPanes).Select(index => FakePlan(index, "满格" + index)).ToArray();
+            EnterWorkbench(capPlans);
+            SetWorkbenchPaneStatusForChecks(capPlans[0].Id, WorkbenchPaneStatus.Exited, "已退出");
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("AddPaneButton is disabled when six panes including an exited unclosed tile are present",
+                VisibleHostTiles() == WorkbenchLayout.MaxPanes
+                && !AddPaneButton.IsEnabled
+                && ((AddPaneButton.ToolTip as string) ?? "").Contains(StartPageSurface.CapDenied));
+
+            ResetWorkbenchForChecks();
+            var maxA = FakePlan(1, "铺满甲");
+            var maxB = FakePlan(2, "铺满乙");
+            EnterWorkbench([maxA, maxB]);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            var maxRoot = PaneRoot("铺满甲");
+            var title = maxRoot is null ? null : ReviewFind<FrameworkElement>(maxRoot).FirstOrDefault(item => AutomationProperties.GetName(item) == "铺满甲 标题");
+            if (title is not null) DoubleClick(title);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("double-click maximize shows only one tile on WorkbenchHost",
+                title is not null
+                && windowMode == MainWindowMode.Workbench
+                && VisibleHostTiles() == 1
+                && PaneRoot("铺满甲") is { IsVisible: true }
+                && PaneRoot("铺满乙") is not { IsVisible: true });
+
+            if (title is not null) DoubleClick(title);
+            await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.Render);
+            check("double-click again restores the grid",
+                windowMode == MainWindowMode.Workbench
+                && VisibleHostTiles() == 2
+                && PaneRoot("铺满甲") is { IsVisible: true }
+                && PaneRoot("铺满乙") is { IsVisible: true });
         }
         finally
         {

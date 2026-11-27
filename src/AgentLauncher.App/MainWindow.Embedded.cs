@@ -30,7 +30,7 @@ public partial class MainWindow
     // Launch always uses the in-app terminal host. A saved EmbeddedTerminal=false must not open Windows Terminal.
     private Task<string> ResolveLaunchTerminalAsync(CancellationToken ct=default)=>Task.FromResult("");
 
-    private Task SubmitPanesAsync(string terminal,IReadOnlyList<LaunchItem> plans,string layout,CancellationToken ct=default,bool reattach=false)
+    private Task SubmitPanesAsync(string terminal,IReadOnlyList<LaunchItem> plans,string layout,CancellationToken ct=default,bool reattach=false,WorkbenchPaneView? replace=null)
     {
         var opened=new List<LaunchItem>();
         try
@@ -48,7 +48,11 @@ public partial class MainWindow
         }
         finally
         {
-            if(opened.Count>=1)PresentStartedPlans(opened);
+            if(opened.Count>=1)
+            {
+                if(replace is not null)ReplaceWorkbenchPane(replace,opened[0]);
+                else PresentStartedPlans(opened);
+            }
         }
         return Task.CompletedTask;
     }
@@ -260,11 +264,11 @@ public partial class MainWindow
         if(EmbeddedTabs?.SelectedItem is TabItem {Tag:Guid id}&&embeddedViews.TryGetValue(id,out var view))Dispatcher.BeginInvoke(()=>view.Card.Focus(),DispatcherPriority.Input);
     }
     private void CloseEmbeddedClick(object sender,RoutedEventArgs e){if(EmbeddedTabs.SelectedItem is TabItem {Tag:Guid id})RemoveEmbedded(id);}
-    private void RemoveEmbedded(Guid id)
+    private void RemoveEmbedded(Guid id,bool detachPane=true)
     {
         if(!embeddedViews.Remove(id,out var view))return;
         view.Stop.Cancel();view.Client?.Dispose();EmbeddedTabs.Items.Remove(view.Tab);
-        DetachWorkbenchPane(id);
+        if(detachPane)DetachWorkbenchPane(id);
         EmbeddedPanel.Visibility=ShowTerminalsButton.Visibility=Visibility.Collapsed;
     }
     protected override void OnClosed(EventArgs e)

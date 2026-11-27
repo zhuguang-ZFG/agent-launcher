@@ -1,8 +1,11 @@
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using System.Windows.Automation;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Shapes;
 using AgentLauncher.Core;
 using AgentLauncher.Windows;
 
@@ -16,12 +19,27 @@ public partial class MainWindow
         public required LaunchItem Plan;
         public required Border Root;
         public required TerminalCard Card;
+        public WorkbenchPaneStatus Status = WorkbenchPaneStatus.Starting;
+        public string ExitReason = "";
+        public required FrameworkElement TitleBar;
+        public required TextBlock TitleText;
+        public required TextBlock PlaceText;
+        public required Ellipse StatusDot;
+        public required Button StopButton;
+        public required Button MenuButton;
+        public required Button RestartButton;
+        public required TextBlock ExitReasonText;
+        public required FrameworkElement ExitOverlay;
+        public required Grid Body;
+        public UIElement? TerminalContent;
     }
 
     private MainWindowMode windowMode = MainWindowMode.StartPage;
     private readonly Dictionary<Guid, (bool Ready, string Reason)> chipStatus = [];
     private readonly List<WorkbenchPaneView> workbenchPanes = [];
     private bool capDeniedSticky;
+    private Guid? maximizedPaneId;
+    private Guid? focusedPaneId;
 
     private void ApplyWindowMode()
     {
@@ -76,8 +94,15 @@ public partial class MainWindow
         UpdateLaunch();
     }
 
-    private void EnterWorkbench(IReadOnlyList<ControlEntry> entries) =>
+    private void EnterWorkbench(IReadOnlyList<ControlEntry> entries)
+    {
         EnterWorkbench(entries.Select(entry => entry.Plan).ToList());
+        foreach (var entry in entries)
+        {
+            var pane = workbenchPanes.FirstOrDefault(item => item.Id == entry.Plan.Id);
+            if (pane is not null) SetWorkbenchPaneStatus(pane, MapControlEntryStatus(entry), entry.Detail);
+        }
+    }
 
     private void EnterWorkbench(IReadOnlyList<LaunchItem> started)
     {
@@ -97,27 +122,148 @@ public partial class MainWindow
         UpdateWorkbenchChrome();
     }
 
-    private void AttachWorkbenchPane(LaunchItem plan)
+    private void AttachWorkbenchPane(LaunchItem plan, WorkbenchPaneStatus status = WorkbenchPaneStatus.Starting)
     {
         if (workbenchPanes.Any(pane => pane.Id == plan.Id)) return;
         if (!embeddedViews.ContainsKey(plan.Id)) OpenEmbedded(plan, false);
         if (!embeddedViews.TryGetValue(plan.Id, out var view)) return;
+        var pane = CreateWorkbenchPane(plan, view, status);
+        WorkbenchHost.Children.Add(pane.Root);
+        workbenchPanes.Add(pane);
+        EmbeddedPanel.Visibility = Visibility.Collapsed;
+        ShowTerminalsButton.Visibility = Visibility.Collapsed;
+        RefreshPaneChrome();
+        ApplyPaneFocusBorders();
+    }
+
+    private void ReplaceWorkbenchPane(WorkbenchPaneView pane, LaunchItem plan)
+    {
+        if (pane.Id != plan.Id) RemoveEmbedded(pane.Id, detachPane: false);
+        if (!embeddedViews.ContainsKey(plan.Id))
+        {
+            var marker = Store.FilePath(System.IO.Path.Combine("attempts", plan.Id.ToString("N"), "embedded.json"));
+            OpenEmbedded(plan, EmbeddedHostAlive(marker));
+        }
+        if (!embeddedViews.TryGetValue(plan.Id, out var view)) return;
+        if (pane.TerminalContent is not null) pane.Body.Children.Remove(pane.TerminalContent);
+        pane.Id = plan.Id;
+        pane.Plan = plan;
+        pane.Card = view.Card;
+        pane.TerminalContent = TakeEmbeddedContent(view);
+        if (pane.TerminalContent is not null) pane.Body.Children.Insert(0, pane.TerminalContent);
+        AutomationProperties.SetName(pane.Root, plan.Name + " 窗格");
+        AutomationProperties.SetName(pane.TitleBar, plan.Name + " 标题");
+        SetWorkbenchPaneStatus(pane, WorkbenchPaneStatus.Starting, "");
+        RefreshPaneChrome();
+        RelayoutWorkbench();
+        UpdateWorkbenchChrome();
+    }
+
+    private UIElement? TakeEmbeddedContent(PaneView view)
+    {
         var content = view.Tab.Content as UIElement;
         view.Tab.Content = null;
+        return content;
+    }
+
+    private WorkbenchPaneView CreateWorkbenchPane(LaunchItem plan, PaneView view, WorkbenchPaneStatus status)
+    {
+        var titleText = new TextBlock
+        {
+            FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Margin = new Thickness(8, 0, 8, 0)
+        };
+        titleText.SetResourceReference(TextBlock.ForegroundProperty, "Ink");
+        var placeText = new TextBlock
+        {
+            FontSize = 11,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 8, 0)
+        };
+        placeText.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+        var statusDot = new Ellipse { Width = 8, Height = 8, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+        var menuButton = new Button { Content = "⋯", Style = (Style)FindResource("QuietButton"), Padding = new Thickness(6, 0, 6, 0), MinHeight = 22, MinWidth = 24, FontSize = 12, Margin = new Thickness(0, 0, 4, 0), VerticalAlignment = VerticalAlignment.Center };
+        AutomationProperties.SetName(menuButton, plan.Name + " 菜单");
+        var stopButton = new Button { Content = "停止", Style = (Style)FindResource("QuietButton"), Padding = new Thickness(6, 0, 6, 0), MinHeight = 22, FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
+        AutomationProperties.SetName(stopButton, plan.Name + " 停止");
+        var titleDock = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 6, 0) };
+        DockPanel.SetDock(stopButton, Dock.Right);
+        DockPanel.SetDock(menuButton, Dock.Right);
+        DockPanel.SetDock(statusDot, Dock.Right);
+        DockPanel.SetDock(placeText, Dock.Right);
+        titleDock.Children.Add(stopButton);
+        titleDock.Children.Add(menuButton);
+        titleDock.Children.Add(statusDot);
+        titleDock.Children.Add(placeText);
+        titleDock.Children.Add(titleText);
+        var titleBar = new Border { Height = 30, Child = titleDock, Background = Brushes.Transparent };
+        AutomationProperties.SetName(titleBar, plan.Name + " 标题");
+        titleBar.SetResourceReference(Border.BackgroundProperty, "HeaderSurface");
+        var exitReason = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
+        exitReason.SetResourceReference(TextBlock.ForegroundProperty, "WarningInk");
+        var restartButton = new Button { Content = StartPageSurface.RestartPane, Style = (Style)FindResource("QuietButton"), Padding = new Thickness(10, 4, 10, 4), HorizontalAlignment = HorizontalAlignment.Left };
+        AutomationProperties.SetName(restartButton, plan.Name + " 重新启动");
+        var overlay = new StackPanel
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(16),
+            Visibility = Visibility.Collapsed
+        };
+        overlay.Children.Add(exitReason);
+        overlay.Children.Add(restartButton);
+        var body = new Grid();
+        var content = TakeEmbeddedContent(view);
+        if (content is not null) body.Children.Add(content);
+        body.Children.Add(overlay);
+        var shell = new DockPanel();
+        DockPanel.SetDock(titleBar, Dock.Top);
+        shell.Children.Add(titleBar);
+        shell.Children.Add(body);
         var root = new Border
         {
-            Child = content,
-            CornerRadius = new CornerRadius(6),
+            Child = shell,
+            CornerRadius = new CornerRadius(10),
             BorderThickness = new Thickness(1),
             Padding = new Thickness(0),
             ClipToBounds = true
         };
+        AutomationProperties.SetName(root, plan.Name + " 窗格");
         root.SetResourceReference(Border.BackgroundProperty, "Surface");
         root.SetResourceReference(Border.BorderBrushProperty, "Line");
-        WorkbenchHost.Children.Add(root);
-        workbenchPanes.Add(new WorkbenchPaneView { Id = plan.Id, Plan = plan, Root = root, Card = view.Card });
-        EmbeddedPanel.Visibility = Visibility.Collapsed;
-        ShowTerminalsButton.Visibility = Visibility.Collapsed;
+        var pane = new WorkbenchPaneView
+        {
+            Id = plan.Id,
+            Plan = plan,
+            Root = root,
+            Card = view.Card,
+            Status = status,
+            TitleBar = titleBar,
+            TitleText = titleText,
+            PlaceText = placeText,
+            StatusDot = statusDot,
+            StopButton = stopButton,
+            MenuButton = menuButton,
+            RestartButton = restartButton,
+            ExitReasonText = exitReason,
+            ExitOverlay = overlay,
+            Body = body,
+            TerminalContent = content
+        };
+        titleBar.AddHandler(Control.MouseDoubleClickEvent, new MouseButtonEventHandler((_, _) => ToggleMaximizeWorkbenchPane(pane)));
+        titleBar.MouseLeftButtonDown += (_, e) =>
+        {
+            FocusWorkbenchPane(pane);
+            if (e.ClickCount == 2) { ToggleMaximizeWorkbenchPane(pane); e.Handled = true; }
+        };
+        root.PreviewMouseDown += (_, _) => FocusWorkbenchPane(pane);
+        stopButton.Click += (_, _) => StopWorkbenchPane(pane);
+        menuButton.Click += (_, _) => OpenPaneMenu(pane, menuButton);
+        restartButton.Click += (_, _) => _ = GuardAsync(() => RestartWorkbenchPaneAsync(pane));
+        SetWorkbenchPaneStatus(pane, status, pane.ExitReason);
+        return pane;
     }
 
     private void DetachWorkbenchPane(Guid id)
@@ -126,6 +272,8 @@ public partial class MainWindow
         if (pane is null) return;
         workbenchPanes.Remove(pane);
         WorkbenchHost.Children.Remove(pane.Root);
+        if (maximizedPaneId == id) maximizedPaneId = null;
+        if (focusedPaneId == id) focusedPaneId = workbenchPanes.FirstOrDefault()?.Id;
         if (windowMode == MainWindowMode.Workbench) RelayoutWorkbench();
         UpdateWorkbenchChrome();
     }
@@ -135,6 +283,25 @@ public partial class MainWindow
         if (WorkbenchHost is null || windowMode != MainWindowMode.Workbench) return;
         var width = Math.Max(WorkbenchScroll?.ViewportWidth > 0 ? WorkbenchScroll.ViewportWidth : WorkbenchHost.ActualWidth, 1);
         var height = Math.Max(WorkbenchScroll?.ViewportHeight > 0 ? WorkbenchScroll.ViewportHeight : WorkbenchHost.ActualHeight, 1);
+        if (maximizedPaneId is { } maxId && workbenchPanes.FirstOrDefault(item => item.Id == maxId) is { } maximized)
+        {
+            WorkbenchHost.Width = width;
+            WorkbenchHost.Height = height;
+            foreach (var view in workbenchPanes)
+            {
+                if (view.Id == maxId)
+                {
+                    view.Root.Visibility = Visibility.Visible;
+                    Canvas.SetLeft(view.Root, 0);
+                    Canvas.SetTop(view.Root, 0);
+                    view.Root.Width = width;
+                    view.Root.Height = height;
+                }
+                else view.Root.Visibility = Visibility.Collapsed;
+            }
+            return;
+        }
+        foreach (var view in workbenchPanes) view.Root.Visibility = Visibility.Visible;
         var layout = WorkbenchLayout.Layout(width, height, workbenchPanes.Count);
         var contentHeight = layout.Tiles.Count == 0 ? height : layout.Tiles[^1].Y + layout.Tiles[^1].Height;
         WorkbenchHost.Width = width;
@@ -174,7 +341,248 @@ public partial class MainWindow
             ? $"{RailResourceMode(config.Draft.Resource?.Mode)} · 可用 {GiB(sample.Available)} GiB"
             : "资源：未读取";
         BackToStartButton.Content = StartPageSurface.BackToStart;
-        BackToStartButton.Visibility = WorkbenchLayout.ShowBackToStart(windowMode, workbenchPanes.Count) ? Visibility.Visible : Visibility.Collapsed;
+        BackToStartButton.Visibility = WorkbenchLayout.ShowBackToStart(windowMode, CountActiveWorkbenchPanes()) ? Visibility.Visible : Visibility.Collapsed;
+        var full = workbenchPanes.Count >= WorkbenchLayout.MaxPanes;
+        AddPaneButton.IsEnabled = windowMode == MainWindowMode.Workbench && !full;
+        AddPaneButton.ToolTip = full ? StartPageSurface.CapDenied : "添加窗格";
+        RefreshPaneChrome();
+    }
+
+    private int CountActiveWorkbenchPanes() =>
+        workbenchPanes.Count(pane => pane.Status is WorkbenchPaneStatus.Starting or WorkbenchPaneStatus.Running or WorkbenchPaneStatus.Waiting or WorkbenchPaneStatus.Pressure);
+
+    private static bool IsActiveWorkbenchStatus(WorkbenchPaneStatus status) =>
+        status is WorkbenchPaneStatus.Starting or WorkbenchPaneStatus.Running or WorkbenchPaneStatus.Waiting or WorkbenchPaneStatus.Pressure;
+
+    private void BackToStartClick(object sender, RoutedEventArgs e)
+    {
+        maximizedPaneId = null;
+        windowMode = MainWindowMode.StartPage;
+        ApplyWindowMode();
+    }
+
+    private void AddPaneClick(object sender, RoutedEventArgs e)
+    {
+        if (windowMode != MainWindowMode.Workbench) return;
+        if (workbenchPanes.Count >= WorkbenchLayout.MaxPanes)
+        {
+            AddPaneButton.IsEnabled = false;
+            AddPaneButton.ToolTip = StartPageSurface.CapDenied;
+            ErrorText.Text = StartPageSurface.CapDenied;
+            UpdateWorkbenchChrome();
+            return;
+        }
+        var menu = new ContextMenu();
+        foreach (var slot in AddableWorkbenchSlots())
+        {
+            var item = new MenuItem { Header = slot.DisplayName, Tag = slot.Id };
+            item.Click += (_, _) => _ = GuardAsync(() => AddOrRestartWorkbenchSlotAsync(slot));
+            menu.Items.Add(item);
+        }
+        if (menu.Items.Count == 0)
+        {
+            ErrorText.Text = "没有可添加的 Agent。请先在起步页配置可启动的项目 Agent。";
+            return;
+        }
+        menu.PlacementTarget = AddPaneButton;
+        menu.Placement = PlacementMode.Bottom;
+        AddPaneButton.ContextMenu = menu;
+        menu.IsOpen = true;
+    }
+
+    private IEnumerable<Slot> AddableWorkbenchSlots()
+    {
+        var running = workbenchPanes.Where(pane => IsActiveWorkbenchStatus(pane.Status)).ToArray();
+        var runningSlots = running.Select(pane => pane.Plan.SourceSlotId).OfType<Guid>().ToHashSet();
+        var runningAgents = running.Select(pane => (pane.Plan.AgentId, pane.Plan.Cwd)).ToHashSet();
+        foreach (var slot in config.Draft.Slots)
+        {
+            if (!IsSlotReady(slot)) continue;
+            if (runningSlots.Contains(slot.Id)) continue;
+            var directory = string.IsNullOrWhiteSpace(slot.Directory) ? config.Draft.Project : slot.Directory;
+            if (runningAgents.Contains((slot.AgentId, directory))) continue;
+            yield return slot;
+        }
+    }
+
+    private async Task AddOrRestartWorkbenchSlotAsync(Slot slot)
+    {
+        var exited = workbenchPanes.FirstOrDefault(pane =>
+            !IsActiveWorkbenchStatus(pane.Status)
+            && (pane.Plan.SourceSlotId == slot.Id || string.Equals(pane.Plan.AgentId, slot.AgentId, StringComparison.Ordinal)));
+        if (exited is not null) await RestartWorkbenchPaneAsync(exited, slot);
+        else await LaunchSlotsOnWorkbenchAsync([slot]);
+    }
+
+    private void ToggleMaximizeWorkbenchPane(WorkbenchPaneView pane)
+    {
+        maximizedPaneId = maximizedPaneId == pane.Id ? null : pane.Id;
+        RelayoutWorkbench();
+        RefreshPaneChrome();
+    }
+
+    private void RestoreWorkbenchGrid()
+    {
+        maximizedPaneId = null;
+        RelayoutWorkbench();
+        RefreshPaneChrome();
+    }
+
+    private void FocusWorkbenchPane(WorkbenchPaneView pane)
+    {
+        focusedPaneId = pane.Id;
+        ApplyPaneFocusBorders();
+        pane.Card.Focus();
+    }
+
+    private void ApplyPaneFocusBorders()
+    {
+        foreach (var pane in workbenchPanes)
+        {
+            var focused = pane.Id == focusedPaneId;
+            pane.Root.BorderThickness = new Thickness(focused ? 2 : 1);
+            pane.Root.SetResourceReference(Border.BorderBrushProperty, focused ? "Accent" : "Line");
+        }
+    }
+
+    private void SetWorkbenchPaneStatus(WorkbenchPaneView pane, WorkbenchPaneStatus status, string? reason = null)
+    {
+        pane.Status = status;
+        if (reason is not null) pane.ExitReason = reason;
+        var exited = status == WorkbenchPaneStatus.Exited;
+        pane.StopButton.Visibility = exited ? Visibility.Collapsed : Visibility.Visible;
+        pane.ExitOverlay.Visibility = exited ? Visibility.Visible : Visibility.Collapsed;
+        pane.ExitReasonText.Text = pane.ExitReason;
+        pane.RestartButton.Content = StartPageSurface.RestartPane;
+        var brush = status switch
+        {
+            WorkbenchPaneStatus.Running => "StatusOk",
+            WorkbenchPaneStatus.Exited => "StatusBad",
+            _ => "StatusWait"
+        };
+        pane.StatusDot.SetResourceReference(Shape.FillProperty, brush);
+        RefreshPaneChrome();
+        UpdateWorkbenchChrome();
+    }
+
+    private void RefreshPaneChrome()
+    {
+        for (var i = 0; i < workbenchPanes.Count; i++)
+        {
+            var pane = workbenchPanes[i];
+            pane.PlaceText.Text = pane.Plan.RemoteExecution is null ? "本机" : "远程";
+            pane.TitleText.Text = (i + 1) + "  " + pane.Plan.Name;
+            pane.TitleText.ToolTip = pane.Plan.Name;
+        }
+    }
+
+    private void StopWorkbenchPane(WorkbenchPaneView pane)
+    {
+        if (!IsActiveWorkbenchStatus(pane.Status)) return;
+        if (embeddedViews.TryGetValue(pane.Id, out var view))
+        {
+            view.Stop.Cancel();
+            view.Client?.Dispose();
+        }
+        var reason = string.IsNullOrWhiteSpace(pane.ExitReason) ? "已停止" : pane.ExitReason;
+        SetWorkbenchPaneStatus(pane, WorkbenchPaneStatus.Exited, reason);
+    }
+
+    private void CloseWorkbenchPane(WorkbenchPaneView pane)
+    {
+        RemoveEmbedded(pane.Id);
+        RelayoutWorkbench();
+        UpdateWorkbenchChrome();
+    }
+
+    private void OpenPaneMenu(WorkbenchPaneView pane, Button owner)
+    {
+        var menu = new ContextMenu();
+        var command = pane.Plan.Command.Executable + (pane.Plan.Command.Arguments.Length == 0 ? "" : " " + string.Join(" ", pane.Plan.Command.Arguments));
+        menu.Items.Add(new MenuItem { Header = "命令：" + command, IsEnabled = false });
+        menu.Items.Add(new MenuItem { Header = "路径：" + (string.IsNullOrWhiteSpace(pane.Plan.Cwd) ? pane.Plan.Workspace.Path : pane.Plan.Cwd), IsEnabled = false });
+        if (maximizedPaneId == pane.Id)
+        {
+            var restore = new MenuItem { Header = "回到网格" };
+            restore.Click += (_, _) => RestoreWorkbenchGrid();
+            menu.Items.Add(restore);
+        }
+        var close = new MenuItem { Header = "关闭格子" };
+        close.Click += (_, _) => CloseWorkbenchPane(pane);
+        menu.Items.Add(close);
+        menu.PlacementTarget = owner;
+        menu.Placement = PlacementMode.Bottom;
+        owner.ContextMenu = menu;
+        menu.IsOpen = true;
+    }
+
+    private void SyncWorkbenchPanesFromStatus()
+    {
+        if (workbenchPanes.Count == 0 || status?.Entries is not { Length: > 0 } entries) return;
+        var changed = false;
+        foreach (var pane in workbenchPanes)
+        {
+            var entry = entries.FirstOrDefault(item => item.Plan.Id == pane.Id);
+            if (entry is null) continue;
+            var mapped = MapControlEntryStatus(entry);
+            var reason = mapped == WorkbenchPaneStatus.Exited
+                ? (string.IsNullOrWhiteSpace(entry.Detail) ? (entry.ExitCode is { } code ? "退出码 " + code : "已退出") : entry.Detail)
+                : pane.ExitReason;
+            if (pane.Status == mapped && pane.ExitReason == reason) continue;
+            pane.Status = mapped;
+            pane.ExitReason = reason;
+            changed = true;
+        }
+        if (!changed) return;
+        foreach (var pane in workbenchPanes) SetWorkbenchPaneStatus(pane, pane.Status, pane.ExitReason);
+    }
+
+    private static WorkbenchPaneStatus MapControlEntryStatus(ControlEntry entry) => entry.State switch
+    {
+        "Pending" or "Creating" => WorkbenchPaneStatus.Starting,
+        "Started" or "Running" => WorkbenchPaneStatus.Running,
+        "Waiting" => WorkbenchPaneStatus.Waiting,
+        "Pressure" => WorkbenchPaneStatus.Pressure,
+        _ => WorkbenchPaneStatus.Exited
+    };
+
+    private async Task RestartWorkbenchPaneAsync(WorkbenchPaneView pane, Slot? slot = null)
+    {
+        var target = slot ?? config.Draft.Slots.FirstOrDefault(item => item.Id == pane.Plan.SourceSlotId)
+            ?? config.Draft.Slots.FirstOrDefault(item => string.Equals(item.AgentId, pane.Plan.AgentId, StringComparison.Ordinal) && IsSlotReady(item));
+        if (target is null)
+        {
+            ErrorText.Text = "无法重新启动：没有对应的可启动 Agent 配置。";
+            return;
+        }
+        await LaunchSlotsOnWorkbenchAsync([target], pane);
+    }
+
+    private async Task LaunchSlotsOnWorkbenchAsync(IReadOnlyList<Slot> slots, WorkbenchPaneView? replace = null)
+    {
+        if (slots.Count == 0) return;
+        if (closeRequested || busy || launchFinalizing || launchCancellation != null || !cancelTask.IsCompleted || readOnly || submittedAttempts.Length > 0)
+        {
+            ErrorText.Text = "当前不能启动新的窗格，请稍后再试。";
+            return;
+        }
+        if (replace is null && workbenchPanes.Count + slots.Count > WorkbenchLayout.MaxPanes)
+        {
+            ErrorText.Text = StartPageSurface.CapDenied;
+            UpdateWorkbenchChrome();
+            return;
+        }
+        launchCancellation = new();
+        SetBusy(true);
+        ErrorText.Text = "";
+        try
+        {
+            var draft = config.Draft.Copy();
+            var ids = slots.Select(slot => slot.Id).ToHashSet();
+            foreach (var item in draft.Slots) item.Enabled = ids.Contains(item.Id);
+            await LaunchPreparedDraftAsync(draft, slots.Count, replace);
+        }
+        finally { await FinishLaunchAsync(); }
     }
 
     private void ShowPartialLaunchNotice(int started, int requested, string reason)
@@ -193,9 +601,17 @@ public partial class MainWindow
         WorkbenchHost.Children.Clear();
         if (WorkbenchNotice is not null) WorkbenchNotice.Text = "";
         windowMode = MainWindowMode.StartPage;
+        maximizedPaneId = null;
+        focusedPaneId = null;
         WorkbenchPanel.BeginAnimation(OpacityProperty, null);
         WorkbenchPanel.Opacity = 1;
         ApplyWindowMode();
+    }
+
+    private void SetWorkbenchPaneStatusForChecks(Guid id, WorkbenchPaneStatus status, string? reason = null)
+    {
+        SetWorkbenchPaneStatus(workbenchPanes.Single(item => item.Id == id), status, reason);
+        RelayoutWorkbench();
     }
 #endif
 

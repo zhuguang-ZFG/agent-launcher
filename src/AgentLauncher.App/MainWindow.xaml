@@ -56,9 +56,9 @@
   </DockPanel>
   <DockPanel x:Name="WorkbenchPanel" Visibility="Collapsed">
    <DockPanel x:Name="WorkbenchTopBar" DockPanel.Dock="Top" Margin="20,12,20,8">
-    <Button DockPanel.Dock="Right" x:Name="BackToStartButton" Content="回到起步页" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" Visibility="Collapsed" FontSize="12"/>
+    <Button DockPanel.Dock="Right" x:Name="BackToStartButton" Content="回到起步页" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" Visibility="Collapsed" FontSize="12" Click="BackToStartClick"/>
     <Button DockPanel.Dock="Right" Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="WorkbenchSettings" Padding="6,2" MinHeight="26" FontSize="12"/>
-    <Button DockPanel.Dock="Right" x:Name="AddPaneButton" Content="+" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" MinWidth="32" Margin="0,0,8,0" ToolTip="添加窗格" AutomationProperties.Name="添加窗格" FontSize="16"/>
+    <Button DockPanel.Dock="Right" x:Name="AddPaneButton" Content="+" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" MinWidth="32" Margin="0,0,8,0" ToolTip="添加窗格" AutomationProperties.Name="添加窗格" FontSize="16" Click="AddPaneClick"/>
     <StackPanel VerticalAlignment="Center">
      <DockPanel>
       <TextBlock x:Name="WorkbenchCapacity" DockPanel.Dock="Right" Text="0 / 最多 6" Style="{StaticResource Caption}" Margin="16,0,0,0" VerticalAlignment="Center"/>

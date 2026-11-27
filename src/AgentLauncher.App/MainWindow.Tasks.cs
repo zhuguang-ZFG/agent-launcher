@@ -656,7 +656,6 @@ public partial class MainWindow
             await SubmitPanesAsync("",[plan],"vertical");
             submitted = true;
             QueueStatusText.Text = $"已提交任务：{task.Name}。进程出现不代表 Agent 已就绪。";
-            if (!closeRequested && config.MinimizeAfterLaunch) WindowState = WindowState.Minimized;
         }
         catch (Exception e) when (e is IOException or FileNotFoundException or UnauthorizedAccessException)
         {

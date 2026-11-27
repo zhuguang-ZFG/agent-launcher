@@ -15,27 +15,7 @@ public partial class MainWindow
         var plans=(status?.Entries??[]).Where(entry=>entry.Plan.BatchId==batchId).Select(entry=>entry.Plan).ToArray();
         var selected=plans.FirstOrDefault(p=>p.Id==attemptId)??plans.FirstOrDefault();
         if(selected!=null&&await TryShowEmbeddedAsync(selected))return;
-        var titles=plans.Select(TerminalAppearance.PaneTitle).Distinct().ToArray();
-        var handle=titles.Length==0?IntPtr.Zero:TerminalWindowFinder.Find(titles);
-        if(handle==IntPtr.Zero){ProgressText.Text="未找到该批次的唯一终端窗口；窗口可能已关闭、标题已更改，或属于旧版启动记录。请从任务栏选择终端。";return;}
-        var target=plans.SingleOrDefault(plan=>plan.Id==attemptId);
-        if(target is not null)
-        {
-            var reference=await Task.Run(()=>Store.Read<TerminalPaneReference>(System.IO.Path.Combine(Store.Root,"attempts",target.Id.ToString("N"),"terminal.json")));
-            if(reference is not null&&reference.AttemptId==target.Id&&reference.BatchId==batchId&&reference.PaneId is >=0 and <16)
-            {
-                var terminal=await Task.Run(()=>Commands.Terminal(config.TerminalPath));
-                if(TerminalWindowFinder.Find(titles)!=handle){ProgressText.Text="终端窗口已变化，请重试。";return;}
-                var start=Commands.TerminalFocusStartInfo(terminal,reference);
-                using var process=Process.Start(start)??throw new System.IO.IOException("无法请求切换窗格。");
-                using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                try{await process.WaitForExitAsync(timeout.Token);}catch(OperationCanceledException){ProgressText.Text="已请求切换窗格，但终端尚未确认，请从任务栏核对。";return;}
-                for(var i=0;i<10&&TerminalWindowFinder.Find([TerminalAppearance.PaneTitle(target)])!=handle;i++)await Task.Delay(50);
-                if(process.ExitCode!=0||TerminalWindowFinder.Find([TerminalAppearance.PaneTitle(target)])!=handle){TerminalWindowFinder.Focus(handle);ProgressText.Text="已找到批次窗口，但未确认目标窗格；窗格可能已关闭或移至其他标签页。";return;}
-            }
-            else{TerminalWindowFinder.Focus(handle);ProgressText.Text="已找到批次窗口，当前记录没有可核对的窗格编号，请手动选择窗格。";return;}
-        }
-        ProgressText.Text=TerminalWindowFinder.Focus(handle)?"已定位并切到对应终端。":"已找到对应终端，但 Windows 未允许切到前台，请点击任务栏。";
+        ProgressText.Text="未找到该批次的嵌入式终端；窗口可能已关闭，或属于旧版启动记录。";
     });
 }
 

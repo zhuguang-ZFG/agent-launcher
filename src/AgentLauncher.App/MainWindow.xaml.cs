@@ -694,7 +694,7 @@ public partial class MainWindow : Window
         try{await task;}finally{if(ReferenceEquals(resourceRefreshTask,task))resourceRefreshTask=null;}
     }
     // Monitor-status fan-out: the polling seam refreshes sessions, the rail summary and the launch gate together.
-    private void RenderMonitorStatus(){RenderSessions();RenderRail();UpdateLaunch();SessionNotifier.For(this).Observe(status?.Entries,config.NotifyOnSessionEventsEnabled);}
+    private void RenderMonitorStatus(){SyncWorkbenchPanesFromStatus();RenderSessions();RenderRail();UpdateLaunch();SessionNotifier.For(this).Observe(status?.Entries,config.NotifyOnSessionEventsEnabled);}
     private void RenderSessions()
     {
         var entries=status?.Entries??[];var signature=string.Join("|",entries.Select(e=>$"{e.Plan.Id}:{e.State}:{e.Detail}:{(e.State=="Pending"&&DateTimeOffset.UtcNow-e.Created>TimeSpan.FromSeconds(10))}:{(e.State=="Settled"&&e.Plan.Kind=="agent"&&FindLinkedRun(e.Plan.Id)!=null)}"));
@@ -902,9 +902,15 @@ public partial class MainWindow : Window
         launchCancellation=new();SetBusy(true);ErrorText.Text="";
         try
         {
+            await LaunchPreparedDraftAsync(config.Draft.Copy(),config.Draft.Slots.Count(slot=>slot.Enabled));
+        }
+        finally{await FinishLaunchAsync();}
+    }
+    private async Task LaunchPreparedDraftAsync(Draft draft,int requested,WorkbenchPaneView? replace=null)
+    {
+            var cancel=launchCancellation??throw new InvalidOperationException("尚未开始启动。");
             await CheckFreshCommandsAsync();if(validationError.Length>0)throw new IOException(validationError);
             await saveTask;if(!SaveHealthy)throw new IOException(saveError!=null?"先解决配置保存失败，再启动。":"正在保存配置，请稍候。");
-            var draft=config.Draft.Copy();
             await RefreshAsync();
             if(status?.Ok!=true)throw new IOException(status?.Message??"监控状态不可用");
             var admissionBlocked=status?.AdmissionHardBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
@@ -914,17 +920,16 @@ public partial class MainWindow : Window
             ProgressText.Text="正在核对命令和工作目录…";
             // Active agent workspaces are the monitor's own reserve precondition; checking them here keeps an occupied destination from leaving a worktree and branch behind.
             var activeWorkspaces=status?.Entries?.Where(x=>!Store.IsTerminal(x)&&x.Plan.Kind=="agent").Select(x=>x.Plan.Workspace).ToArray()??[];
-            var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token,activeWorkspaces,configuration:config));
-            launchCancellation.Token.ThrowIfCancellationRequested();
+            var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),cancel.Token,activeWorkspaces,configuration:config));
+            cancel.Token.ThrowIfCancellationRequested();
             var planned=plans.ToArray();
-            var requested=draft.Slots.Count(slot=>slot.Enabled);
             await AuthorizePlansAsync(planned);
             var launchBindings=ReservationBindings(planned);
-            var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
+            var reserve=await Ipc.ReserveWithCleanupAsync(planned,cancel.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
-            if(launchCancellation.Token.IsCancellationRequested)return;
+            if(cancel.Token.IsCancellationRequested)return;
             var started=new List<LaunchItem>();
-            try{await SubmitPanesAsync("",plans,draft.Layout,launchCancellation.Token);started.AddRange(plans);}
+            try{await SubmitPanesAsync("",plans,draft.Layout,cancel.Token,replace:replace);started.AddRange(plans);}
             catch
             {
                 started.AddRange(plans.Where(plan=>embeddedViews.ContainsKey(plan.Id)));
@@ -934,18 +939,16 @@ public partial class MainWindow : Window
             }
             CompleteLaunchSurface(started,requested,admission.Reason);
             if(started.Count==0)return;
-            if(launchCancellation.Token.IsCancellationRequested)return;
+            if(cancel.Token.IsCancellationRequested)return;
             ProgressText.Text="已提交启动，正在等待各 Agent 的进程回执。";
             for(var i=0;i<10;i++)
             {
-                if(launchCancellation.Token.IsCancellationRequested)break;
+                if(cancel.Token.IsCancellationRequested)break;
                 await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true))break;
                 // A short command can finish before the first poll; its verified terminal entry also completes observation.
                 // Missing entries remain unknown and keep the existing bounded wait.
                 if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&Store.IsTerminal(x))==true))break;
             }
-        }
-        finally{await FinishLaunchAsync();}
     }
     private async void CancelClick(object sender,RoutedEventArgs e){await GuardAsync(CancelAsync);UpdateLaunch();}
     private void SelectProject(string path){var changed=!StringComparer.OrdinalIgnoreCase.Equals(config.Draft.Project,path);if(!Edit(d=>d.Project=path))return;if(changed&&undoRemovals.Count>0){undoRemovals.Clear();RenderSessionsNow();}if(path.Length>0){config.RecentProjects.RemoveAll(p=>StringComparer.OrdinalIgnoreCase.Equals(p,path));config.RecentProjects.Insert(0,path);config.RecentProjects=config.RecentProjects.Take(8).ToList();RenderRecentProjects();QueueSave();}}
