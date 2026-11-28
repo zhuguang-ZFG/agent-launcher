@@ -381,7 +381,9 @@ public partial class MainWindow
 
     private void BackToStartClick(object sender, RoutedEventArgs e)
     {
+#if INTEGRATION_TESTS
         workbenchLaunchFailureForChecks = null;
+#endif
         ClearWorkbenchTiles();
         windowMode = MainWindowMode.StartPage;
         ApplyWindowMode();
