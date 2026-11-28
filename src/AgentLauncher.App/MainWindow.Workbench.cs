@@ -787,7 +787,7 @@ public partial class MainWindow
             var draft = config.Draft.Copy();
             var enabled = draft.Slots.Count(slot => slot.Enabled);
             while (draft.Slots.Count(slot => slot.Enabled) < enabled + extra)
-                draft.Slots.Add(new Slot { Enabled = true, AgentId = draft.Slots.FirstOrDefault()?.AgentId ?? "custom" });
+                draft.Slots.Add(new Slot { Enabled = true, AgentId = draft.Slots.FirstOrDefault()?.AgentId ?? "omp" });
             var decision = DecideAdmission(draft, memory, status.Entries, budgets: status.Budgets);
             if (!decision.Launchable) break;
             remaining = extra;

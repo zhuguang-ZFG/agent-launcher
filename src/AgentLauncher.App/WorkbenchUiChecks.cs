@@ -38,9 +38,9 @@ public partial class MainWindow
                     Project = Store.Root,
                     Slots = Enumerable.Range(0, 7).Select(index => new Slot
                     {
-                        AgentId = "custom",
+                        AgentId = "codex",
                         Enabled = index < 6,
-                        Profiles = new() { ["custom"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe") } }
+                        Profiles = new() { ["codex"] = new() { Executable = System.IO.Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe") } }
                     }).ToList()
                 }
             };
