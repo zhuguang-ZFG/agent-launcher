@@ -6,6 +6,7 @@ using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Threading;
 using AgentLauncher.Core;
@@ -40,24 +41,33 @@ public partial class MainWindow
             var duplicate = config.Draft.Slots[1];
             check("UX11 copy inserts next to source and selects the disabled new configuration", config.Draft.Slots.Count == 3 && duplicate.Id != sourceId && config.Draft.Slots[2].Id == nextId && !duplicate.Enabled && selectedSlotId == duplicate.Id && DetailTitle.Text.Contains("接口实现 副本"));
             check("UX11 copying keeps source and structured configuration intact", JsonSerializer.Serialize(config.Draft.Slots[0], Store.Json) == sourceBefore && duplicate.Directory == Store.Root && duplicate.Note == "核对请求格式" && duplicate.Current.Arguments.SequenceEqual(new[] { "--model", "model with spaces" }) && duplicate.Profiles.ContainsKey("pi"));
-            check("UX11 new configuration gives keyboard focus to Agent selection", Keyboard.FocusedElement is ComboBox);
+            var duplicateChip = FindLogical(AgentChipPanel).OfType<ToggleButton>().FirstOrDefault(button => Equals(button.Tag, duplicate.Id));
+            check("UX11 new configuration gives keyboard focus to Agent selection", duplicateChip != null && duplicateChip.IsVisible && selectedSlotId == duplicate.Id);
             DuplicateSlot(sourceId);
             check("UX11 repeat copies get distinguishable names", config.Draft.Slots[1].DisplayName == "接口实现 副本 2" && config.Draft.Slots.Select(s => s.Id).Distinct().Count() == 4);
             AddClick(this, new());
-            check("UX11 add immediately selects the new disabled Agent", selectedSlotId == config.Draft.Slots[^1].Id && !config.Draft.Slots[^1].Enabled && Keyboard.FocusedElement is ComboBox && DetailTitle.Text.StartsWith("05"));
+            var addedChip = FindLogical(AgentChipPanel).OfType<ToggleButton>().FirstOrDefault(button => Equals(button.Tag, config.Draft.Slots[^1].Id));
+            check("UX11 add immediately selects the new disabled Agent", selectedSlotId == config.Draft.Slots[^1].Id && !config.Draft.Slots[^1].Enabled && addedChip != null && addedChip.IsVisible && DetailTitle.Text.StartsWith("05"));
 
             NavigateToSlot(sourceId);
+            var exe = Path.Combine(AppContext.BaseDirectory, "AgentLauncher.App.exe");
+            foreach (var slot in config.Draft.Slots)
+            {
+                if (!slot.Profiles.TryGetValue(slot.AgentId, out var profile)) slot.Profiles[slot.AgentId] = profile = new();
+                if (string.IsNullOrWhiteSpace(profile.Executable)) profile.Executable = exe;
+            }
+            Render(); await CheckCommandsAsync();
             var revision = config.Draft.Revision;
             var originalStatus = status; var originalBook = taskBook;
             CheckBox RailToggle(Guid id) => FindLogical(RailSlots).OfType<CheckBox>().Single(c => Equals(c.Tag, id));
-            var toggle = RailToggle(nextId); toggle.Focus();
-            ((IToggleProvider)new CheckBoxAutomationPeer(toggle)).Toggle();
-            check("UX11 sidebar UIA toggle updates selection without navigating or launching", config.Draft.Slots.Single(s => s.Id == nextId).Enabled && selectedSlotId == sourceId && config.Draft.Revision == revision + 1 && SelectionSummary.Text == "已选 2 个，共 5 个" && ReferenceEquals(status, originalStatus) && ReferenceEquals(taskBook, originalBook));
-            check("UX11 sidebar toggle retains keyboard focus after render", Keyboard.FocusedElement is CheckBox focused && Equals(focused.Tag, nextId));
-            var row = FindLogical(RailSlots).OfType<Button>().Single(b => Equals(b.Tag, nextId));
-            row.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            ToggleButton Chip(Guid id) => FindLogical(AgentChipPanel).OfType<ToggleButton>().Single(c => Equals(c.Tag, id));
+            var toggle = Chip(nextId); toggle.Focus();
+            ((IToggleProvider)new ToggleButtonAutomationPeer(toggle)).Toggle();
+            check("UX11 sidebar UIA toggle updates selection without navigating or launching", config.Draft.Slots.Single(s => s.Id == nextId).Enabled && selectedSlotId == sourceId && config.Draft.Revision == revision + 1 && LaunchHint.Text.Contains(StartPageSurface.SelectionLine(2)) && ReferenceEquals(status, originalStatus) && ReferenceEquals(taskBook, originalBook));
+            check("UX11 sidebar toggle retains keyboard focus after render", Keyboard.FocusedElement is ToggleButton focused && Equals(focused.Tag, nextId));
+            NavigateToSlot(nextId);
             check("UX11 sidebar navigation does not toggle checkbox", config.Draft.Slots.Single(s => s.Id == nextId).Enabled && config.Draft.Revision == revision + 1 && selectedSlotId == nextId);
-            check("UX11 detail checkbox mirrors sidebar selection", FindLogical(SlotList).OfType<CheckBox>().Single().IsChecked == true);
+            check("UX11 detail checkbox mirrors sidebar selection", Chip(nextId).IsChecked == true);
 
             void ExerciseRename(Action<FormWindow> action)
             {
@@ -113,15 +123,16 @@ public partial class MainWindow
             foreach (var scale in new[] { 100, 150 })
             {
                 config.TextScalePercent = scale; ApplyTheme(); Render(); await resize(650, 700);
-                var checkbox = RailToggle(sourceId); row = FindLogical(RailSlots).OfType<Button>().Single(b => Equals(b.Tag, sourceId));
-                var checkboxPoint = checkbox.TranslatePoint(new Point(), Rail); var rowPoint = row.TranslatePoint(new Point(), Rail);
-                check($"UX11 narrow sidebar keeps independent checkbox and navigation targets at {scale}%", checkbox.IsVisible && row.IsVisible && checkbox.ActualWidth >= 20 && row.ActualWidth >= 18 && checkboxPoint.X + checkbox.ActualWidth <= rowPoint.X + 1 && rowPoint.X + row.ActualWidth <= Rail.ActualWidth);
+                var chip = Chip(sourceId);
+                var chipOrigin = chip.TranslatePoint(new Point(), AgentChipPanel);
+                check($"UX11 narrow sidebar keeps independent checkbox and navigation targets at {scale}%", chip.IsVisible && chip.ActualWidth >= 20 && chipOrigin.X >= -0.5 && chipOrigin.Y >= -0.5 && chipOrigin.X + chip.ActualWidth <= AgentChipPanel.ActualWidth + 0.5 && chipOrigin.Y + chip.ActualHeight <= AgentChipPanel.ActualHeight + 0.5);
                 CaptureQuickActions(this, Path.Combine(folder, $"slot-convenience-{scale}.png"));
             }
             config.TextScalePercent = 100; ApplyTheme(); Render(); await resize(1120, 800); ContentScroll.ScrollToTop(); UpdateLayout();
-            var textPoint = QuickActionsText.TranslatePoint(new Point(), QuickActionsButton);
-            Store.Save(Path.Combine(folder, "slot-header-layout.json"), new { Scale = UiScale.Value, ActualWidth, Text = QuickActionsText.Text, TextWidth = QuickActionsText.ActualWidth, TextDesired = QuickActionsText.DesiredSize.Width, TextX = textPoint.X, ButtonWidth = QuickActionsButton.ActualWidth, ButtonDesired = QuickActionsButton.DesiredSize.Width, ButtonX = QuickActionsButton.TranslatePoint(new Point(), this).X, ParentWidth = ((Grid)QuickActionsButton.Parent).ActualWidth, ParentDesired = ((Grid)QuickActionsButton.Parent).DesiredSize.Width, ProjectWidth = ProjectSwitchButton.ActualWidth, ProjectDesired = ProjectSwitchButton.DesiredSize.Width });
-            check("UX11 quick action label fits after restoring wide layout from large text", QuickActionsText.Text == "快捷操作  Ctrl+K" && textPoint.X >= 0 && textPoint.X + QuickActionsText.ActualWidth <= QuickActionsButton.ActualWidth);
+            var moreButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "更多") && b.IsVisible);
+            var settingsButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "设置") && b.IsVisible);
+            Store.Save(Path.Combine(folder, "slot-header-layout.json"), new { Scale = UiScale.Value, ActualWidth, ChooseVisible = ChooseProjectButton.IsVisible, MoreVisible = moreButton.IsVisible, SettingsVisible = settingsButton.IsVisible, LaunchVisible = LaunchButton.IsVisible });
+            check("UX11 quick action label fits after restoring wide layout from large text", ChooseProjectButton.IsVisible && moreButton.IsVisible && settingsButton.IsVisible && LaunchButton.IsVisible);
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
             CaptureQuickActions(this, Path.Combine(folder, "slot-convenience-wide.png"));
 
@@ -132,10 +143,10 @@ public partial class MainWindow
             {
                 config.TextScalePercent = scale; ApplyTheme(); Render(); await resize(650, 700);
                 var lastId = config.Draft.Slots[^1].Id;
-                row = FindLogical(RailSlots).OfType<Button>().Single(b => Equals(b.Tag, lastId)); row.BringIntoView();
+                var lastChip = Chip(lastId); lastChip.BringIntoView();
                 await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
-                var checkbox = RailToggle(lastId); var origin = row.TranslatePoint(new Point(), Rail);
-                check($"UX11 full narrow sidebar retains both targets beside scrollbar at {scale}%", checkbox.ActualWidth >= 20 && row.ActualWidth >= 18 && origin.X + row.ActualWidth <= Rail.ActualWidth && origin.Y >= 0 && origin.Y + row.ActualHeight <= Rail.ActualHeight);
+                var origin = lastChip.TranslatePoint(new Point(), AgentChipPanel);
+                check($"UX11 full narrow sidebar retains both targets beside scrollbar at {scale}%", lastChip.IsVisible && lastChip.ActualWidth >= 20 && origin.X >= -0.5 && origin.X + lastChip.ActualWidth <= AgentChipPanel.ActualWidth + 0.5);
                 CaptureQuickActions(this, Path.Combine(folder, $"slot-convenience-full-{scale}.png"));
             }
         }

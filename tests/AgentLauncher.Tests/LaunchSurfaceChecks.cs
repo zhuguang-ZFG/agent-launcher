@@ -18,21 +18,25 @@ internal static class LaunchSurfaceChecks
 
         Test("UX15 one local place stays 本机", () =>
         {
-            Assert(LaunchSurface.LaunchButtonText(2, new string?[] { null, null }, false, false) == "启动 2 个 · 本机", LaunchSurface.LaunchButtonText(2, new string?[] { null, null }, false, false));
+            Assert(LaunchSurface.LaunchButtonText(2, new string?[] { null, null }, false, false) == "启动 2 个", LaunchSurface.LaunchButtonText(2, new string?[] { null, null }, false, false));
+            Assert(LaunchSurface.TargetPhrase(new string?[] { null, null }) == "本机", "single local place");
             Assert(LaunchSurface.TargetTooltip(new string?[] { null, null }).Length == 0, "single place tooltip");
         });
-        Test("UX15 one cloud host is named and a preview prefix stays", () =>
+        Test("UX15 one cloud host is named and starting replaces the verb", () =>
         {
-            Assert(LaunchSurface.LaunchButtonText(1, new string?[] { "京云" }, false, true) == "检查资源并启动 1 个 · 京云", LaunchSurface.LaunchButtonText(1, new string?[] { "京云" }, false, true));
-            Assert(LaunchSurface.LaunchButtonText(1, new string?[] { "京云" }, true, true) == "正在处理…", "busy label");
+            Assert(LaunchSurface.LaunchButtonText(1, new string?[] { "京云" }, false, true) == "启动 1 个", LaunchSurface.LaunchButtonText(1, new string?[] { "京云" }, false, true));
+            Assert(LaunchSurface.TargetPhrase(new string?[] { "京云" }) == "京云", "named host");
+            Assert(LaunchSurface.LaunchButtonText(1, new string?[] { "京云" }, true, true) == "正在启动…", "busy label");
         });
         Test("UX15 two different places do not collapse to the first host", () =>
         {
             var label = LaunchSurface.LaunchButtonText(2, new string?[] { "京云", "阿里云" }, false, false);
-            Assert(label == "启动 2 个 · 多个目标", label);
+            Assert(label == "启动 2 个", label);
+            Assert(LaunchSurface.TargetPhrase(new string?[] { "京云", "阿里云" }) == "多个目标", "many places");
             Assert(!label.Contains("京云") && !label.Contains("阿里云"), "button named one host");
             var mixed = LaunchSurface.LaunchButtonText(3, new string?[] { null, "京云", "京云" }, false, false);
-            Assert(mixed == "启动 3 个 · 多个目标", mixed);
+            Assert(mixed == "启动 3 个", mixed);
+            Assert(LaunchSurface.TargetPhrase(new string?[] { null, "京云", "京云" }) == "多个目标", "mixed places");
             Assert(LaunchSurface.TargetTooltip(new string?[] { null, "京云" }) == "本次同时包含：本机、京云", LaunchSurface.TargetTooltip(new string?[] { null, "京云" }));
         });
         Test("UX15 none says this run is not peer and is refused", () =>

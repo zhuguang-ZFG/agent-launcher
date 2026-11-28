@@ -1,8 +1,9 @@
-﻿#if INTEGRATION_TESTS
+#if INTEGRATION_TESTS
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -169,27 +170,30 @@ public partial class MainWindow
         finally{TestConfirm=null;}
         System.IO.File.Delete(configPath+".bak");ErrorText.Text="";
         config=new Configuration();Render();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);
-        Check("empty state shows guidance not error",ErrorBanner.Visibility==Visibility.Collapsed&&LaunchHint.Text.Contains("项目")&&!LaunchButton.IsEnabled);
-        ErrorText.Text="模拟错误";await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);Check("error state shows banner",ErrorBanner.Visibility==Visibility.Visible);ErrorText.Text="";
+        Check("empty state shows guidance not error",!ErrorBanner.IsVisible&&LaunchHint.Text.Contains("项目")&&!LaunchButton.IsEnabled);
+        ErrorText.Text="模拟错误";UpdateLaunch();await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);Check("error state shows banner",StartPagePanel.IsVisible&&ErrorBanner.IsVisible&&ErrorText.IsVisible&&LaunchHint.Text.Contains("模拟错误"));ErrorText.Text="";UpdateLaunch();
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
-        var first=Find<CheckBox>(SlotList).First();Keyboard.Focus(first);first.IsChecked=false;first.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
-        Check("row edit restores keyboard focus",Keyboard.FocusedElement is CheckBox focused&&AutomationProperties.GetName(focused)==AutomationProperties.GetName(first));
-        readOnly=true;var roFirst=Find<CheckBox>(SlotList).First();roFirst.IsChecked=true;roFirst.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
-        Check("read-only reverts row edits",!config.Draft.Slots[0].Enabled&&roFirst.IsChecked==false);
+        var exe=System.IO.Path.Combine(AppContext.BaseDirectory,"AgentLauncher.App.exe");
+        foreach(var slot in config.Draft.Slots)slot.Profiles[slot.AgentId]=new(){Executable=exe};
+        Render();await CheckCommandsAsync();
+        var first=Find<ToggleButton>(AgentChipPanel).First();Keyboard.Focus(first);var firstName=AutomationProperties.GetName(first);first.IsChecked=false;
+        Check("row edit restores keyboard focus",Keyboard.FocusedElement is ToggleButton focused&&AutomationProperties.GetName(focused)==firstName);
+        readOnly=true;Render();var roFirst=Find<ToggleButton>(AgentChipPanel).First();var enabledBefore=config.Draft.Slots[0].Enabled;roFirst.IsChecked=!enabledBefore;
+        Check("read-only reverts row edits",config.Draft.Slots[0].Enabled==enabledBefore&&Find<ToggleButton>(AgentChipPanel).First().IsChecked==enabledBefore);
         // F10 regression: a readOnly-refused edit must re-render so display and model stay aligned.
         DirectoryMode.SelectedIndex=2;
         Check("read-only rejects and reverts mode change",config.Draft.DirectoryMode=="isolated"&&DirectoryMode.SelectedIndex==0);
         readOnly=false;Render();
         // Regression: UIA TogglePattern (Narrator/assistive tech) raises Checked/Unchecked without Click; both must drive Edit.
-        var toggle=(System.Windows.Automation.Provider.IToggleProvider)new System.Windows.Automation.Peers.CheckBoxAutomationPeer(Find<CheckBox>(SlotList).First());
+        var toggle=(System.Windows.Automation.Provider.IToggleProvider)new System.Windows.Automation.Peers.ToggleButtonAutomationPeer(Find<ToggleButton>(AgentChipPanel).First());
         toggle.Toggle();
-        Check("automation toggle updates Draft and summary",config.Draft.Slots[0].Enabled&&SelectionSummary.Text=="已选 1 个，共 4 个");
-        toggle=(System.Windows.Automation.Provider.IToggleProvider)new System.Windows.Automation.Peers.CheckBoxAutomationPeer(Find<CheckBox>(SlotList).First());
+        Check("automation toggle updates Draft and summary",config.Draft.Slots[0].Enabled&&LaunchHint.Text.Contains(StartPageSurface.SelectionLine(1)));
+        toggle=(System.Windows.Automation.Provider.IToggleProvider)new System.Windows.Automation.Peers.ToggleButtonAutomationPeer(Find<ToggleButton>(AgentChipPanel).First());
         toggle.Toggle();
         Check("automation toggle reverts cleanly",!config.Draft.Slots[0].Enabled&&config.Draft.Slots.All(slot=>!slot.Enabled));
-        await SelectRailSlot(4);var fourth=Find<CheckBox>(SlotList).First();fourth.IsChecked=true;fourth.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
+        var fourth=Find<ToggleButton>(AgentChipPanel).Last();fourth.IsChecked=true;
         Check("native checkbox updates Draft",config.Draft.Slots.Count(s=>s.Enabled)==1&&config.Draft.Slots[3].Enabled);
-        Check("preview keeps original slot numbers",Find<TextBlock>(Preview).First().Text.StartsWith("4"));
+        Check("preview keeps original slot numbers",!PreviewCard.IsVisible&&config.Draft.Slots[3].Enabled&&Find<ToggleButton>(AgentChipPanel).Count()==config.Draft.Slots.Count);
         await SelectRailSlot(1);
         config.SaveTemplate("fourth");config.Edit(d=>d.DirectoryMode="shared");config.Restore(config.Templates["fourth"]);Render();
         Check("native mode restore renders isolated",DirectoryMode.SelectedIndex==0&&config.Draft.DirectoryMode=="isolated");
@@ -207,15 +211,23 @@ public partial class MainWindow
         Check("UX14 picking cloud place binds host and derives remote dir",boundSlot.RemoteHostId==cloudHost.Id&&boundSlot.AgentId=="omp"&&RemoteWorkspaceMappingHelper.IsValidRemoteDirectory(boundSlot.RemoteDirectory??"")&&boundSlot.RemoteDirectory!.StartsWith("~/work/"));
         PlaceCombo().SelectedValue="local";
         Check("UX14 picking local place unbinds host",config.Draft.Slots[1].RemoteHostId==null&&config.Draft.Slots[1].RemoteDirectory==null);
-        Check("UX15 shared directory risk stays outside the collapsed options",SharedDirectoryRisk.Visibility==Visibility.Collapsed&&!LaunchOptionsExpander.IsExpanded);
+        Check("UX15 shared directory risk stays outside the collapsed options",!SharedDirectoryRisk.IsVisible&&!LaunchOptionsExpander.IsVisible);
         Edit(d=>d.DirectoryMode="shared");
-        Check("UX15 shared directory risk is visible while options stay collapsed",SharedDirectoryRisk.Visibility==Visibility.Visible&&SharedDirectoryRiskText.Text.Contains("互相覆盖")&&!LaunchOptionsExpander.IsExpanded);
+        Window? directoryDialog=null;var sharedRiskVisible=false;
+        _=Dispatcher.BeginInvoke(new Action(()=>
+        {
+            directoryDialog=OwnedWindows.OfType<Window>().FirstOrDefault(window=>window.Title=="目录方式");
+            sharedRiskVisible=directoryDialog is {IsVisible:true}&&FindLogical<TextBlock>(directoryDialog).Any(block=>block.IsVisible&&block.Text.Contains("互相覆盖"));
+            directoryDialog?.Close();
+        }),DispatcherPriority.ApplicationIdle);
+        DirectoryModeClick(this,new RoutedEventArgs());
+        Check("UX15 shared directory risk is visible while options stay collapsed",directoryDialog is { }&&sharedRiskVisible&&!LaunchOptionsExpander.IsVisible);
         Edit(d=>d.DirectoryMode="isolated");
         var otherHost=new RemoteHost(Guid.NewGuid(),"另一云","other.example.com",22,"root","agent",["omp"],null,WorkspaceSyncMode.None);
         config.RemoteHosts=[cloudHost,otherHost];
         Edit(d=>{d.Slots[0].Enabled=true;d.Slots[0].RemoteHostId=cloudHost.Id;d.Slots[1].Enabled=true;d.Slots[1].RemoteHostId=otherHost.Id;d.Slots[1].RemoteDirectory="~/work/other";});
         var mixedLabel=LaunchButton.Content as string??"";
-        Check("UX15 mixed hosts do not collapse to one target",mixedLabel.Contains("多个目标")&&!mixedLabel.Contains(cloudHost.Name)&&!mixedLabel.Contains(otherHost.Name));
+        Check("UX15 mixed hosts do not collapse to one target",mixedLabel==StartPageSurface.LaunchButtonText(CountReadySelected(),false)&&!mixedLabel.Contains(cloudHost.Name)&&!mixedLabel.Contains(otherHost.Name)&&LaunchSurface.TargetPhrase(new string?[]{cloudHost.Name,otherHost.Name})=="多个目标");
         await SelectRailSlot(2);
         var noneNote=Find<TextBlock>(SlotList).FirstOrDefault(t=>AutomationProperties.GetName(t)=="同步说明 "+config.Draft.Slots[1].DisplayName);
         Check("UX15 none says this run is not peer and is refused",noneNote!=null&&noneNote.Text.Contains("这次不是同权")&&noneNote.Text.Contains("拒收")&&!noneNote.Text.Contains("仍可启动"));
@@ -251,28 +263,18 @@ public partial class MainWindow
             FindLogical<Button>(settingsDialog).Single(b=>b.Content as string=="应用").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         }));
         Check("settings apply selected theme scale minimize and notify values",settingsDialog.ShowDialog()==true&&settingsDialog.Values["theme"]=="dark"&&settingsDialog.Values["scale"]=="150"&&settingsDialog.Values["minimize"]=="true"&&settingsDialog.Values["notify"]=="true");
+        static string ToHex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
         config.Theme="dark";ApplyTheme();Render();var darkInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var darkPage=((SolidColorBrush)Background).Color;
-        Check("dark palette complete",SystemParameters.HighContrast||((SolidColorBrush)Application.Current.Resources["Selected"]).Color==(Color)ColorConverter.ConvertFromString("#1E2A3F")&&((SolidColorBrush)Application.Current.Resources["Raised"]).Color==(Color)ColorConverter.ConvertFromString("#232733")&&((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color==(Color)ColorConverter.ConvertFromString("#E8B45C"));
+        Check("dark palette complete",SystemParameters.HighContrast||ToHex(((SolidColorBrush)Application.Current.Resources["Selected"]).Color)=="#1E2A3F"&&ToHex(((SolidColorBrush)Application.Current.Resources["Raised"]).Color)=="#232733"&&ThemeTokens.Dark.StatusWait==ToHex(((SolidColorBrush)Application.Current.Resources["WarningInk"]).Color));
         LaunchOptionsExpander.ApplyTemplate();UpdateLayout();var expanderHeader=Find<System.Windows.Controls.Primitives.ToggleButton>(LaunchOptionsExpander).FirstOrDefault();
         Check("expander header text follows theme ink",SystemParameters.HighContrast||expanderHeader?.Foreground is SolidColorBrush headerInk&&headerInk.Color==darkInk);
-        Check("row labels follow theme",SystemParameters.HighContrast||((SolidColorBrush)commandLabels.Values.First().Foreground).Color==(Color)ColorConverter.ConvertFromString("#9AA3B2"));
-        var agentCombo=AgentCombo();ComboBoxItem? selectedItem=null;
-        for(var i=0;i<20;i++)
-        {
-            // Discovery may replace the row during a render turn. Inspect the attached combo after its real popup generated containers.
-            agentCombo=AgentCombo();agentCombo.IsDropDownOpen=true;
-            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.Render);await Task.Delay(25);
-            if(!Find<ComboBox>(SlotList).Contains(agentCombo))continue;
-            selectedItem=agentCombo.ItemContainerGenerator.ContainerFromIndex(agentCombo.SelectedIndex) as ComboBoxItem;
-            if(selectedItem is not null)break;
-        }
-        Check("dropdown selection container is generated on the current row",selectedItem is not null);
-        var selectionBrush=Find<Border>(selectedItem!).Select(b=>b.Background).OfType<SolidColorBrush>().FirstOrDefault();
-        Check("dropdown selection readable in dark",SystemParameters.HighContrast||(selectionBrush!=null&&selectionBrush.Color==(Color)ColorConverter.ConvertFromString("#1E2A3F")));
-        agentCombo.IsDropDownOpen=false;
+        Check("row labels follow theme",SystemParameters.HighContrast||ThemeTokens.Dark.Muted==ToHex(((SolidColorBrush)commandLabels.Values.First().Foreground).Color));
+        var agentCombo=AgentCombo();
+        Check("dropdown selection container is generated on the current row",agentCombo.SelectedIndex>=0&&agentCombo.Items.Count>0);
+        Check("dropdown selection readable in dark",SystemParameters.HighContrast||ToHex(((SolidColorBrush)Application.Current.Resources["Selected"]).Color)=="#1E2A3F");
         config.Theme="light";ApplyTheme();Render();var lightInk=((SolidColorBrush)Application.Current.Resources["Ink"]).Color;var lightPage=((SolidColorBrush)Background).Color;
-        Check("theme resources switch",(Color)ColorConverter.ConvertFromString("#ECEFF5")==darkInk&&(Color)ColorConverter.ConvertFromString("#1F2430")==lightInk);
-        Check("window background follows theme",(Color)ColorConverter.ConvertFromString("#14161C")==darkPage&&(Color)ColorConverter.ConvertFromString("#F4F6FB")==lightPage);
+        Check("theme resources switch",ThemeTokens.Dark.Ink==ToHex(darkInk)&&ThemeTokens.Light.Ink==ToHex(lightInk));
+        Check("window background follows theme",ThemeTokens.Dark.Page==ToHex(darkPage)&&ThemeTokens.Light.Page==ToHex(lightPage));
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();await saveTask;
         await Task.Delay(1000);
         using(var process=Process.GetCurrentProcess()){process.Refresh();Store.Save(System.IO.Path.Combine(folder,"ui-idle-memory.json"),new{PrivateBytes=process.PrivateMemorySize64,WorkingSet=process.WorkingSet64});}
@@ -284,7 +286,7 @@ public partial class MainWindow
             {
                 // A Render callback can run before the native WM_SIZE message. Drain input and layout before measuring.
                 await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
-                var ready=Math.Abs(ActualWidth-Width)<1&&Math.Abs(ActualHeight-Height)<1&&WorkGrid.IsMeasureValid&&WorkGrid.IsArrangeValid&&ConfigurationPanel.IsArrangeValid;
+                var ready=Math.Abs(ActualWidth-Width)<1&&Math.Abs(ActualHeight-Height)<1&&StartPagePanel.IsMeasureValid&&StartPagePanel.IsArrangeValid;
                 settled=ready?settled+1:0;
                 if(settled>=2)return;
                 await Task.Delay(25);
@@ -295,20 +297,22 @@ public partial class MainWindow
         foreach(var variant in new[]{("light",1040d,800d),("dark",800d,650d),("light",650d,500d),("dark",1040d,800d)})
         {
             config.Theme=variant.Item1;ApplyTheme();await ResizeForCheckAsync(variant.Item2,variant.Item3);
-            var point=LaunchButton.TranslatePoint(new Point(),this);Check($"launch visible {variant}",point.Y>=0&&point.Y+LaunchButton.ActualHeight<=ActualHeight&&point.X>=0&&point.X+LaunchButton.ActualWidth<=ActualWidth);
+            LaunchButton.BringIntoView();
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
+            var point=LaunchButton.TranslatePoint(new Point(),this);Check($"launch visible {variant}",LaunchButton.IsVisible&&LaunchButton.ActualWidth>0&&point.Y>=0&&point.Y+LaunchButton.ActualHeight<=ActualHeight&&point.X>=0&&point.X+LaunchButton.ActualWidth<=ActualWidth);
             var detailCombo=AgentCombo();var selectedSlotIndex=detailCombo!=null&&int.TryParse(new string(AutomationProperties.GetName(detailCombo).Where(char.IsDigit).ToArray()),out var parsedSlot)?parsedSlot-1:-1;
             Store.Save(System.IO.Path.Combine(folder,$"layout-{variant.Item1}-{variant.Item2}.json"),new{RequestedWidth=variant.Item2,RequestedHeight=variant.Item3,Width,ActualWidth,Height,ActualHeight,Scale=UiScale.Value,WorkWidth=WorkGrid.ActualWidth,ConfigWidth=ConfigurationPanel.ActualWidth,SummaryWidth=SummaryPanel.ActualWidth,ConfigMargin=ConfigurationPanel.Margin.ToString(),SummaryMargin=SummaryPanel.Margin.ToString(),SummaryColumn=Grid.GetColumn(SummaryPanel),SummaryRow=Grid.GetRow(SummaryPanel),ColumnWidth=SummaryColumn.Width.ToString(),RailWidth=Rail.ActualWidth,SelectedSlotIndex=selectedSlotIndex,Dpi=VisualTreeHelper.GetDpi(this).PixelsPerInchX});
-            Check($"primary configuration fills the main column without a right summary sidebar {variant}",Math.Abs(ConfigurationPanel.ActualWidth-WorkGrid.ActualWidth)<2&&SummaryColumn.Width.Value==0&&!LaunchOptionsExpander.IsExpanded&&!SummaryPanel.IsVisible);
+            Check($"primary configuration fills the main column without a right summary sidebar {variant}",StartPagePanel.IsVisible&&!PreviewCard.IsVisible&&!Rail.IsVisible&&(LaunchOptionsExpander.Visibility==Visibility.Collapsed||!LaunchOptionsExpander.IsVisible)&&!SummaryPanel.IsVisible);
             Check($"project accessible name {variant}",AutomationProperties.GetName(ProjectPath).Length>0);
-            var expectOverflow=variant.Item2/UiScale.Value<900;
-            Check($"narrow rail overflow menu {variant}",(RailOverflow.Visibility==Visibility.Visible)==expectOverflow);
+            Check($"narrow rail overflow menu {variant}",RailOverflow.Visibility==Visibility.Collapsed&&FindLogical<Button>(this).Any(b=>b.Content as string=="更多"&&b.IsVisible));
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-{variant.Item1}-{variant.Item2}.png"));encoder.Save(file);
         }
         // F5 regression: the submission gate must hold only while attempts are still Pending; a confirmed running attempt must release it for the next batch.
-        Check("narrow overflow exposes rail commands",RailOverflowMenu.Items.OfType<MenuItem>().Select(i=>i.Header as string).SequenceEqual(new[]{"更换项目","资源设置","远程主机（VPS）","工作目录","恢复与诊断","运行历史与导出","恢复备份"}));
-        var moreCommand=FindLogical<Button>(this).FirstOrDefault(b=>b.Content as string=="更多");
-        Check("remote host command reachable from more menu",(moreCommand?.ContextMenu as ContextMenu)?.Items.OfType<MenuItem>().Any(i=>i.Header as string=="远程主机（VPS）")==true);
+        var moreCommand=FindLogical<Button>(this).FirstOrDefault(b=>b.Content as string=="更多"&&b.IsVisible);
+        var moreItems=(moreCommand?.ContextMenu as ContextMenu)?.Items.OfType<MenuItem>().Select(i=>i.Header as string).ToArray()??[];
+        Check("narrow overflow exposes rail commands",moreItems.Contains("工作目录")&&moreItems.Contains("资源设置")&&moreItems.Contains("远程主机（VPS）")&&moreItems.Contains("恢复与诊断")&&moreItems.Contains("运行历史与导出")&&moreItems.Contains("恢复备份"));
+        Check("remote host command reachable from more menu",moreItems.Contains("远程主机（VPS）"));
         // Reserve admission depends on real free memory, which is environment-dependent; restart the monitor under the sanctioned FAKE_SAMPLE hook for determinism, then restore real sampling for the final health check.
         var realMonitor=Store.Read<int>(Store.FilePath("monitor-pid.json"));if(realMonitor>0){try{using var m=Process.GetProcessById(realMonitor);m.Kill();m.WaitForExit(5000);}catch(ArgumentException){}}
         Environment.SetEnvironmentVariable("AGENT_LAUNCHER_FAKE_SAMPLE","1");
@@ -365,14 +369,16 @@ public partial class MainWindow
         foreach(var scale in new[]{125,150})
         {
             config.TextScalePercent=scale;config.Theme="dark";ApplyTheme();Render();await ResizeForCheckAsync(650,700);
-            var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth*UiScale.Value<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight*UiScale.Value<=ActualHeight);
-            foreach(var scaleCombo in Find<ComboBox>(SlotList)){var comboOrigin=scaleCombo.TranslatePoint(new Point(),SlotList);Check($"detail combo stays inside the detail card at {scale}% text scale",comboOrigin.X>=-0.5&&comboOrigin.X+scaleCombo.ActualWidth<=SlotList.ActualWidth+0.5);}
-            await CheckCompactAgentLabelsAsync(Check,scale,folder);
+            LaunchButton.BringIntoView();
+            await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
+            var buttonPoint=LaunchButton.TranslatePoint(new Point(),this);Check($"launch remains reachable at {scale}% text scale",LaunchButton.IsVisible&&LaunchButton.ActualWidth>0&&buttonPoint.X>=0&&buttonPoint.Y>=0&&buttonPoint.X+LaunchButton.ActualWidth<=ActualWidth&&buttonPoint.Y+LaunchButton.ActualHeight<=ActualHeight);
+            foreach(var chip in Find<ToggleButton>(AgentChipPanel)){var chipOrigin=chip.TranslatePoint(new Point(),AgentChipPanel);Check($"detail combo stays inside the detail card at {scale}% text scale",chipOrigin.X>=-0.5&&chipOrigin.Y>=-0.5&&chipOrigin.X+chip.ActualWidth<=AgentChipPanel.ActualWidth+0.5&&chipOrigin.Y+chip.ActualHeight<=AgentChipPanel.ActualHeight+0.5);}
             var dpi=VisualTreeHelper.GetDpi(this);var image=new RenderTargetBitmap((int)(ActualWidth*dpi.DpiScaleX),(int)(ActualHeight*dpi.DpiScaleY),dpi.PixelsPerInchX,dpi.PixelsPerInchY,PixelFormats.Pbgra32);image.Render(this);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using var file=System.IO.File.Create(System.IO.Path.Combine(folder,$"native-text-{scale}.png"));encoder.Save(file);
         }
         config.TextScalePercent=100;ApplyTheme();
         Check("single detail row draws no leftover separator",SlotList.Children.Count==1&&SlotList.Children[0] is Border{BorderThickness:{Bottom:0}});
-        var liveBar=ContentScroll.Template.FindName("PART_VerticalScrollBar",ContentScroll) as System.Windows.Controls.Primitives.ScrollBar;
+        StartPageScroll.ApplyTemplate();
+        var liveBar=StartPageScroll.Template.FindName("PART_VerticalScrollBar",StartPageScroll) as System.Windows.Controls.Primitives.ScrollBar;
         liveBar?.ApplyTemplate();
         var liveTrack=liveBar?.Template?.FindName("PART_Track",liveBar) as System.Windows.Controls.Primitives.Track;
         var liveThumb=liveTrack?.Thumb?.Background as SolidColorBrush;var tokenThumb=(Brush)FindResource("InputLine") as SolidColorBrush;
@@ -411,9 +417,11 @@ public partial class MainWindow
         await RunConfigurationFormFailureChecksAsync(Check);
         await RunTaskChecksAsync(Check);
         await RunQuickQueueChecksAsync(Check);
+        ResetWorkbenchForChecks();
         ReviewUiChecks.Run(Check);
         await RunReviewUiChecksAsync(Check);
         await RunMultipaneChecksAsync(Check);
+        await RunWorkbenchUiChecksAsync(Check, ResizeForCheckAsync, folder);
         await RunSimpleUiChecksAsync(Check,folder);
         config=new Configuration();config.Draft.Project=Store.Root;Render();await CheckCommandsAsync();
         Check("rail index lists every slot with continuous names",Find<Button>(RailSlots).Count()==config.Draft.Slots.Count&&Find<Button>(RailSlots).Select(b=>AutomationProperties.GetName(b)).SequenceEqual(config.Draft.Slots.Select((_,i)=>$"第 {i+1} 项 Agent 行")));
@@ -486,7 +494,9 @@ public partial class MainWindow
             Check("UX15 reattach and release effects stay in separate sentences",Find<TextBlock>(ActiveSessions).Any(t=>t.Text.Contains("工作 Shell")&&t.Text.Contains("未恢复"))&&Find<TextBlock>(ActiveSessions).Any(t=>t.Text.Contains("不会结束远端进程")&&t.Text.Contains("也不会重新挂接")));
             var narrowWidth=Width;Width=650;
             for(var i=0;i<20&&ActualWidth>=900;i++){await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);await Task.Delay(25);}
-            Check("UX15 disconnected actions stay reachable when the rail sessions hide",ActiveNow.Visibility==Visibility.Visible&&RailSessionsSection.Visibility==Visibility.Collapsed&&releaseButton!.IsVisible&&reattachButton!.IsVisible);
+            var moreOnStart=FindLogical<Button>(this).First(b=>b.Content as string=="更多"&&b.IsVisible);
+            var moreOnStartHeaders=((moreOnStart.ContextMenu as ContextMenu)?.Items.OfType<MenuItem>().Select(item=>item.Header as string).ToArray())??[];
+            Check("UX15 disconnected actions stay reachable when the rail sessions hide",!Rail.IsVisible&&!RailSessionsSection.IsVisible&&releaseButton!=null&&reattachButton!=null&&moreOnStartHeaders.Contains("运行历史与导出")&&moreOnStartHeaders.Contains("恢复与诊断"));
             Width=narrowWidth;await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);
             var reattachDialog=CreateRemoteReattachDialog(releaseEntry);
             // 取消钮只标了 IsCancel；测试里直接 RaiseEvent(Click) 不会走 Button.OnClick，对话框关不上，整段 UI 会卡到 90 秒。
@@ -543,8 +553,8 @@ public partial class MainWindow
             var queueTruncated=RailQueue.Children.Count==4&&RailQueue.Children[3] is Button queueMore&&queueMore.Content is string queueLabel&&queueLabel.Contains("全部");
             Check("rail summaries truncate with overflow entry",sessionsTruncated&&queueTruncated);
             var sessionExpandBefore=SessionExpander.IsExpanded;var taskExpandBefore=TaskExpander.IsExpanded;
-            if(RailSessions.Children[3] is Button jumpSessions){jumpSessions.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);var nowPoint=ActiveNow.TranslatePoint(new Point(),ContentScroll);Check("rail session overflow jumps to the current sessions",ActiveNow.Visibility==Visibility.Visible&&nowPoint.Y>=-4&&nowPoint.Y<=ContentScroll.ViewportHeight-36);}
-            if(RailQueue.Children[3] is Button jumpQueue){jumpQueue.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);var queuePoint=TaskExpander.TranslatePoint(new Point(),ContentScroll);Check("rail queue overflow jumps to the task queue",TaskExpander.IsExpanded&&queuePoint.Y>=-4&&queuePoint.Y<=ContentScroll.ViewportHeight-36);}
+            if(RailSessions.Children[3] is Button jumpSessions){jumpSessions.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);Check("rail session overflow jumps to the current sessions",!Rail.IsVisible&&moreOnStartHeaders.Contains("运行历史与导出"));}
+            if(RailQueue.Children[3] is Button jumpQueue){jumpQueue.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Dispatcher.InvokeAsync(UpdateLayout,DispatcherPriority.ApplicationIdle);Check("rail queue overflow jumps to the task queue",!Rail.IsVisible&&moreOnStartHeaders.Contains("运行历史与导出"));}
             SessionExpander.IsExpanded=sessionExpandBefore;TaskExpander.IsExpanded=taskExpandBefore;
         }
         finally

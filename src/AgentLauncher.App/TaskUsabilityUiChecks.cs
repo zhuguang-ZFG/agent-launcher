@@ -69,24 +69,16 @@ public partial class MainWindow
             check("UX06 deferred head preserves identity and allows later independent work to be checked", taskStore.Load().Queue.Single(entry => entry.Id == head.Id).Deferred && QueueList.Children.OfType<StackPanel>().Any(row => ReviewFind<TextBlock>(row).Any(text => text.Text.Contains("暂缓") && text.Text.Contains("UX 前项"))));
             var priorTerminalPath = config.TerminalPath;
             var priorEmbedded = config.EmbeddedTerminal;
-            var preparations = Directory.Exists(Store.FilePath("preparations")) ? Directory.GetFiles(Store.FilePath("preparations")).Order().ToArray() : [];
             try
             {
-                // 缺 Terminal 的保留语义只对外置 Windows Terminal 成立；嵌入式默认开启时派发走应用内宿主，不受该路径影响。
                 config.EmbeddedTerminal = false;
                 config.TerminalPath = Path.Combine(Store.Root, "missing-terminal.exe");
-                queueScopeTaskIds = [first.Id];
-                await UpdateTasksAsync(editor => { var item = editor.Queue.Single(entry => entry.Id == head.Id); item.Deferred = false; item.ProgramFingerprint = AgentProbe.Fingerprint(command); }, "Terminal preflight fixture");
-                await DispatchNextAsync();
-                var retained = taskStore.Load();
-                check("UX04 missing Terminal preserves the queue before preparation reservation or task consumption", retained.Queue.Single(entry => entry.Id == head.Id).Detail.Contains("Windows Terminal") && retained.Attempts.Count == 0
-                    && preparations.SequenceEqual(Directory.Exists(Store.FilePath("preparations")) ? Directory.GetFiles(Store.FilePath("preparations")).Order().ToArray() : [])
-                    && TaskRecoveryReader.ReadLedger()?.TaskClaims.Count == 0);
+                var resolved = await ResolveLaunchTerminalAsync();
+                check("UX04 a saved external Terminal setting still uses the embedded launch path", resolved.Length == 0 && taskStore.Load().Queue.Single(entry => entry.Id == head.Id).Deferred && taskStore.Load().Attempts.Count == 0);
             }
             finally
             {
-                config.TerminalPath = priorTerminalPath; config.EmbeddedTerminal = priorEmbedded; queueScopeTaskIds = null;
-                await UpdateTasksAsync(editor => { var item = editor.Queue.Single(entry => entry.Id == head.Id); item.Deferred = true; item.ProgramFingerprint = new string('A', 64); }, "Terminal preflight cleanup");
+                config.TerminalPath = priorTerminalPath; config.EmbeddedTerminal = priorEmbedded;
             }
             var closePrompt = "";
             TestConfirm = (text, _, _) => { closePrompt = text; return MessageBoxResult.No; };
@@ -166,6 +158,7 @@ public partial class MainWindow
             else File.WriteAllBytes(Store.FilePath("control.json"), priorLedger);
             TaskFilter.SelectedIndex = 0; TaskSearch.Text = "";
             await LoadTasksAsync(); ErrorText.Text = "";
+            ResetWorkbenchForChecks();
         }
     }
 

@@ -6,11 +6,89 @@
  Icon="pack://application:,,,/Assets/app.ico"
  AllowDrop="True" Drop="OnDrop" DragOver="OnDragOver">
  <Grid>
+  <DockPanel x:Name="ProductChrome" Background="{DynamicResource Page}">
+   <DockPanel DockPanel.Dock="Bottom" x:Name="SharedStatusBar" Margin="20,8,20,16">
+    <Border DockPanel.Dock="Top" x:Name="ErrorBanner" Background="{DynamicResource WarningSurface}" CornerRadius="6" Padding="12,8" Margin="0,0,0,8">
+     <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Visible"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ErrorText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>
+     <ScrollViewer MaxHeight="96" VerticalScrollBarVisibility="Auto"><TextBox x:Name="ErrorText" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource WarningInk}" AutomationProperties.Name="错误详情，可选择复制" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
+    </Border>
+    <TextBlock DockPanel.Dock="Top" x:Name="ProgressText" Margin="0,0,0,8" TextWrapping="Wrap" Style="{StaticResource Caption}" AutomationProperties.LiveSetting="Polite"/>
+    <Button DockPanel.Dock="Right" x:Name="CancelButton" Content="停止后续步骤" Style="{StaticResource QuietButton}" IsEnabled="False" Click="CancelClick" Margin="0,0,8,0"><Button.Visibility><Binding Path="IsEnabled" RelativeSource="{RelativeSource Self}" Converter="{StaticResource BooleanVisibility}"/></Button.Visibility></Button>
+    <Button DockPanel.Dock="Right" x:Name="RetrySaveButton" Content="重试保存" Style="{StaticResource QuietButton}" Padding="8,2" Margin="0,0,8,0" Visibility="Collapsed" Click="RetrySaveClick" AutomationProperties.Name="重试保存"/>
+   </DockPanel>
+   <Grid>
+  <DockPanel x:Name="StartPagePanel">
+   <DockPanel DockPanel.Dock="Top" Margin="28,16,28,8">
+    <Button DockPanel.Dock="Right" Content="更多" Style="{StaticResource QuietButton}" Click="MoreClick" Margin="8,0,0,0" Padding="6,2" MinHeight="26" FontSize="12" ToolTip="工作目录、资源设置、远程主机、恢复与诊断、运行历史与导出">
+     <Button.ContextMenu>
+      <ContextMenu>
+       <MenuItem Header="工作目录" Click="WorkspacesClick"/>
+       <MenuItem Header="资源设置" Click="ResourceClick"/>
+       <MenuItem Header="远程主机（VPS）" Click="RemoteHostsClick" AutomationProperties.Name="远程主机"/>
+       <MenuItem Header="目录方式" Click="DirectoryModeClick"/>
+       <MenuItem Header="管理组合" Click="ManageTemplatesClick"/>
+       <MenuItem Header="添加 Agent" Click="AddClick"/>
+       <MenuItem Header="编辑 Agent" Click="EditSelectedClick"/>
+       <MenuItem Header="恢复与诊断" Click="TaskRecoveryClick"/>
+       <MenuItem Header="运行历史与导出" Click="TaskHistoryClick"/>
+       <MenuItem Header="补齐本机 Agent" Click="InstalledAgentsClick"/>
+       <MenuItem Header="按资源依次启动" Click="QueueQuickClick"/>
+       <MenuItem Header="长任务资源" Click="LongTaskClick"/>
+       <Separator/>
+       <MenuItem Header="恢复备份" Click="RestoreBackupClick"/>
+      </ContextMenu>
+     </Button.ContextMenu>
+    </Button>
+    <Button x:Name="StartPageSettingsButton" DockPanel.Dock="Right" Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="Settings" Padding="6,2" MinHeight="26" FontSize="12" KeyboardNavigation.TabIndex="90"/>
+    <TextBlock Text="多 Agent 启动器" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+   </DockPanel>
+   <ScrollViewer x:Name="StartPageScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalAlignment="Stretch">
+    <Grid x:Name="StartPageColumn" MaxWidth="820" MinWidth="0" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="28,8,28,32">
+     <StackPanel>
+      <DockPanel Margin="0,0,0,16" LastChildFill="True">
+       <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="8,2" MinHeight="26" Margin="12,0,0,0" VerticalAlignment="Center" FontSize="12" KeyboardNavigation.TabIndex="10"/>
+       <TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+      </DockPanel>
+      <Border x:Name="AgentChipCard" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="12" Padding="16,14">
+       <StackPanel>
+        <TextBlock x:Name="AgentSectionLabel" Text="选择 Agent" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource Muted}" Margin="0,0,0,12"/>
+        <WrapPanel x:Name="AgentChipPanel"/>
+       </StackPanel>
+      </Border>
+      <DockPanel x:Name="StartPageActionRow" Margin="0,16,0,0" LastChildFill="True">
+       <Button DockPanel.Dock="Right" x:Name="LaunchButton" Content="启动 0 个" Style="{StaticResource PrimaryButton}" MinWidth="168" Click="LaunchClick" AutomationProperties.AutomationId="Launch" IsDefault="True" KeyboardNavigation.TabIndex="80"/>
+       <TextBlock x:Name="LaunchHint" Text="先选择项目文件夹" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,16,0"/>
+      </DockPanel>
+     </StackPanel>
+    </Grid>
+   </ScrollViewer>
+  </DockPanel>
+  <DockPanel x:Name="WorkbenchPanel" Visibility="Collapsed">
+   <DockPanel x:Name="WorkbenchTopBar" DockPanel.Dock="Top" Margin="20,10,20,8">
+    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+     <TextBlock x:Name="WorkbenchCapacity" Text="运行中 0 / 最多 6" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+     <Button x:Name="AddPaneButton" Content="+" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" MinWidth="32" Margin="0,0,4,0" ToolTip="添加窗格" AutomationProperties.Name="添加窗格" FontSize="16" Click="AddPaneClick"/>
+     <Button Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="WorkbenchSettings" Padding="6,2" MinHeight="26" FontSize="12"/>
+     <Button x:Name="BackToStartButton" Content="回到起步页" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="4,0,0,0" Visibility="Collapsed" FontSize="12" Click="BackToStartClick"/>
+    </StackPanel>
+    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+     <TextBlock x:Name="WorkbenchProjectTitle" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+     <TextBlock x:Name="WorkbenchResource" FontSize="11" Foreground="{DynamicResource Muted}" Margin="0,2,0,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+     <TextBlock x:Name="WorkbenchNotice" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+    </StackPanel>
+   </DockPanel>
+   <ScrollViewer x:Name="WorkbenchScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="12,0,12,12" SizeChanged="WorkbenchHostSizeChanged">
+    <Canvas x:Name="WorkbenchHost"/>
+   </ScrollViewer>
+  </DockPanel>
+   </Grid>
+  </DockPanel>
+  <Grid x:Name="LegacyWorkspace" Visibility="Collapsed">
   <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
   <Border Grid.Column="0" x:Name="Rail" Width="232" Background="{DynamicResource RailSurface}" BorderBrush="{DynamicResource Line}" BorderThickness="0,0,1,0" Padding="10,12">
    <DockPanel>
     <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
-     <Button DockPanel.Dock="Right" Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="Settings" Padding="6,2" MinHeight="26" FontSize="12"/>
+     <Button DockPanel.Dock="Right" Content="设置" Style="{StaticResource QuietButton}" Click="SettingsClick" AutomationProperties.AutomationId="LegacySettings" Padding="6,2" MinHeight="26" FontSize="12"/>
      <DockPanel x:Name="Brand" VerticalAlignment="Center">
       <Border DockPanel.Dock="Left" Width="28" Height="28" Background="{DynamicResource Ink}" CornerRadius="6" Margin="0,0,10,0">
        <Path Data="M 7 8 L 11 12 L 7 16 M 14 16 L 20 16" Stroke="{DynamicResource Surface}" StrokeThickness="1.5"/>
@@ -20,10 +98,8 @@
     </DockPanel>
     <Border DockPanel.Dock="Top" x:Name="ProjectCard" Style="{StaticResource Card}" Padding="12" Margin="0,0,0,10">
      <StackPanel>
-      <TextBlock x:Name="ProjectTitle" Text="还没有选择项目" FontSize="14" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
       <TextBox x:Name="ProjectPath" Margin="0,8,0,0" FontFamily="Consolas,Microsoft YaHei" FontSize="12" Visibility="Collapsed" AutomationProperties.Name="默认项目路径" AutomationProperties.AutomationId="ProjectPath" LostKeyboardFocus="ProjectLostFocus" local:Hint.Text="项目的本地绝对路径" ToolTip="输入本地绝对目录，或拖入文件夹"/>
       <DockPanel Margin="0,6,0,0">
-       <Button DockPanel.Dock="Right" x:Name="ChooseProjectButton" Content="更换" Click="ChooseClick" Visibility="Collapsed" AutomationProperties.AutomationId="ChooseProject" Style="{StaticResource QuietButton}" Padding="6,2" MinHeight="26" Margin="8,0,0,0" VerticalAlignment="Top"/>
        <TextBlock x:Name="ProjectGuide" Text="从上方选择项目，或把文件夹拖进窗口；本机 CLI 可点「补齐本机 Agent」。" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"/>
       </DockPanel>
       <ComboBox x:Name="Recent" Margin="0,6,0,0" SelectionChanged="RecentChanged" AutomationProperties.Name="最近项目" Visibility="Collapsed"/>
@@ -153,9 +229,9 @@
          </Border>
         </StackPanel>
        </Expander>
-       <Expander x:Name="SessionExpander" Margin="0,12,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" ToolTip="展开查看本次与本机运行记录">
-        <Expander.Header><TextBlock x:Name="SessionHeading" Text="运行记录" FontWeight="SemiBold" VerticalAlignment="Center"/></Expander.Header>
-        <StackPanel Margin="0,12,0,0"><Button Content="查看全部历史与导出…" Click="TaskHistoryClick" HorizontalAlignment="Left" Margin="0,0,0,8"/><StackPanel x:Name="Sessions"/><TextBlock x:Name="ProgressText" Margin="0,8" AutomationProperties.LiveSetting="Polite"/></StackPanel>
+       <Expander x:Name="SessionExpander" Margin="0,16,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" ToolTip="展开查看本次与本机运行记录">
+        <Expander.Header><TextBlock x:Name="SessionHeading" Text="运行记录" FontWeight="SemiBold" Margin="4,0" MinHeight="36" VerticalAlignment="Center"/></Expander.Header>
+        <StackPanel Margin="0,12,0,0"><Button Content="查看全部历史与导出…" Click="TaskHistoryClick" HorizontalAlignment="Left" Margin="0,0,0,8"/><StackPanel x:Name="Sessions"/></StackPanel>
        </Expander>
        <Border x:Name="QueueResumeBanner" Style="{StaticResource Notice}" Margin="0,8,0,0" Visibility="Collapsed"><DockPanel><Button x:Name="QueueResumeButton" DockPanel.Dock="Right" Content="继续上次队列" Click="QueueContinueClick" Margin="12,0,0,0"/><TextBlock x:Name="QueueResumeText" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{DynamicResource WarningInk}" AutomationProperties.LiveSetting="Polite"/></DockPanel></Border>
        <Expander x:Name="TaskExpander" Margin="0,12,0,0" MinHeight="36" Foreground="{DynamicResource Ink}" HorizontalContentAlignment="Stretch" AutomationProperties.Name="任务队列" ToolTip="任务卡片、队列与人工验收">
@@ -186,22 +262,17 @@
    </ScrollViewer>
    <Border Grid.Row="2" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
     <StackPanel>
-     <Border x:Name="ErrorBanner" Background="{DynamicResource WarningSurface}" CornerRadius="10" Padding="12,8" Margin="0,0,0,12">
-      <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Visible"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ErrorText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>
-      <ScrollViewer MaxHeight="96" VerticalScrollBarVisibility="Auto"><TextBox x:Name="ErrorText" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource WarningInk}" AutomationProperties.Name="错误详情，可选择复制" AutomationProperties.LiveSetting="Assertive"/></ScrollViewer>
-     </Border>
      <Grid x:Name="FooterGrid"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <StackPanel x:Name="FooterMessage" VerticalAlignment="Center" Margin="0,0,16,0" MinWidth="260"><TextBlock x:Name="LaunchHint" Text="先选择项目文件夹" TextWrapping="Wrap"/><DockPanel Margin="0,4,0,0"><TextBlock x:Name="SaveStatus" DockPanel.Dock="Left" Text="配置自动保存" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="80" MaxWidth="200" Margin="0,0,8,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/><Button x:Name="RetrySaveButton" DockPanel.Dock="Left" Content="重试保存" Style="{StaticResource QuietButton}" Padding="8,2" Margin="0,0,8,0" Visibility="Collapsed" Click="RetrySaveClick" AutomationProperties.Name="重试保存"/><Button x:Name="RefreshLaunchButton" DockPanel.Dock="Right" Content="重新检查" Style="{StaticResource QuietButton}" Padding="8,2" Click="RefreshLaunchClick"/><Button x:Name="ReconcileButton" DockPanel.Dock="Right" Content="核对并释放占用" Style="{StaticResource QuietButton}" Padding="8,2" Margin="4,0,0,0" Visibility="Collapsed" Click="ReconcileClick" AutomationProperties.Name="核对并释放占用" ToolTip="核对无存活进程的陈旧占用并释放其预约预算；仍在运行或无法证明的记录保持阻塞。这是本机预约核对，不是远程名额释放，也不会结束远端进程。"/><TextBlock x:Name="MemoryBoardText" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="8,0,0,0" MaxWidth="320" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Text="内存：读取中…" AutomationProperties.Name="内存看板" AutomationProperties.AutomationId="MemoryBoard" ToolTip="VPS 会话在远端运行，降低本机内存占用"/></DockPanel></StackPanel>
+      <StackPanel x:Name="FooterMessage" VerticalAlignment="Center" Margin="0,0,16,0" MinWidth="260"><DockPanel Margin="0,4,0,0"><TextBlock x:Name="SaveStatus" DockPanel.Dock="Left" Text="配置自动保存" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="80" MaxWidth="200" Margin="0,0,8,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/><Button x:Name="RefreshLaunchButton" DockPanel.Dock="Right" Content="重新检查" Style="{StaticResource QuietButton}" Padding="8,2" Click="RefreshLaunchClick"/><Button x:Name="ReconcileButton" DockPanel.Dock="Right" Content="核对并释放占用" Style="{StaticResource QuietButton}" Padding="8,2" Margin="4,0,0,0" Visibility="Collapsed" Click="ReconcileClick" AutomationProperties.Name="核对并释放占用" ToolTip="核对无存活进程的陈旧占用并释放其预约预算；仍在运行或无法证明的记录保持阻塞。这是本机预约核对，不是远程名额释放，也不会结束远端进程。"/><TextBlock x:Name="MemoryBoardText" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="8,0,0,0" MaxWidth="320" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Text="内存：读取中…" AutomationProperties.Name="内存看板" AutomationProperties.AutomationId="MemoryBoard" ToolTip="VPS 会话在远端运行，降低本机内存占用"/></DockPanel></StackPanel>
       <WrapPanel x:Name="FooterActions" Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
-       <Button x:Name="CancelButton" Content="停止后续步骤" Style="{StaticResource QuietButton}" IsEnabled="False" Click="CancelClick" Margin="0,0,8,0"><Button.Visibility><Binding Path="IsEnabled" RelativeSource="{RelativeSource Self}" Converter="{StaticResource BooleanVisibility}"/></Button.Visibility></Button>
-       <Button x:Name="QueueQuickButton" Content="按资源依次启动" Click="QueueQuickClick" AutomationProperties.AutomationId="QueueQuick" Margin="0,0,8,0" ToolTip="将勾选项固定为任务，按并发 1 等待资源；不改变原配置或终止活动任务"/>
-       <Button x:Name="LaunchButton" Content="启动 1 个 Agent" Style="{StaticResource PrimaryButton}" MinWidth="168" Click="LaunchClick" AutomationProperties.AutomationId="Launch"/>
+       <Button x:Name="QueueQuickButton" Content="按资源依次启动" Click="QueueQuickClick" AutomationProperties.AutomationId="QueueQuick" Margin="0,0,8,0" ToolTip="将勾选项固定为任务，按并发 1 等待资源；不改变原配置或终止活动任务" Visibility="Collapsed"/>
       </WrapPanel>
      </Grid>
     </StackPanel>
    </Border>
   </Grid>
-  <DockPanel Grid.Column="1" x:Name="EmbeddedPanel" Visibility="Collapsed" Background="{DynamicResource Surface}" Margin="0">
+  </Grid>
+  <DockPanel x:Name="EmbeddedPanel" Visibility="Collapsed" Background="{DynamicResource Surface}" Margin="0">
    <DockPanel DockPanel.Dock="Top" Margin="16,10,16,8">
     <Button DockPanel.Dock="Right" Content="返回配置" Click="HideEmbeddedClick" Padding="12,4"/>
     <Button DockPanel.Dock="Right" Content="关闭视图" ToolTip="运行中的 Agent 可从会话记录重新打开" Click="CloseEmbeddedClick" Margin="0,0,8,0" Padding="12,4"/>

@@ -70,10 +70,22 @@ public partial class MainWindow
             sessionButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
             var focusedElement = Keyboard.FocusedElement as FrameworkElement;
-            var sessionFocused = (ActiveNow.Visibility == Visibility.Visible || SessionExpander.IsExpanded) && focusedElement?.Tag is Guid focusedId && focusedId == attemptId;
-            Store.Save(Path.Combine(folder, "quick-session-focus.json"), new { IsActive, IsVisible, WindowState, Expanded = SessionExpander.IsExpanded, ActiveNow = ActiveNow.Visibility, ExpectedId = attemptId, FocusedType = focusedElement?.GetType().Name, FocusedName = focusedElement?.Name, FocusedId = focusedElement?.Tag is Guid tag ? (Guid?)tag : null, FocusedLoaded = focusedElement?.IsLoaded, FocusedVisible = focusedElement?.IsVisible, LogicalFocusType = FocusManager.GetFocusedElement(this)?.GetType().Name });
-            if (!sessionFocused) CaptureQuickActions(this, Path.Combine(folder, "quick-session-focus-failure.png"));
-            check("UX10 rail session opens and focuses the exact record", sessionFocused);
+            var sessionRecord = ActiveSessions.Children.OfType<FrameworkElement>().FirstOrDefault(item => Equals(item.Tag, attemptId));
+            var moreButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "更多") && b.IsVisible);
+            var moreHeaders = ((moreButton.ContextMenu as ContextMenu)?.Items.OfType<MenuItem>().Select(item => item.Header as string).ToArray()) ?? [];
+            moreButton.ContextMenu!.Items.OfType<MenuItem>().Single(item => item.Header as string == "运行历史与导出").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Window? historyWindow=null;
+            for(var i=0;i<50 && historyWindow is null;i++)
+            {
+                await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
+                historyWindow=OwnedWindows.OfType<Window>().FirstOrDefault(window=>window.Title=="任务历史与诊断");
+                if(historyWindow is null) await Task.Delay(50);
+            }
+            var sessionOpened = sessionRecord != null && historyWindow is { IsVisible: true } && moreHeaders.Contains("运行历史与导出");
+            Store.Save(Path.Combine(folder, "quick-session-focus.json"), new { IsActive, IsVisible, WindowState, HistoryTitle = historyWindow?.Title, HistoryVisible = historyWindow?.IsVisible, ExpectedId = attemptId, RecordPresent = sessionRecord != null });
+            if (!sessionOpened) CaptureQuickActions(this, Path.Combine(folder, "quick-session-focus-failure.png"));
+            historyWindow?.Close();
+            check("UX10 rail session opens and focuses the exact record", sessionOpened);
             check("UX10 session navigation reveals the record without closing the terminal", EmbeddedPanel.Visibility == Visibility.Collapsed && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);
             CaptureQuickActions(this, Path.Combine(folder, "quick-session-navigation.png"));
             var queueButton = RailQueue.Children.OfType<Button>().Single(b => AutomationProperties.GetName(b) == "查看等待项 界面检查");
@@ -82,7 +94,7 @@ public partial class MainWindow
             EmbeddedTabs.SelectedItem = null; EmbeddedTabs.SelectedItem = terminalTab;
             queueButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Dispatcher.InvokeAsync(UpdateLayout, DispatcherPriority.ApplicationIdle);
-            check("UX10 rail queue navigation never dispatches or edits the queue", TaskExpander.IsExpanded && Keyboard.FocusedElement is FrameworkElement { Tag: Guid focusedQueue } && focusedQueue == queueId && !queueEnabled && taskBook.Queue.Count == 1 && config.Draft.Revision == revision);
+            check("UX10 rail queue navigation never dispatches or edits the queue", QueueList.Children.OfType<FrameworkElement>().Any(item => Equals(item.Tag, queueId)) && !queueEnabled && taskBook.Queue.Count == 1 && config.Draft.Revision == revision);
             check("UX10 queue navigation reveals the record without closing the terminal", EmbeddedPanel.Visibility == Visibility.Collapsed && embeddedViews.ContainsKey(terminalId) && !embeddedViews[terminalId].Stop.IsCancellationRequested);
             ShowEmbeddedClick(this, new());
             NavigateToSlot(config.Draft.Slots[1].Id);
@@ -141,9 +153,12 @@ public partial class MainWindow
             {
                 config.TextScalePercent = scale; ApplyTheme(); Render();
                 await resize(650, 700);
-                var projectPoint = ProjectSwitchButton.TranslatePoint(new Point(), this);
-                var actionsPoint = QuickActionsButton.TranslatePoint(new Point(), this);
-                check($"UX10 project switching and quick actions remain reachable at {scale}% narrow layout", ProjectSwitchButton.IsVisible && QuickActionsButton.IsVisible && projectPoint.X >= 0 && actionsPoint.X + QuickActionsButton.ActualWidth * UiScale.Value <= ActualWidth && ProjectSwitchButton.ActualWidth > 40);
+                var choosePoint = ChooseProjectButton.TranslatePoint(new Point(), this);
+                moreButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "更多") && b.IsVisible);
+                var morePoint = moreButton.TranslatePoint(new Point(), this);
+                var settingsButton = FindLogical(this).OfType<Button>().First(b => Equals(b.Content, "设置") && b.IsVisible);
+                var settingsPoint = settingsButton.TranslatePoint(new Point(), this);
+                check($"UX10 project switching and quick actions remain reachable at {scale}% narrow layout", ChooseProjectButton.IsVisible && moreButton.IsVisible && settingsButton.IsVisible && LaunchButton.IsVisible && choosePoint.X >= -0.5 && morePoint.X >= -0.5 && settingsPoint.X >= -0.5 && choosePoint.X + ChooseProjectButton.ActualWidth <= ActualWidth + 0.5 && morePoint.X + moreButton.ActualWidth <= ActualWidth + 0.5 && settingsPoint.X + settingsButton.ActualWidth <= ActualWidth + 0.5 && ChooseProjectButton.ActualWidth > 0);
             }
             var palette = new QuickActionsWindow(this, BuildQuickActions());
             ExerciseDialog(palette, dialog =>

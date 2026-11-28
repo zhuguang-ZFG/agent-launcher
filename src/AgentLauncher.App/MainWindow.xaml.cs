@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
@@ -73,7 +73,7 @@ public partial class MainWindow : Window
         var work=SystemParameters.WorkArea;Width=Math.Min(920,work.Width-32);Height=Math.Min(760,work.Height-32);MinWidth=Math.Min(560,work.Width-32);MinHeight=Math.Min(460,work.Height-32);
         InitializeWindowPlacementTracking();
         ApplyWindowPlacement();
-        SizeChanged+=(_,_)=>ArrangePanels();
+        SizeChanged+=(_,_)=>{ArrangePanels();if(windowMode==MainWindowMode.Workbench)RelayoutWorkbench();};
         Loaded+=async (_,_)=>await GuardAsync(LoadAsync);
         timer.Tick+=async (_,_)=>await GuardAsync(PollResourcesAsync);
         taskTimer.Tick+=async (_,_)=>await GuardAsync(PumpQueueAsync);
@@ -86,6 +86,7 @@ public partial class MainWindow : Window
     private async Task GuardAsync(Func<Task> action)
     {
         try{await action();}catch(OperationCanceledException){ErrorText.Text="已停止后续步骤。已创建的目录和已运行任务保留。";}catch(Exception e)when(e is not OutOfMemoryException){ErrorText.Text=e.Message;}
+        UpdateLaunch();
     }
     private async Task LoadAsync()
     {
@@ -167,11 +168,11 @@ public partial class MainWindow : Window
     {
         if(rendering||loading||busy||closeRequested)return false;
         if(readOnly){Render();return false;}
-        var focusName=Keyboard.FocusedElement is DependencyObject focused&&(Within(focused,SlotList)||Within(focused,RailSlots))?AutomationProperties.GetName(focused):null;
+        var focusName=Keyboard.FocusedElement is DependencyObject focused&&(Within(focused,SlotList)||Within(focused,RailSlots)||Within(focused,AgentChipPanel))?AutomationProperties.GetName(focused):null;
         var before=config.Draft;config.Edit(change);TrackMultipaneSlotEdits(before,config.Draft);validationError="";ErrorText.Text="";QueueSave();
         // Keeps the rail selection on the edited slot: Render falls back to the first item only for a wholesale draft replacement (template/backup/reload).
         draftEditedByApp=true;Render();
-        if(focusName is {Length:>0}&&FindLogical(SlotList).Concat(FindLogical(RailSlots)).FirstOrDefault(el=>AutomationProperties.GetName(el)==focusName) is IInputElement target)Keyboard.Focus(target);
+        if(focusName is {Length:>0}&&FindLogical(SlotList).Concat(FindLogical(RailSlots)).Concat(FindLogical(AgentChipPanel)).FirstOrDefault(el=>AutomationProperties.GetName(el)==focusName) is IInputElement target)Keyboard.Focus(target);
         return true;
     }
     private static bool Within(DependencyObject? node,DependencyObject root){while(node!=null){if(node==root)return true;node=LogicalTreeHelper.GetParent(node)??(node is Visual v?VisualTreeHelper.GetParent(v):null);}return false;}
@@ -255,7 +256,8 @@ public partial class MainWindow : Window
             ProjectGuide.Text=ownDirectories>0?$"已勾选的 {ownDirectories} 项使用下方各自的工作目录；修改此处不会改变它们。":noProject?"从上方选择项目，或把文件夹拖进窗口；本机 CLI 可点「补齐本机 Agent」。":"未单独指定目录的 Agent 使用此项目";
             ProjectGuide.Visibility=Visibility.Visible;
             RenderRecentProjects();
-            Recent.Visibility=Visibility.Collapsed;ProjectPath.Visibility=Visibility.Collapsed;ChooseProjectButton.Visibility=Visibility.Collapsed;
+            Recent.Visibility=Visibility.Collapsed;ProjectPath.Visibility=Visibility.Collapsed;
+            ApplyWindowMode();
             DirectoryMode.SelectedIndex=config.Draft.DirectoryMode switch{"prepared"=>1,"shared"=>2,_=>0};Layout.SelectedIndex=config.Draft.Layout=="horizontal"?1:0;
             DirectoryHelp.Text=DirectoryModeHelp();
             SharedDirectoryRiskText.Text=LaunchSurface.SharedDirectoryRisk;
@@ -281,8 +283,9 @@ public partial class MainWindow : Window
             for(var i=0;i<slots.Count;i++)AddRailSlot(slots[i],i+1);
             AddButton.IsEnabled=CanAddSlot;InstalledAgentsButton.IsEnabled=CanEditSlots;
             var active=config.Draft.Slots.Where(s=>s.Enabled).ToArray();
-            RenderLaunchPreview(active);Layout.IsEnabled=!config.EmbeddedTerminal&&active.Length==2;
-            ArrangePanels();
+            RenderMultipanePreview(active);Layout.IsEnabled=active.Length==2;
+            PaneCount.Text=$"{active.Length} 个窗格";ArrangePanels();
+            RenderAgentChips();
             UpdateLaunch();
             RenderRail();
         }
@@ -311,6 +314,11 @@ public partial class MainWindow : Window
     }
     private void ArrangePanels()
     {
+        if(windowMode==MainWindowMode.StartPage)
+        {
+            ApplyWindowMode();
+            return;
+        }
         var logicalWidth=ActualWidth/UiScale.Value;var compact=logicalWidth<650;var narrow=logicalWidth<900;
         // Below 900 logical pixels the rail keeps the launch checkbox and a separate numbered navigation target.
         Rail.Width=narrow?72:232;
@@ -522,20 +530,29 @@ public partial class MainWindow : Window
             // Deterministic in-flight edit fixture; no pause exists in the production build.
             if(commandCheckPause is {} pause){commandCheckPause=null;await pause;}
 #endif
-            foreach(var slot in draft.Slots.Where(s=>s.Enabled))
+            foreach(var slot in draft.Slots)
             {
                 var position=draft.Slots.IndexOf(slot)+1;
-                string detail;string? resolvedPath=null;
+                string detail;string? resolvedPath=null;var ready=true;
                 try{resolvedPath=await ResolveCommandLabelAsync(slot);detail="程序与目录就绪";}
-                catch(Exception e)when(e is not OutOfMemoryException){detail=e.Message;errors.Add($"第 {position} 项：{detail}");}
+                catch(Exception e)when(e is not OutOfMemoryException)
+                {
+                    detail=e.Message;ready=false;
+                    if(slot.Enabled)errors.Add($"第 {position} 项：{detail}");
+                }
                 var directory=string.IsNullOrWhiteSpace(slot.Directory)?draft.Project:slot.Directory;
-                if(string.IsNullOrWhiteSpace(directory))detail+=" · 未设置工作目录";
+                if(string.IsNullOrWhiteSpace(directory)){detail+=" · 未设置工作目录";ready=false;}
                 else
                 {
                     try{await Task.Run(()=>PhysicalDirectory.Resolve(directory));}
-                    catch(Exception e)when(e is not OutOfMemoryException){detail+=" · 目录不可用";errors.Add($"第 {position} 项目录不可用：{e.Message}");}
+                    catch(Exception e)when(e is not OutOfMemoryException)
+                    {
+                        detail+=" · 目录不可用";ready=false;
+                        if(slot.Enabled)errors.Add($"第 {position} 项目录不可用：{e.Message}");
+                    }
                 }
                 labels[slot.Id]=(detail,(resolvedPath??detail)+"\n"+SlotCostText(slot));
+                chipStatus[slot.Id]=(ready,detail);
             }
             if(draft.Revision!=config.Draft.Revision){pendingCommandCheck=config.Draft.Copy();continue;}
             if(!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal)){commandsChecking=false;validationError="项目路径输入尚未应用；请按 Enter 或移开焦点完成校验。";UpdateLaunch();break;}
@@ -546,7 +563,7 @@ public partial class MainWindow : Window
                 if(railLabels.TryGetValue(id,out var railText)){railText.Text=label.Text;railText.ToolTip=label.Tooltip;}
                 if(railDots.TryGetValue(id,out var dot))dot.SetResourceReference(Ellipse.FillProperty,label.Text.Contains("未找到")?"StatusBad":"StatusOk");
             }
-            commandsChecking=false;validationError=string.Join("\n",errors.Distinct());UpdateLaunch();
+            commandsChecking=false;validationError=string.Join("\n",errors.Distinct());RenderAgentChips();UpdateLaunch();
         }
         }
         catch(Exception e)when(e is not OutOfMemoryException){commandsChecking=false;validationError="命令/目录检查中断："+e.Message;}
@@ -560,7 +577,7 @@ public partial class MainWindow : Window
     }
     private void UpdateLaunch()
     {
-        var count=config.Draft.Slots.Count(s=>s.Enabled);
+        var count=CountReadySelected();
         var places=config.Draft.Slots.Where(s=>s.Enabled).Select(PlaceLabel).ToArray();
         var admission=DecideAdmission(config.Draft,status?.Memory,status?.Entries,budgets:status?.Budgets);
         var admissionBlockedReason=status?.AdmissionHardBlockedReason;var admissionBlocked=!string.IsNullOrWhiteSpace(admissionBlockedReason);
@@ -568,12 +585,40 @@ public partial class MainWindow : Window
         var explicitDirectoryMissing=config.Draft.Slots.Any(s=>s.Enabled&&s.RequiresDirectory&&string.IsNullOrWhiteSpace(s.Directory));
         var missing=explicitDirectoryMissing||config.Draft.Slots.Where(s=>s.Enabled).Any(s=>string.IsNullOrWhiteSpace(s.Directory)&&string.IsNullOrWhiteSpace(config.Draft.Project));
         var pendingProject=!string.Equals(ProjectPath.Text.Trim(),config.Draft.Project,StringComparison.Ordinal);
-        var concurrencyBlocked=ConcurrencyBlocked(count);
-        LaunchButton.Content=LaunchSurface.LaunchButtonText(count,places,busy,previewOnly);
+        var concurrencyBlocked=ConcurrencyBlocked(config.Draft.Slots.Count(s=>s.Enabled));
+        var starting=busy||checkingLaunch||launchCancellation!=null;
+        LaunchButton.Content=StartPageSurface.LaunchButtonText(count,starting);
         var targetTip=LaunchSurface.TargetTooltip(places);
         LaunchButton.ToolTip=targetTip.Length>0?targetTip:"Ctrl+Enter · 启动已勾选项";
         LaunchButton.IsEnabled=!closeRequested&&!busy&&!launchFinalizing&&launchCancellation==null&&cancelTask.IsCompleted&&!readOnly&&!commandsChecking&&count>0&&!missing&&!pendingProject&&(admission.Launchable||IsPreviewStale)&&!admissionBlocked&&!admissionPressureBlocked&&!concurrencyBlocked&&status?.Ok==true&&validationError.Length==0&&submittedRevision!=config.Draft.Revision&&submittedAttempts.Length==0&&SaveHealthy;
-        var hint=LaunchHintState(admission);LaunchHint.Text=hint.Text;LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,hint.Key);
+        if(windowMode==MainWindowMode.StartPage)
+        {
+            var hasProject=!string.IsNullOrWhiteSpace(config.Draft.Project);
+            var parts=new List<string>();
+            var disabled=StartPageSurface.DisabledReason(hasProject,count);
+            if(disabled.Length>0)parts.Add(disabled);
+            parts.Add(StartPageSurface.SelectionLine(count));
+            if(commandsChecking&&status?.Memory is null)parts.Add(StartPageSurface.CheckingCapacity);
+            else parts.Add(StartPageSurface.CapacityLine(RemainingCapacity(count)));
+            if(ErrorText.Text.Length>0)parts.Insert(0,ErrorText.Text);
+            if(capDeniedSticky)parts.Add(StartPageSurface.CapDenied);
+            if(pendingProject)parts.Add("项目路径输入尚未应用；请按 Enter 或移开焦点完成校验");
+            if(readOnly)parts.Add("当前配置只读，已禁止启动与保存");
+            else if(admissionBlocked)parts.Add(admissionBlockedReason!);
+            else if(admissionPressureBlocked)parts.Add(PressureMessage);
+            else if(concurrencyBlocked)parts.Add(ConcurrencyLimitMessage);
+            else if(!SaveHealthy)parts.Add(saveError!=null?"配置尚未保存："+saveError:"正在保存配置…");
+            else if(validationError.Length>0)parts.Add(validationError);
+            else if(status?.Ok!=true)parts.Add("正在等待后台检查就绪，暂时不能启动");
+            else if(admission is {Launchable:false})parts.Add(admission.Reason);
+            else if(admission is {Advisory:true})parts.Add(admission.Reason);
+            LaunchHint.Text=string.Join(" · ",parts.Where(part=>part.Length>0&&!part.Contains("预览不是")&&!part.Contains("启动授权")));
+            LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,ErrorText.Text.Length>0||capDeniedSticky?"WarningInk":LaunchButton.IsEnabled?"Ink":"Muted");
+        }
+        else
+        {
+            UpdateWorkbenchChrome();
+        }
         ReconcileButton.Visibility=status?.ReconcileOffered==true&&!busy?Visibility.Visible:Visibility.Collapsed;
         UpdateQuickQueueButton();
         UpdateMultipaneSummary();UpdateSimpleStatus();UpdatePollingInterval();
@@ -649,7 +694,7 @@ public partial class MainWindow : Window
         try{await task;}finally{if(ReferenceEquals(resourceRefreshTask,task))resourceRefreshTask=null;}
     }
     // Monitor-status fan-out: the polling seam refreshes sessions, the rail summary and the launch gate together.
-    private void RenderMonitorStatus(){RenderSessions();RenderRail();UpdateLaunch();SessionNotifier.For(this).Observe(status?.Entries,config.NotifyOnSessionEventsEnabled);}
+    private void RenderMonitorStatus(){SyncWorkbenchPanesFromStatus();RenderSessions();RenderRail();UpdateLaunch();SessionNotifier.For(this).Observe(status?.Entries,config.NotifyOnSessionEventsEnabled);}
     private void RenderSessions()
     {
         var entries=status?.Entries??[];var signature=string.Join("|",entries.Select(e=>$"{e.Plan.Id}:{e.State}:{e.Detail}:{(e.State=="Pending"&&DateTimeOffset.UtcNow-e.Created>TimeSpan.FromSeconds(10))}:{(e.State=="Settled"&&e.Plan.Kind=="agent"&&FindLinkedRun(e.Plan.Id)!=null)}"));
@@ -832,14 +877,13 @@ public partial class MainWindow : Window
             var retryBook=await Task.Run(taskStore.Load);
             if(!AttemptIdentity.CanRetryOutsideQueue(previous.Plan,current.Entries!.Select(entry=>entry.Plan),retryBook))
                 throw new IOException("该记录来自任务队列或来源尚待核对，请从任务卡重新入队，保留并发限制与尝试记录。");
-            var terminal=await ResolveLaunchTerminalAsync();
             var retry=previous.Plan with{Id=Guid.NewGuid(),BatchId=Guid.NewGuid(),RetryOf=previous.Plan.Id};
             await AuthorizePlansAsync([retry]);
             var retryBindings=ReservationBindings([retry]);
             var reserve=await Ipc.ReserveWithCleanupAsync([retry],launchCancellation.Token,UnlockForCleanup,retryBindings.Policy,retryBindings.Revision,retryBindings.Hash,retryBindings.Digest,retryBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=config.Draft.Revision;submittedAttempts=[retry.Id];submissionGeneration++;
             if(launchCancellation.Token.IsCancellationRequested)return;
-            try{await SubmitPanesAsync(terminal,[retry],"vertical");}
+            try{await SubmitPanesAsync("",[retry],"vertical");}
             catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
             if(launchCancellation.Token.IsCancellationRequested)return;
             ProgressText.Text="只提交了这一项的新尝试；已有会话保持不变，正在等待回执。";
@@ -848,6 +892,10 @@ public partial class MainWindow : Window
     }
     private async void LaunchClick(object sender,RoutedEventArgs e)
     {
+#if INTEGRATION_TESTS
+        startPageLaunchClicksForChecks++;
+        if (suppressLaunchForChecks) return;
+#endif
         if(closeRequested||busy||launchFinalizing||launchCancellation!=null||!cancelTask.IsCompleted||readOnly||submittedAttempts.Length>0)return;
         launchTask=LaunchAsync();
         await GuardAsync(()=>launchTask);
@@ -858,10 +906,16 @@ public partial class MainWindow : Window
         launchCancellation=new();SetBusy(true);ErrorText.Text="";
         try
         {
+            await LaunchPreparedDraftAsync(config.Draft.Copy(),config.Draft.Slots.Count(slot=>slot.Enabled));
+        }
+        finally{await FinishLaunchAsync();}
+    }
+    private async Task LaunchPreparedDraftAsync(Draft draft,int requested,WorkbenchPaneView? replace=null)
+    {
+            var cancel=launchCancellation??throw new InvalidOperationException("尚未开始启动。");
             await CheckFreshCommandsAsync();if(validationError.Length>0)throw new IOException(validationError);
             await saveTask;if(!SaveHealthy)throw new IOException(saveError!=null?"先解决配置保存失败，再启动。":"正在保存配置，请稍候。");
-            var draft=config.Draft.Copy();
-            var terminal=await ResolveLaunchTerminalAsync();await RefreshAsync();
+            await RefreshAsync();
             if(status?.Ok!=true)throw new IOException(status?.Message??"监控状态不可用");
             var admissionBlocked=status?.AdmissionHardBlockedReason;if(!string.IsNullOrWhiteSpace(admissionBlocked))throw new IOException(admissionBlocked);
             // A pressure latch only stops a conservative launch; practical/custom launches stay advisory and are re-authorized by the monitor.
@@ -870,28 +924,35 @@ public partial class MainWindow : Window
             ProgressText.Text="正在核对命令和工作目录…";
             // Active agent workspaces are the monitor's own reserve precondition; checking them here keeps an occupied destination from leaving a worktree and branch behind.
             var activeWorkspaces=status?.Entries?.Where(x=>!Store.IsTerminal(x)&&x.Plan.Kind=="agent").Select(x=>x.Plan.Workspace).ToArray()??[];
-            var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),launchCancellation.Token,activeWorkspaces,configuration:config));
-            launchCancellation.Token.ThrowIfCancellationRequested();
+            var plans=await Task.Run(()=>new WorkspacePreparer(config.WorktreeDirectory).PrepareAsync(draft,text=>Dispatcher.Invoke(()=>ProgressText.Text=text),text=>Dispatcher.InvokeAsync(()=>Task.FromResult(MessageBox.Show(this,text,"独立目录基线",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes)).Task.Unwrap(),cancel.Token,activeWorkspaces,configuration:config));
+            cancel.Token.ThrowIfCancellationRequested();
             var planned=plans.ToArray();
             await AuthorizePlansAsync(planned);
             var launchBindings=ReservationBindings(planned);
-            var reserve=await Ipc.ReserveWithCleanupAsync(planned,launchCancellation.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
+            var reserve=await Ipc.ReserveWithCleanupAsync(planned,cancel.Token,UnlockForCleanup,launchBindings.Policy,launchBindings.Revision,launchBindings.Hash,launchBindings.Digest,launchBindings.Slots);if(!reserve.Ok)throw new IOException(reserve.Message);
             submittedRevision=draft.Revision;submittedAttempts=plans.Select(p=>p.Id).ToArray();submissionGeneration++;
-            if(launchCancellation.Token.IsCancellationRequested)return;
-            try{await SubmitPanesAsync(terminal,plans,draft.Layout,launchCancellation.Token);}
-            catch{ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";throw;}
-            if(launchCancellation.Token.IsCancellationRequested)return;
+            if(cancel.Token.IsCancellationRequested)return;
+            var started=new List<LaunchItem>();
+            try{await SubmitPanesAsync("",plans,draft.Layout,cancel.Token,replace:replace);started.AddRange(plans);}
+            catch
+            {
+                started.AddRange(plans.Where(plan=>embeddedViews.ContainsKey(plan.Id)));
+                ProgressText.Text="Terminal 提交结果未确认。请核对记录或撤销未领取项，不要重复提交。";
+                CompleteLaunchSurface(started,requested,admission.Reason);
+                throw;
+            }
+            CompleteLaunchSurface(started,requested,admission.Reason);
+            if(started.Count==0)return;
+            if(cancel.Token.IsCancellationRequested)return;
             ProgressText.Text="已提交启动，正在等待各 Agent 的进程回执。";
             for(var i=0;i<10;i++)
             {
-                if(launchCancellation.Token.IsCancellationRequested)break;
-                await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true)){if(config.MinimizeAfterLaunch&&!config.EmbeddedTerminal)WindowState=WindowState.Minimized;break;}
+                if(cancel.Token.IsCancellationRequested)break;
+                await Task.Delay(1000);await RefreshAsync();if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&x.Detail.StartsWith("已启动进程"))==true))break;
                 // A short command can finish before the first poll; its verified terminal entry also completes observation.
                 // Missing entries remain unknown and keep the existing bounded wait.
                 if(plans.All(p=>status?.Entries?.Any(x=>x.Plan.Id==p.Id&&Store.IsTerminal(x))==true))break;
             }
-        }
-        finally{await FinishLaunchAsync();}
     }
     private async void CancelClick(object sender,RoutedEventArgs e){await GuardAsync(CancelAsync);UpdateLaunch();}
     private void SelectProject(string path){var changed=!StringComparer.OrdinalIgnoreCase.Equals(config.Draft.Project,path);if(!Edit(d=>d.Project=path))return;if(changed&&undoRemovals.Count>0){undoRemovals.Clear();RenderSessionsNow();}if(path.Length>0){config.RecentProjects.RemoveAll(p=>StringComparer.OrdinalIgnoreCase.Equals(p,path));config.RecentProjects.Insert(0,path);config.RecentProjects=config.RecentProjects.Take(8).ToList();RenderRecentProjects();QueueSave();}}
@@ -1023,7 +1084,7 @@ public partial class MainWindow : Window
     }
     private static string[] PresetArguments(AgentProfile profile,string[] preset)=>[..profile.Arguments.Take(Commands.ProfileProgramArgumentCount(profile)),..preset];
     private async void ResourceClick(object sender,RoutedEventArgs e)=>await GuardAsync(ShowResourceSettingsAsync);
-    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("host","Agent 窗口",config.EmbeddedTerminal?"internal":"external",false),("terminal","Windows Terminal 路径（留空自动查找）",config.TerminalPath,false),("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["host"]=[("internal","启动器内"),("external","外置 Windows Terminal")],["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],suggestions:new(){["terminal"]=[..discoveredTerminals.Append(config.TerminalPath).Where(p=>!string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase)]},actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates,["管理远程主机"]=ManageRemoteHosts});
+    private FormWindow CreateSettingsDialog()=>new(this,"设置",[("worktree","独立目录存放位置（留空使用默认位置）",config.WorktreeDirectory,false),("theme","主题",config.Theme,false),("scale","文字与控件大小",config.TextScalePercent.ToString(),false),("minimize","启动全部确认后最小化窗口",config.MinimizeAfterLaunch.ToString().ToLowerInvariant(),false),("notify","会话状态变化时显示桌面通知",(config.NotifyOnSessionEvents??true).ToString().ToLowerInvariant(),false)],$"配置位置：{configPath}\n更改独立目录位置只影响新准备，不移动或删除已有目录。当前为技术预览版，性能门禁尚未全部验证。",new(){["theme"]=[("system","跟随系统"),("light","浅色"),("dark","深色")],["scale"]=[("100","100% · 标准"),("125","125% · 较大"),("150","150% · 最大")]},["minimize","notify"],actions:new(){["诊断与导出"]=ShowDiagnostics,["管理最近项目"]=ManageRecentProjects,["管理组合"]=ManageTemplates,["管理远程主机"]=ManageRemoteHosts});
     private async void SettingsClick(object sender,RoutedEventArgs e)=>await GuardAsync(()=>
     {
         if(applyingSettings)return Task.CompletedTask;applyingSettings=true;
@@ -1033,7 +1094,7 @@ public partial class MainWindow : Window
             if(readOnly||busy)throw new IOException("当前配置不可编辑，设置未保存。");
             if(!new[]{"system","light","dark"}.Contains(dialog.Values["theme"])||!bool.TryParse(dialog.Values["minimize"],out var minimize)||!bool.TryParse(dialog.Values["notify"],out var notify)||!int.TryParse(dialog.Values["scale"],out var scale)||scale is not (100 or 125 or 150))throw new IOException("设置值无效，未应用。");
             var destination=dialog.Values["worktree"].Trim();if(destination.Length>0)destination=await Task.Run(()=>PhysicalDirectory.Resolve(destination).Path);
-            if(readOnly||busy)throw new IOException("当前配置不可编辑，设置未保存。");var original=(config.EmbeddedTerminal,config.WorktreeDirectory,config.TerminalPath,config.Theme,config.TextScalePercent,config.MinimizeAfterLaunch,config.NotifyOnSessionEvents);config.EmbeddedTerminal=dialog.Values["host"]=="internal";config.WorktreeDirectory=destination;config.TerminalPath=dialog.Values["terminal"].Trim();config.Theme=dialog.Values["theme"];config.TextScalePercent=scale;config.MinimizeAfterLaunch=minimize;config.NotifyOnSessionEvents=notify;await SaveFormConfigurationAsync(()=>(config.EmbeddedTerminal,config.WorktreeDirectory,config.TerminalPath,config.Theme,config.TextScalePercent,config.MinimizeAfterLaunch,config.NotifyOnSessionEvents)=original);ApplyTheme();Render();return true;};dialog.ShowDialog();
+            if(readOnly||busy)throw new IOException("当前配置不可编辑，设置未保存。");var original=(config.EmbeddedTerminal,config.WorktreeDirectory,config.Theme,config.TextScalePercent,config.MinimizeAfterLaunch,config.NotifyOnSessionEvents);config.EmbeddedTerminal=true;config.WorktreeDirectory=destination;config.Theme=dialog.Values["theme"];config.TextScalePercent=scale;config.MinimizeAfterLaunch=minimize;config.NotifyOnSessionEvents=notify;await SaveFormConfigurationAsync(()=>(config.EmbeddedTerminal,config.WorktreeDirectory,config.Theme,config.TextScalePercent,config.MinimizeAfterLaunch,config.NotifyOnSessionEvents)=original);ApplyTheme();Render();return true;};dialog.ShowDialog();
         }
         finally{applyingSettings=false;}
         return Task.CompletedTask;
@@ -1324,20 +1385,39 @@ var dialog=new FormWindow(window,caption,fields,"修改后，使用此主机的�
     {
         var dark=config.Theme=="dark";
         if(config.Theme=="system"){try{using var key=Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");dark=key?.GetValue("AppsUseLightTheme") is int value&&value==0;}catch(Exception e)when(e is IOException or UnauthorizedAccessException or System.Security.SecurityException){dark=false;}}
-        var colors=dark?new[]{"#1C1F27","#14161C","#ECEFF5","#9AA3B2","#2A2F3A","#232733","#1E2A3F","#3A4150","#3D3120","#E8B45C"}:new[]{"#FFFFFF","#F4F6FB","#1F2430","#6E7686","#E2E7F0","#F0F3FA","#E7F0FE","#C0C8D8","#FFF5E5","#8A4B08"};
-        var resources=Application.Current.Resources;var keys=new[]{"Surface","Page","Ink","Muted","Line","Raised","Selected","InputLine","WarningSurface","WarningInk"};for(var i=0;i<keys.Length;i++)resources[keys[i]]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(colors[i]));
-        resources["Accent"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#60A5FA":"#3B82F6"));resources["AccentInk"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#0B1220":"#FFFFFF"));resources["SelectionInk"]=resources["Ink"];resources["ErrorInk"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#F87171":"#EF4444"));
-        resources["AccentSoft"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#7CB8FC":"#60A5FA"));resources["AccentPressed"]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?"#3B82F6":"#2563EB"));
-        foreach(var (key,color) in new[]{("PreviewPage","#191B20"),("PreviewSurface","#0F1116"),("PreviewLine","#34373F"),("PreviewInk","#D7DBE2"),("PreviewMuted","#A5ABB6")})resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
-        // Rail status tokens: the three dots and the rail surface keep their own light/dark pair so the rail reads as one layer below Page.
-        foreach(var (key,darkColor,lightColor) in new[]{("StatusOk","#4ADE80","#22C55E"),("StatusOff","#6B7280","#9AA3B2"),("StatusBad","#F87171","#EF4444"),("RailSurface","#171A21","#EDF1F8")})resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?darkColor:lightColor));
-        // Per-agent identity colors (variant C); dark uses brightened tints so badges stay legible on dark surfaces.
-        foreach(var (key,darkColor,lightColor) in new[]{("AgentCodex","#4ADE80","#22C55E"),("AgentOmp","#FBBF24","#F59E0B")})resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark?darkColor:lightColor));
+        var resources=Application.Current.Resources;
+        var palette=dark?ThemeTokens.Dark:ThemeTokens.Light;
+        void Set(string key,string color)=>resources[key]=new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
+        Set("Page",palette.Page);
+        Set("Surface",palette.Surface);
+        Set("HeaderSurface",palette.Header);
+        Set("Line",palette.Line);
+        Set("Ink",palette.Ink);
+        Set("Muted",palette.Muted);
+        Set("Accent",palette.Accent);
+        Set("StatusOk",palette.StatusOk);
+        Set("StatusWait",palette.StatusWait);
+        Set("StatusBad",palette.StatusBad);
+        Set("ErrorInk",palette.StatusBad);
+        Set("WarningInk",palette.StatusWait);
+        Set("Raised",dark?"#232733":"#F0F3FA");
+        Set("Selected",dark?"#1E2A3F":"#E7F0FE");
+        Set("ChipSelected",dark?"#152033":palette.Surface);
+        Set("InputLine",dark?"#3A4150":"#C0C8D8");
+        Set("WarningSurface",dark?"#3D3120":"#FFF5E5");
+        Set("AccentInk",dark?"#0B1220":"#FFFFFF");
+        Set("AccentSoft",dark?"#7CB8FC":"#60A5FA");
+        Set("AccentPressed",dark?"#3B82F6":"#2563EB");
+        resources["SelectionInk"]=resources["Ink"];
+        foreach(var (key,color) in new[]{("PreviewPage","#191B20"),("PreviewSurface","#0F1116"),("PreviewLine","#34373F"),("PreviewInk","#D7DBE2"),("PreviewMuted","#A5ABB6")})Set(key,color);
+        Set("StatusOff",dark?"#6B7280":"#9AA3B2");
+        Set("RailSurface",dark?"#171A21":"#EDF1F8");
+        foreach(var (key,darkColor,lightColor) in new[]{("AgentPi","#60A5FA","#3B82F6"),("AgentKimi","#A78BFA","#8B5CF6"),("AgentQoder","#2DD4BF","#14B8A6"),("AgentCodex","#4ADE80","#22C55E"),("AgentOmp","#FBBF24","#F59E0B")})Set(key,dark?darkColor:lightColor);
         var shadow=new System.Windows.Media.Effects.DropShadowEffect{BlurRadius=14,ShadowDepth=2,Opacity=dark?0.35:0.10,Color=(Color)ColorConverter.ConvertFromString(dark?"#000000":"#1F2937")};shadow.Freeze();resources["CardShadow"]=shadow;
         if(SystemParameters.HighContrast)
         {
-            foreach(var key in new[]{"Surface","Page","PreviewPage","PreviewSurface","WarningSurface","RailSurface"})resources[key]=SystemColors.WindowBrush;
-            foreach(var key in new[]{"Ink","Muted","Line","InputLine","WarningInk","ErrorInk","PreviewInk","PreviewMuted","PreviewLine","StatusOk","StatusOff","StatusBad"})resources[key]=SystemColors.WindowTextBrush;
+            foreach(var key in new[]{"Surface","Page","PreviewPage","PreviewSurface","WarningSurface","RailSurface","HeaderSurface","ChipSelected"})resources[key]=SystemColors.WindowBrush;
+            foreach(var key in new[]{"Ink","Muted","Line","InputLine","WarningInk","ErrorInk","PreviewInk","PreviewMuted","PreviewLine","StatusOk","StatusOff","StatusBad","StatusWait"})resources[key]=SystemColors.WindowTextBrush;
             resources["Raised"]=SystemColors.ControlBrush;resources["Selected"]=SystemColors.HighlightBrush;resources["Accent"]=SystemColors.HighlightBrush;resources["AccentSoft"]=SystemColors.HighlightBrush;resources["AccentPressed"]=SystemColors.HighlightBrush;resources["AccentInk"]=SystemColors.HighlightTextBrush;resources["SelectionInk"]=SystemColors.HighlightTextBrush;
         }
         SetResourceReference(BackgroundProperty,"Page");SetResourceReference(ForegroundProperty,"Ink");ErrorText.SetResourceReference(TextBlock.ForegroundProperty,"ErrorInk");LaunchHint.SetResourceReference(TextBlock.ForegroundProperty,LaunchHintState().Key);
