@@ -76,7 +76,7 @@ public partial class MainWindow
             var remotesWindow=OpenNamed("管理远程主机（VPS）",()=>more.ContextMenu!.Items.OfType<MenuItem>().Single(item=>item.Header as string=="远程主机（VPS）").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)));
             var settingsWindow=OpenNamed("设置",()=>ReviewFind<Button>(this).First(button=>Equals(button.Content,"设置")&&button.IsVisible).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
             check("ACC-U04 advanced controls remain reachable", moreHeaders.Contains("工作目录") && moreHeaders.Contains("资源设置") && moreHeaders.Contains("远程主机（VPS）") && moreHeaders.Contains("恢复与诊断") && moreHeaders.Contains("运行历史与导出") && moreHeaders.Contains("恢复备份") && moreHeaders.Contains("目录方式") && moreHeaders.Contains("管理组合") && workspacesOpened && templatesWindow is { } && remotesWindow is { } && settingsWindow is { });
-            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("qoder.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "qoder");
+            var plan = new LaunchItem(Guid.NewGuid(), Guid.NewGuid(), 1, "恢复检查", Store.Root, new(Store.Root, "ui-test"), false, new("omp.exe", [], "exe"), 4 * ResourcePolicy.GiB, AgentId: "omp");
             var entry = new ControlEntry { Plan = plan, State = "Started", Detail = "已启动进程；" + ToolRecovery.BlockedMarker + "整机余量不足" };
             status = new(true, "guard-ui", [entry], sample);RenderSessionsNow();
             check("ACC-U05 a denied live tool offers a copy-only recovery action", ReviewFind<System.Windows.Controls.Button>(ActiveSessions).Any(button => Equals(button.Content, "复制继续提示")));
